@@ -1,0 +1,15 @@
+[workspace]
+members = ["crates/*"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+authors = ["The AgoraDB Authors"]
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+thiserror = "1"
+memmap2 = "0.9"
+uuid = { version = "1", features = ["v4"] }

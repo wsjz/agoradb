@@ -1,0 +1,27 @@
+[package]
+name = "agoradb-storage"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+agoradb-core = { path = "../agoradb-core" }
+agoradb-vfs = { path = "../agoradb-vfs" }
+agoradb-catalog = { path = "../agoradb-catalog" }
+arrow = "57"
+arrow-array = "57"
+arrow-schema = "57"
+arrow-select = "57"
+bytes = "1"
+futures = "0.3"
+iceberg = "0.9"
+parquet = { version = "57", features = ["arrow", "zstd"] }
+tokio = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+tokio-test = "0.4"
+agoradb-vfs = { path = "../agoradb-vfs" }
+futures = "0.3"
