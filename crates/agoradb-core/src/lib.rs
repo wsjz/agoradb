@@ -17,7 +17,7 @@ pub mod error;
 pub mod space;
 
 pub use constants::*;
-pub use error::{AgoraError, CatalogError, CompactionError, StorageError, VfsError};
+pub use error::{AgoraError, CatalogError, CompactionError, ExecutionError, StorageError, VfsError};
 pub use space::{Mode, SpaceUri, StorageStrategy};
 
 /// Supported VFS backend schemes.

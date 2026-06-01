@@ -29,11 +29,33 @@ pub enum AgoraError {
     #[error("Compaction error: {0}")]
     Compaction(#[from] CompactionError),
 
+    #[error("Execution error: {0}")]
+    Execution(#[from] ExecutionError),
+
     #[error("Invalid space URI: {0}")]
     InvalidSpaceUri(String),
 
     #[error("Invalid argument: {0}")]
     InvalidArgument(String),
+
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+}
+
+/// Errors originating from the query execution engine.
+#[derive(Error, Debug)]
+pub enum ExecutionError {
+    #[error("Operator error: {0}")]
+    OperatorError(String),
+
+    #[error("Type mismatch: expected {expected}, got {actual}")]
+    TypeMismatch { expected: String, actual: String },
+
+    #[error("Column not found: {0}")]
+    ColumnNotFound(String),
+
+    #[error("Catalog error: {0}")]
+    Catalog(#[from] CatalogError),
 
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
