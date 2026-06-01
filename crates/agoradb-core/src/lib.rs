@@ -14,15 +14,17 @@
 
 pub mod constants;
 pub mod error;
-pub mod plan;
+pub mod operator;
 pub mod space;
+pub mod stage;
 
 pub use constants::*;
 pub use error::{
     AgoraError, CatalogError, CompactionError, ExecutionError, StorageError, VfsError,
 };
-pub use plan::{AggFunction, BinaryOp, JoinType, PhysicalExpr, PhysicalPlan};
-pub use space::{Mode, SpaceUri, StorageStrategy};
+pub use operator::{AggFunction, BinaryOp, DataType, JoinType, OperatorDef, PredicateDef};
+pub use space::{Mode, SpaceUri};
+pub use stage::{Stage, StagePlan, StageTask};
 
 /// A unit of parallel work — a fixed-size row range within a single Parquet file.
 /// The scheduler assigns morsels to worker threads. Default size: 10K rows.

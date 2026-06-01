@@ -48,18 +48,6 @@ impl fmt::Display for SpaceUri {
     }
 }
 
-/// Storage strategy for a space.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StorageStrategy {
-    Browser,
-    Disk,
-    S3,
-    BrowserDisk,
-    BrowserS3,
-    DiskS3,
-    All,
-}
-
 /// Mode of a space.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {

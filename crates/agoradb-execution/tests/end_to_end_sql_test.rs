@@ -13,10 +13,12 @@
 // limitations under the License.
 
 use agoradb_catalog::AgoraCatalog;
-use agoradb_execution::runner::run_physical_plan;
-use agoradb_logical::{Analyzer, DataType, SchemaProvider};
-use agoradb_physical::PhysicalPlanner;
-use agoradb_sql::SqlParser;
+use agoradb_execution::executor::Executor;
+use agoradb_query::logical::analyzer::{Analyzer, SchemaProvider};
+use agoradb_query::logical::plan::DataType;
+use agoradb_query::parser::SqlParser;
+use agoradb_query::physical::planner::PhysicalPlanner;
+use agoradb_query::StageBuilder;
 use agoradb_storage::StorageEngine;
 use arrow_array::{ArrayRef, Int64Array, RecordBatch, StringArray};
 use arrow_schema::{DataType as ArrowDataType, Field, Schema};
@@ -76,7 +78,7 @@ fn create_test_schema_provider(
     TestSchemaProvider { schemas }
 }
 
-/// Run the full pipeline: SQL -> Parser -> Analyzer -> Planner -> Runner
+/// Run the full pipeline: SQL -> Parser -> Analyzer -> Planner -> StageBuilder -> Executor
 async fn run_sql_pipeline(
     sql: &str,
     catalog: &Arc<AgoraCatalog>,
@@ -95,8 +97,13 @@ async fn run_sql_pipeline(
     let planner = PhysicalPlanner::new();
     let physical_plan = planner.plan(&logical_plan, schema_map)?;
 
-    // 4. Execute -> DataChunks
-    run_physical_plan(&physical_plan, catalog, schema_map).await
+    // 4. StageBuilder -> StagePlan
+    let stage_builder = StageBuilder::new();
+    let stage_plan = stage_builder.build(&physical_plan)?;
+
+    // 5. Execute -> DataChunks
+    let executor = Executor;
+    executor.execute(&stage_plan, catalog).await
 }
 
 // ============================================================================

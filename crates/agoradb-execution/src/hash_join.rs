@@ -1,11 +1,28 @@
-use crate::chunk::{ColumnVector, DataChunk, DataType};
+// Copyright 2025 The AgoraDB Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use crate::chunk::{ColumnVector, DataChunk};
+use agoradb_core::DataType;
 use crate::operator::Operator;
-use agoradb_core::ExecutionError;
+use agoradb_core::{ExecutionError, JoinType};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum JoinKey {
     Int64(i64),
+    Float64(u64), // bit-pattern for deterministic hashing
+    Boolean(bool),
     Utf8(String),
 }
 
@@ -14,12 +31,6 @@ enum JoinState {
     Building,
     Probing,
     Done,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum JoinType {
-    Inner,
-    Left,
 }
 
 pub struct HashJoinOperator {
@@ -62,6 +73,25 @@ impl HashJoinOperator {
                         .push(base_idx + i);
                 }
             }
+            DataType::Float64 => {
+                let slice = unsafe {
+                    std::slice::from_raw_parts(key_col.data.as_ptr() as *const f64, key_col.len)
+                };
+                for (i, &key) in slice.iter().enumerate() {
+                    self.build_table
+                        .entry(JoinKey::Float64(key.to_bits()))
+                        .or_default()
+                        .push(base_idx + i);
+                }
+            }
+            DataType::Boolean => {
+                for (i, &key) in key_col.data[..key_col.len].iter().enumerate() {
+                    self.build_table
+                        .entry(JoinKey::Boolean(key != 0))
+                        .or_default()
+                        .push(base_idx + i);
+                }
+            }
             DataType::Utf8 => {
                 let keys = key_col.as_utf8_slice();
                 for (i, key) in keys.iter().enumerate() {
@@ -71,7 +101,6 @@ impl HashJoinOperator {
                         .push(base_idx + i);
                 }
             }
-            _ => panic!("Unsupported join key type: {:?}", key_col.data_type),
         }
         self.build_chunks.push(chunk);
     }
@@ -85,17 +114,24 @@ impl HashJoinOperator {
                     self.probe_key(JoinKey::Int64(key), row, &chunk)?;
                 }
             }
+            DataType::Float64 => {
+                let slice = unsafe {
+                    std::slice::from_raw_parts(right_key_col.data.as_ptr() as *const f64, right_key_col.len)
+                };
+                for (row, &key) in slice.iter().enumerate() {
+                    self.probe_key(JoinKey::Float64(key.to_bits()), row, &chunk)?;
+                }
+            }
+            DataType::Boolean => {
+                for (row, &key) in right_key_col.data[..right_key_col.len].iter().enumerate() {
+                    self.probe_key(JoinKey::Boolean(key != 0), row, &chunk)?;
+                }
+            }
             DataType::Utf8 => {
                 let keys = right_key_col.as_utf8_slice();
                 for (row, key) in keys.iter().enumerate() {
                     self.probe_key(JoinKey::Utf8(key.to_string()), row, &chunk)?;
                 }
-            }
-            _ => {
-                return Err(ExecutionError::OperatorError(format!(
-                    "Unsupported probe key type: {:?}",
-                    right_key_col.data_type
-                )))
             }
         }
         Ok(())

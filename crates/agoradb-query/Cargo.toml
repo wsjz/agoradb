@@ -1,9 +1,12 @@
 [package]
-name = "agoradb-logical"
+name = "agoradb-query"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
 agoradb-core = { path = "../agoradb-core" }
+sqlparser = "0.54"
 thiserror = { workspace = true }
+
+[dev-dependencies]

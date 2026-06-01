@@ -40,4 +40,14 @@ pub trait StorageScanProvider: Send + Sync {
         snapshot_id: i64,
         morsel_size: usize,
     ) -> Result<Vec<Morsel>, CatalogError>;
+
+    /// Read a single morsel (Parquet file, or row range within it).
+    ///
+    /// Returns a vector of RecordBatches — one per row group in the file.
+    /// If the morsel specifies `row_count > 0`, only rows within the
+    /// `[row_start, row_start + row_count)` range are returned.
+    async fn read_morsel(
+        &self,
+        morsel: &Morsel,
+    ) -> Result<Vec<arrow_array::RecordBatch>, CatalogError>;
 }

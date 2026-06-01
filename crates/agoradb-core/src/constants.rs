@@ -12,6 +12,4 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub const DEFAULT_ROW_GROUP_SIZE: usize = 128 * 1024 * 1024;
 pub const APPEND_BUFFER_FLUSH_THRESHOLD_ROWS: usize = 10_000;
-pub const APPEND_BUFFER_FLUSH_THRESHOLD_SECS: u64 = 30;

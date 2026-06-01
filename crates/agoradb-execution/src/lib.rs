@@ -12,26 +12,30 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod adapters;
 pub mod chunk;
+pub mod executor;
 pub mod filter;
 pub mod hash_aggregate;
 pub mod hash_join;
 pub mod limit;
 pub mod operator;
-pub mod parallel;
-pub mod pipeline;
+pub mod morsel_scheduler;
+pub mod parallel_executor;
+pub mod pipeline_builder;
+pub mod predicate_builder;
 pub mod project;
-pub mod runner;
 pub mod scan;
 
-pub use chunk::{ColumnVector, DataChunk, DataType};
+pub use agoradb_core::DataType;
+pub use chunk::{ColumnVector, DataChunk};
+pub use executor::Executor;
 pub use filter::{FilterOperator, PredicateFn};
-pub use hash_aggregate::{AggFunc, HashAggregateOperator};
+pub use hash_aggregate::HashAggregateOperator;
 pub use hash_join::HashJoinOperator;
 pub use limit::LimitOperator;
-pub use operator::{Operator, SinkOperator};
-pub use parallel::{MorselScheduler, ParallelExecutor};
-pub use pipeline::{Pipeline, QueryExecutor};
+pub use morsel_scheduler::MorselScheduler;
+pub use operator::Operator;
+pub use parallel_executor::ParallelExecutor;
 pub use project::ProjectOperator;
-pub use runner::run_physical_plan;
 pub use scan::ScanOperator;

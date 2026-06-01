@@ -18,8 +18,6 @@ iceberg = "0.9"
 tokio = { workspace = true }
 agoradb-storage = { path = "../agoradb-storage" }
 agoradb-vfs = { path = "../agoradb-vfs" }
-agoradb-sql = { path = "../agoradb-sql" }
-agoradb-logical = { path = "../agoradb-logical" }
-agoradb-physical = { path = "../agoradb-physical" }
+agoradb-query = { path = "../agoradb-query" }
 iceberg = "0.9"
 tempfile = "3"

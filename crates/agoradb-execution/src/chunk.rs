@@ -12,17 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use agoradb_core::ExecutionError;
+use agoradb_core::{DataType, ExecutionError};
 use arrow_array::Array;
-
-/// Supported data types for ColumnVector.
-#[derive(Debug, Clone, PartialEq)]
-pub enum DataType {
-    Int64,
-    Float64,
-    Boolean,
-    Utf8,
-}
 
 /// A column of data — the core computational unit.
 pub struct ColumnVector {
@@ -119,6 +110,43 @@ impl ColumnVector {
             capacity: self.capacity,
         }
     }
+
+    /// Create a new ColumnVector containing only rows in [start, end).
+    pub fn slice_rows(&self, start: usize, end: usize) -> Self {
+        let count = end - start;
+        let mut new = Self::new(self.data_type.clone(), count);
+        match self.data_type {
+            DataType::Int64 => {
+                let slice = self.as_i64_slice();
+                for i in start..end {
+                    new.push_i64(slice[i]);
+                    new.validity[new.len - 1] = self.validity[i];
+                }
+            }
+            DataType::Float64 => {
+                let slice = unsafe {
+                    std::slice::from_raw_parts(self.data.as_ptr() as *const f64, self.len)
+                };
+                for i in start..end {
+                    new.push_f64(slice[i]);
+                    new.validity[new.len - 1] = self.validity[i];
+                }
+            }
+            DataType::Boolean => {
+                for i in start..end {
+                    new.push_bool(self.data[i] != 0);
+                    new.validity[new.len - 1] = self.validity[i];
+                }
+            }
+            DataType::Utf8 => {
+                for i in start..end {
+                    new.push_utf8(&self.strings[i]);
+                    new.validity[new.len - 1] = self.validity[i];
+                }
+            }
+        }
+        new
+    }
 }
 
 /// A batch of rows — passed between operators in the pipeline.
@@ -148,6 +176,12 @@ impl DataChunk {
             columns,
             len: self.len,
         }
+    }
+
+    /// Create a new DataChunk containing only rows in [start, end).
+    pub fn slice_rows(&self, start: usize, end: usize) -> Self {
+        let columns = self.columns.iter().map(|c| c.slice_rows(start, end)).collect();
+        Self::new(columns)
     }
 
     /// Convert from Arrow RecordBatch (used at IO boundary).

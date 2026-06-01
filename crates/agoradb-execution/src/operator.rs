@@ -28,7 +28,3 @@ pub trait Operator: Send {
     fn set_output(&mut self, output: Box<dyn Operator>);
 }
 
-/// An Operator that also acts as a sink (collects results).
-pub trait SinkOperator: Operator {
-    fn collect(self) -> Result<Vec<DataChunk>, ExecutionError>;
-}

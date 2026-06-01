@@ -108,7 +108,7 @@ async fn test_end_to_end_select_where() {
         .unwrap();
     let snapshot_id = table.metadata().current_snapshot().unwrap().snapshot_id();
 
-    // 3. Build operator chain: Scan → Filter(id > 1) → Project([id]) → Collect
+    // 3. Build operator pipeline: Scan → Filter(id > 1) → Project([id]) → Collect
     let results = Arc::new(Mutex::new(Vec::new()));
 
     let mut project = ProjectOperator::new(vec![0]);

@@ -1,9 +1,24 @@
-use crate::plan::{AggFunction, BinaryOp as PhysicalBinOp, JoinType, PhysicalExpr, PhysicalPlan};
-use agoradb_core::{ExecutionError, SpaceUri};
-use agoradb_logical::plan::{
+// Copyright 2025 The AgoraDB Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use crate::logical::plan::{
     AggFunction as LogicalAggFunction, BinaryOp as LogicalBinOp, JoinType as LogicalJoinType,
     LogicalExpr, LogicalPlan,
 };
+use crate::physical::plan::{PhysicalExpr, PhysicalPlan};
+use agoradb_core::{AggFunction, BinaryOp as PhysicalBinOp, JoinType};
+use agoradb_core::{ExecutionError, SpaceUri};
 use std::collections::HashMap;
 
 pub struct PhysicalPlanner;
@@ -182,24 +197,20 @@ impl PhysicalPlanner {
         match expr {
             LogicalExpr::Column(name) => {
                 if name == "*" {
-                    Ok(PhysicalExpr::Column(0))
+                    Err(ExecutionError::OperatorError(
+                        "Wildcard '*' should be resolved before physical planning".to_string(),
+                    ))
                 } else {
-                    let idx = schema_map.get(name).copied().unwrap_or(0);
+                    let idx = schema_map.get(name).copied().ok_or_else(|| {
+                        ExecutionError::OperatorError(format!(
+                            "Column '{}' not found in schema",
+                            name
+                        ))
+                    })?;
                     Ok(PhysicalExpr::Column(idx))
                 }
             }
-            LogicalExpr::Literal(val) => match val {
-                agoradb_logical::plan::LiteralValue::Int64(v) => Ok(PhysicalExpr::Literal(*v)),
-                agoradb_logical::plan::LiteralValue::Float64(v) => {
-                    Ok(PhysicalExpr::Literal(*v as i64))
-                }
-                agoradb_logical::plan::LiteralValue::Boolean(v) => {
-                    Ok(PhysicalExpr::Literal(if *v { 1 } else { 0 }))
-                }
-                _ => Err(ExecutionError::OperatorError(
-                    "Unsupported literal type in physical planner".to_string(),
-                )),
-            },
+            LogicalExpr::Literal(val) => Ok(PhysicalExpr::Literal(val.clone())),
             LogicalExpr::BinaryOp { op, left, right } => {
                 let physical_op = match op {
                     LogicalBinOp::Eq => PhysicalBinOp::Eq,

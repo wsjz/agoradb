@@ -12,9 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod catalog;
-pub mod parquet_util;
-pub mod scan_provider;
+pub mod execution_plan;
+pub mod logical;
+pub mod parser;
+pub mod physical;
 
-pub use catalog::AgoraCatalog;
-pub use scan_provider::StorageScanProvider;
+pub use execution_plan::StageBuilder;
+pub use physical::plan::{PhysicalExpr, PhysicalPlan};

@@ -1,38 +1,12 @@
 use crate::chunk::DataChunk;
+use crate::morsel_scheduler::MorselScheduler;
 use agoradb_core::{ExecutionError, Morsel};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-
-/// A work-stealing scheduler that distributes morsels to worker threads.
-/// Each thread calls `next()` to get the next unit of work.
-pub struct MorselScheduler {
-    morsels: Vec<Morsel>,
-    next_index: AtomicUsize,
-}
-
-impl MorselScheduler {
-    pub fn new(morsels: Vec<Morsel>) -> Self {
-        Self {
-            morsels,
-            next_index: AtomicUsize::new(0),
-        }
-    }
-
-    /// Pull the next morsel. Returns None when all work is consumed.
-    pub fn next(&self) -> Option<Morsel> {
-        let idx = self.next_index.fetch_add(1, Ordering::Relaxed);
-        self.morsels.get(idx).cloned()
-    }
-
-    pub fn total(&self) -> usize {
-        self.morsels.len()
-    }
-}
 
 /// Execute a pipeline in parallel across multiple worker threads.
 ///
-/// Each worker pulls morsels from the scheduler, builds its own operator chain,
-/// reads the morsel data, and pushes it through the chain.
+/// Each worker pulls morsels from the scheduler, builds its own operator pipeline,
+/// reads the morsel data, and pushes it through the pipeline.
 pub struct ParallelExecutor;
 
 impl ParallelExecutor {
@@ -81,33 +55,8 @@ impl ParallelExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_scheduler_basic() {
-        let scheduler = MorselScheduler::new(vec![
-            Morsel {
-                file_path: "a.parquet".to_string(),
-                row_start: 0,
-                row_count: 10000,
-            },
-            Morsel {
-                file_path: "b.parquet".to_string(),
-                row_start: 0,
-                row_count: 10000,
-            },
-            Morsel {
-                file_path: "c.parquet".to_string(),
-                row_start: 0,
-                row_count: 10000,
-            },
-        ]);
-
-        assert_eq!(scheduler.total(), 3);
-        assert!(scheduler.next().is_some());
-        assert!(scheduler.next().is_some());
-        assert!(scheduler.next().is_some());
-        assert!(scheduler.next().is_none());
-    }
+    use crate::chunk::{ColumnVector, DataChunk};
+    use agoradb_core::DataType;
 
     #[tokio::test]
     async fn test_parallel_executor() {
@@ -127,7 +76,7 @@ mod tests {
         let results = ParallelExecutor::execute(scheduler, 2, |morsel| async move {
             // Simulate work: return a DataChunk with row_count rows
             let mut col =
-                crate::chunk::ColumnVector::new(crate::chunk::DataType::Int64, morsel.row_count);
+                ColumnVector::new(DataType::Int64, morsel.row_count);
             for i in 0..morsel.row_count {
                 col.push_i64(i as i64);
             }

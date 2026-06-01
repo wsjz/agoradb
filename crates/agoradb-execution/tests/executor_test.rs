@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use agoradb_catalog::AgoraCatalog;
-use agoradb_core::{AggFunction, BinaryOp, JoinType};
+use agoradb_core::{AggFunction, BinaryOp, JoinType, OperatorDef, PredicateDef, Stage, StagePlan, StageTask};
 use agoradb_core::SpaceUri;
 use agoradb_execution::executor::Executor;
 use agoradb_query::{PhysicalExpr, PhysicalPlan, StageBuilder};
@@ -26,24 +26,35 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 // ============================================================================
-// Test 1: Scan → Filter → Project
+// Helpers
 // ============================================================================
 
-#[tokio::test]
-async fn test_runner_scan_filter_project() {
+async fn setup_catalog() -> (Arc<AgoraCatalog>, tempfile::TempDir) {
     let temp_dir = tempfile::tempdir().unwrap();
     let root_path = temp_dir.path().to_str().unwrap().to_string();
     let file_io = FileIO::new_with_fs();
     let catalog = Arc::new(AgoraCatalog::new(file_io, &root_path));
 
     catalog
-        .create_namespace(&NamespaceIdent::new("default".to_string()),
+        .create_namespace(
+            &NamespaceIdent::new("default".to_string()),
             HashMap::new(),
         )
         .await
         .unwrap();
 
-    // Create table with schema [id: Int64]
+    (catalog, temp_dir)
+}
+
+// ============================================================================
+// Test 1: Pipeline stage — Scan → Filter → Project
+// ============================================================================
+
+#[tokio::test]
+async fn test_executor_pipeline_scan_filter_project() {
+    let (catalog, temp_dir) = setup_catalog().await;
+
+    // Create table
     let iceberg_schema = iceberg::spec::Schema::builder()
         .with_fields(vec![iceberg::spec::NestedField::required(
             1,
@@ -87,7 +98,7 @@ async fn test_runner_scan_filter_project() {
 
     // Build PhysicalPlan: Project([0]) → Filter(id > 1) → Scan(test_table)
     let space = SpaceUri::parse("space://did:agora:test/test_table").unwrap();
-    let plan = PhysicalPlan::Project {
+    let physical_plan = PhysicalPlan::Project {
         expressions: vec![PhysicalExpr::Column(0)],
         input: Box::new(PhysicalPlan::Filter {
             predicate: PhysicalExpr::BinaryOp {
@@ -103,9 +114,16 @@ async fn test_runner_scan_filter_project() {
         }),
     };
 
-    // Build StagePlan and execute
+    // Build StagePlan via StageBuilder
     let builder = StageBuilder::new();
-    let stage_plan = builder.build(&plan).unwrap();
+    let stage_plan = builder.build(&physical_plan).unwrap();
+    assert_eq!(stage_plan.stages.len(), 1);
+    assert!(
+        matches!(stage_plan.stages[0].task, agoradb_core::StageTask::Pipeline { .. }),
+        "Expected Pipeline"
+    );
+
+    // Execute via Executor
     let executor = Executor;
     let chunks = executor.execute(&stage_plan, &catalog).await.unwrap();
 
@@ -116,22 +134,12 @@ async fn test_runner_scan_filter_project() {
 }
 
 // ============================================================================
-// Test 2: HashJoin
+// Test 2: HashJoin — build + probe stages
 // ============================================================================
 
 #[tokio::test]
-async fn test_runner_hash_join() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let root_path = temp_dir.path().to_str().unwrap().to_string();
-    let file_io = FileIO::new_with_fs();
-    let catalog = Arc::new(AgoraCatalog::new(file_io, &root_path));
-
-    catalog
-        .create_namespace(&NamespaceIdent::new("default".to_string()),
-            HashMap::new(),
-        )
-        .await
-        .unwrap();
+async fn test_executor_hash_join() {
+    let (catalog, temp_dir) = setup_catalog().await;
 
     // Create "orders" table (id: Int64, cid: Int64)
     let orders_iceberg_schema = iceberg::spec::Schema::builder()
@@ -152,13 +160,14 @@ async fn test_runner_hash_join() {
         .build()
         .unwrap();
 
-    let orders_creation = iceberg::TableCreation::builder()
-        .name("orders".to_string())
-        .schema(orders_iceberg_schema)
-        .build();
-
     catalog
-        .create_table(&NamespaceIdent::new("default".to_string()), orders_creation)
+        .create_table(
+            &NamespaceIdent::new("default".to_string()),
+            iceberg::TableCreation::builder()
+                .name("orders".to_string())
+                .schema(orders_iceberg_schema)
+                .build(),
+        )
         .await
         .unwrap();
 
@@ -181,13 +190,14 @@ async fn test_runner_hash_join() {
         .build()
         .unwrap();
 
-    let customers_creation = iceberg::TableCreation::builder()
-        .name("customers".to_string())
-        .schema(customers_iceberg_schema)
-        .build();
-
     catalog
-        .create_table(&NamespaceIdent::new("default".to_string()), customers_creation)
+        .create_table(
+            &NamespaceIdent::new("default".to_string()),
+            iceberg::TableCreation::builder()
+                .name("customers".to_string())
+                .schema(customers_iceberg_schema)
+                .build(),
+        )
         .await
         .unwrap();
 
@@ -241,7 +251,7 @@ async fn test_runner_hash_join() {
     let orders_space = SpaceUri::parse("space://did:agora:test/orders").unwrap();
     let customers_space = SpaceUri::parse("space://did:agora:test/customers").unwrap();
 
-    let plan = PhysicalPlan::HashJoin {
+    let physical_plan = PhysicalPlan::HashJoin {
         left: Box::new(PhysicalPlan::Scan {
             space: orders_space,
             projection: None,
@@ -257,16 +267,35 @@ async fn test_runner_hash_join() {
         join_type: JoinType::Inner,
     };
 
-    // Execute
+    // Build StagePlan
     let builder = StageBuilder::new();
-    let stage_plan = builder.build(&plan).unwrap();
+    let stage_plan = builder.build(&physical_plan).unwrap();
+    assert_eq!(stage_plan.stages.len(), 2);
+    assert!(
+        matches!(
+            stage_plan.stages[0].task,
+            agoradb_core::StageTask::HashJoinBuild { .. }
+        ),
+        "Expected HashJoinBuild"
+    );
+    assert!(
+        matches!(
+            stage_plan.stages[1].task,
+            agoradb_core::StageTask::HashJoinProbe { .. }
+        ),
+        "Expected HashJoinProbe"
+    );
+    assert_eq!(stage_plan.stages[1].dependencies, vec![0]);
+
+    // Execute
     let executor = Executor;
     let chunks = executor.execute(&stage_plan, &catalog).await.unwrap();
 
-    // Verify: 3 rows joined
+    // Verify: 3 joined rows
     let total_rows: usize = chunks.iter().map(|c| c.len).sum();
     assert_eq!(total_rows, 3, "Expected 3 joined rows");
 
+    // Collect all rows
     let mut all_ids = Vec::new();
     let mut all_cids = Vec::new();
     let mut all_customer_ids = Vec::new();
@@ -281,6 +310,7 @@ async fn test_runner_hash_join() {
         }
     }
 
+    // Verify all 3 expected joined rows
     assert!(all_ids.contains(&1));
     assert!(all_ids.contains(&2));
     assert!(all_ids.contains(&3));
@@ -302,22 +332,12 @@ async fn test_runner_hash_join() {
 }
 
 // ============================================================================
-// Test 3: HashAggregate
+// Test 3: HashAggregate — accumulate + emit stages
 // ============================================================================
 
 #[tokio::test]
-async fn test_runner_hash_aggregate() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let root_path = temp_dir.path().to_str().unwrap().to_string();
-    let file_io = FileIO::new_with_fs();
-    let catalog = Arc::new(AgoraCatalog::new(file_io, &root_path));
-
-    catalog
-        .create_namespace(&NamespaceIdent::new("default".to_string()),
-            HashMap::new(),
-        )
-        .await
-        .unwrap();
+async fn test_executor_hash_aggregate() {
+    let (catalog, temp_dir) = setup_catalog().await;
 
     // Create "sales" table (region: Utf8, amount: Int64)
     let sales_iceberg_schema = iceberg::spec::Schema::builder()
@@ -338,13 +358,14 @@ async fn test_runner_hash_aggregate() {
         .build()
         .unwrap();
 
-    let sales_creation = iceberg::TableCreation::builder()
-        .name("sales".to_string())
-        .schema(sales_iceberg_schema)
-        .build();
-
     catalog
-        .create_table(&NamespaceIdent::new("default".to_string()), sales_creation)
+        .create_table(
+            &NamespaceIdent::new("default".to_string()),
+            iceberg::TableCreation::builder()
+                .name("sales".to_string())
+                .schema(sales_iceberg_schema)
+                .build(),
+        )
         .await
         .unwrap();
 
@@ -374,7 +395,7 @@ async fn test_runner_hash_aggregate() {
     // Build PhysicalPlan: HashAggregate
     let sales_space = SpaceUri::parse("space://did:agora:test/sales").unwrap();
 
-    let plan = PhysicalPlan::HashAggregate {
+    let physical_plan = PhysicalPlan::HashAggregate {
         input: Box::new(PhysicalPlan::Scan {
             space: sales_space,
             projection: None,
@@ -384,9 +405,27 @@ async fn test_runner_hash_aggregate() {
         agg_exprs: vec![(PhysicalExpr::Column(1), AggFunction::Sum)],
     };
 
-    // Execute
+    // Build StagePlan
     let builder = StageBuilder::new();
-    let stage_plan = builder.build(&plan).unwrap();
+    let stage_plan = builder.build(&physical_plan).unwrap();
+    assert_eq!(stage_plan.stages.len(), 2);
+    assert!(
+        matches!(
+            stage_plan.stages[0].task,
+            agoradb_core::StageTask::AggregateAccumulate { .. }
+        ),
+        "Expected AggregateAccumulate"
+    );
+    assert!(
+        matches!(
+            stage_plan.stages[1].task,
+            agoradb_core::StageTask::AggregateEmit { .. }
+        ),
+        "Expected AggregateEmit"
+    );
+    assert_eq!(stage_plan.stages[1].dependencies, vec![0]);
+
+    // Execute
     let executor = Executor;
     let chunks = executor.execute(&stage_plan, &catalog).await.unwrap();
 
@@ -411,4 +450,109 @@ async fn test_runner_hash_aggregate() {
     let eu_idx = all_regions.iter().position(|r| r == "EU").unwrap();
     assert_eq!(all_sums[us_idx], 300, "US sum should be 100 + 200 = 300");
     assert_eq!(all_sums[eu_idx], 150, "EU sum should be 150");
+}
+
+// ============================================================================
+// Test 4: Parallel pipeline — Scan → Filter with parallelism > 1
+// ============================================================================
+
+#[tokio::test]
+async fn test_executor_parallel_pipeline() {
+    let (catalog, _temp_dir) = setup_catalog().await;
+
+    // Create table
+    let iceberg_schema = iceberg::spec::Schema::builder()
+        .with_fields(vec![iceberg::spec::NestedField::required(
+            1,
+            "id",
+            iceberg::spec::Type::Primitive(iceberg::spec::PrimitiveType::Long),
+        )
+        .into()])
+        .build()
+        .unwrap();
+
+    let table_creation = iceberg::TableCreation::builder()
+        .name("parallel_table".to_string())
+        .schema(iceberg_schema)
+        .build();
+
+    catalog
+        .create_table(&NamespaceIdent::new("default".to_string()), table_creation)
+        .await
+        .unwrap();
+
+    // Write two batches via two flushes (creates two parquet files)
+    let arrow_schema = Arc::new(Schema::new(vec![Field::new(
+        "id",
+        ArrowDataType::Int64,
+        false,
+    )]));
+    let mut engine = StorageEngine::new(
+        catalog.clone(),
+        arrow_schema.clone(),
+        _temp_dir.path().to_path_buf(),
+        "parallel_table".to_string(),
+    );
+
+    // Batch 1: [1, 2, 3]
+    let batch1 = RecordBatch::try_new(
+        arrow_schema.clone(),
+        vec![Arc::new(Int64Array::from(vec![1, 2, 3])) as ArrayRef],
+    )
+    .unwrap();
+    engine.append(batch1).await.unwrap();
+    engine.flush().await.unwrap();
+
+    // Batch 2: [4, 5, 6]
+    let batch2 = RecordBatch::try_new(
+        arrow_schema.clone(),
+        vec![Arc::new(Int64Array::from(vec![4, 5, 6])) as ArrayRef],
+    )
+    .unwrap();
+    engine.append(batch2).await.unwrap();
+    engine.flush().await.unwrap();
+
+    // Build a StagePlan with forced parallelism = 2
+    let space = SpaceUri::parse("space://did:agora:test/parallel_table").unwrap();
+    let stage_plan = StagePlan {
+        stages: vec![Stage {
+            id: 0,
+            label: "parallel_pipeline".to_string(),
+            dependencies: vec![],
+            parallelism: 2, // Force parallel execution
+            task: StageTask::Pipeline {
+                operators: vec![
+                    OperatorDef::Scan {
+                        space: space.clone(),
+                        projection: None,
+                        filter: None,
+                    },
+                    OperatorDef::Filter {
+                        predicate: PredicateDef::Gt {
+                            column: 0,
+                            value: 2,
+                        },
+                    },
+                ],
+            },
+        }],
+    };
+
+    // Execute via Executor
+    let executor = Executor;
+    let chunks = executor.execute(&stage_plan, &catalog).await.unwrap();
+
+    // Verify: 4 rows (id = 3, 4, 5, 6)
+    let total_rows: usize = chunks.iter().map(|c| c.len).sum();
+    assert_eq!(total_rows, 4, "Expected 4 rows (id > 2)");
+
+    // Collect all ids
+    let mut all_ids: Vec<i64> = Vec::new();
+    for chunk in &chunks {
+        for row in 0..chunk.len {
+            all_ids.push(chunk.columns[0].as_i64_slice()[row]);
+        }
+    }
+    all_ids.sort();
+    assert_eq!(all_ids, vec![3, 4, 5, 6]);
 }

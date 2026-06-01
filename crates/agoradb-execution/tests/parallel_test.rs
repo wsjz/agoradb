@@ -17,7 +17,7 @@ use agoradb_core::SpaceUri;
 use agoradb_execution::chunk::DataChunk;
 use agoradb_execution::filter::{FilterOperator, PredicateFn};
 use agoradb_execution::operator::Operator;
-use agoradb_execution::parallel::{MorselScheduler, ParallelExecutor};
+use agoradb_execution::{MorselScheduler, ParallelExecutor};
 use agoradb_execution::project::ProjectOperator;
 use agoradb_execution::scan::ScanOperator;
 use agoradb_storage::StorageEngine;

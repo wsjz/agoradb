@@ -15,9 +15,7 @@
 pub mod file_read;
 pub mod file_write;
 pub mod storage;
-pub mod vfs;
 
 pub use file_read::OpenDalFileRead;
 pub use file_write::OpenDalFileWrite;
 pub use storage::{OpenDalStorage, OpenDalStorageConfig, OpenDalStorageFactory};
-pub use vfs::{Vfs, VfsConfig};

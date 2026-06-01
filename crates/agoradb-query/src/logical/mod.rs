@@ -12,9 +12,5 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod catalog;
-pub mod parquet_util;
-pub mod scan_provider;
-
-pub use catalog::AgoraCatalog;
-pub use scan_provider::StorageScanProvider;
+pub mod analyzer;
+pub mod plan;

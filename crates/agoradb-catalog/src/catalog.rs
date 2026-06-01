@@ -628,27 +628,52 @@ impl StorageScanProvider for AgoraCatalog {
         &self,
         _space: &SpaceUri,
         _snapshot_id: i64,
-        _morsel_size: usize,
+        morsel_size: usize,
     ) -> std::result::Result<Vec<Morsel>, CatalogError> {
-        // Phase 1a: Simplified — return one morsel per Parquet file.
-        // Phase 1b: Read Parquet footer, split each row group into fixed-size morsels.
         let data_dir = format!("{}/data", self.root_path);
         let mut morsels = Vec::new();
 
         if let Ok(entries) = std::fs::read_dir(&data_dir) {
             for entry in entries.filter_map(|e| e.ok()) {
                 let path = entry.path().to_string_lossy().to_string();
-                if path.ends_with(".parquet") {
+                if !path.ends_with(".parquet") {
+                    continue;
+                }
+
+                let total_rows = match crate::parquet_util::parquet_row_count(&path) {
+                    Ok(n) => n,
+                    Err(e) => {
+                        eprintln!("Warning: failed to read parquet footer for {path}: {e}");
+                        continue;
+                    }
+                };
+
+                if total_rows == 0 {
+                    continue;
+                }
+
+                let chunk_size = if morsel_size == 0 { 10_000 } else { morsel_size };
+                let mut row_start = 0usize;
+                while row_start < total_rows {
+                    let row_count = chunk_size.min(total_rows - row_start);
                     morsels.push(Morsel {
-                        file_path: path,
-                        row_start: 0,
-                        row_count: 0, // TODO: read actual row count from Parquet footer
+                        file_path: path.clone(),
+                        row_start,
+                        row_count,
                     });
+                    row_start += row_count;
                 }
             }
         }
 
         Ok(morsels)
+    }
+
+    async fn read_morsel(
+        &self,
+        morsel: &Morsel,
+    ) -> std::result::Result<Vec<arrow_array::RecordBatch>, CatalogError> {
+        crate::parquet_util::read_morsel(morsel).await
     }
 }
 
