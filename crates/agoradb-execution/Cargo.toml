@@ -1,0 +1,25 @@
+[package]
+name = "agoradb-execution"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+agoradb-core = { path = "../agoradb-core" }
+agoradb-catalog = { path = "../agoradb-catalog" }
+arrow-array = "57"
+arrow-schema = "57"
+thiserror = { workspace = true }
+futures = "0.3"
+tokio = { workspace = true }
+iceberg = "0.9"
+
+[dev-dependencies]
+tokio = { workspace = true }
+agoradb-storage = { path = "../agoradb-storage" }
+agoradb-vfs = { path = "../agoradb-vfs" }
+agoradb-sql = { path = "../agoradb-sql" }
+agoradb-logical = { path = "../agoradb-logical" }
+agoradb-physical = { path = "../agoradb-physical" }
+iceberg = "0.9"
+tempfile = "3"

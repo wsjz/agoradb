@@ -1,0 +1,9 @@
+[package]
+name = "agoradb-logical"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+agoradb-core = { path = "../agoradb-core" }
+thiserror = { workspace = true }

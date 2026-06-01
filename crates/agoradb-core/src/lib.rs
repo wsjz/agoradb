@@ -14,11 +14,24 @@
 
 pub mod constants;
 pub mod error;
+pub mod plan;
 pub mod space;
 
 pub use constants::*;
-pub use error::{AgoraError, CatalogError, CompactionError, ExecutionError, StorageError, VfsError};
+pub use error::{
+    AgoraError, CatalogError, CompactionError, ExecutionError, StorageError, VfsError,
+};
+pub use plan::{AggFunction, BinaryOp, JoinType, PhysicalExpr, PhysicalPlan};
 pub use space::{Mode, SpaceUri, StorageStrategy};
+
+/// A unit of parallel work — a fixed-size row range within a single Parquet file.
+/// The scheduler assigns morsels to worker threads. Default size: 10K rows.
+#[derive(Debug, Clone)]
+pub struct Morsel {
+    pub file_path: String,
+    pub row_start: usize,
+    pub row_count: usize,
+}
 
 /// Supported VFS backend schemes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

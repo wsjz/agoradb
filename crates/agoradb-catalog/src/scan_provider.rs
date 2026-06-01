@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use agoradb_core::{CatalogError, SpaceUri};
+use agoradb_core::{CatalogError, Morsel, SpaceUri};
 use async_trait::async_trait;
 use iceberg::expr::Predicate;
 use iceberg::scan::ArrowRecordBatchStream;
@@ -29,4 +29,15 @@ pub trait StorageScanProvider: Send + Sync {
         snapshot_id: i64,
         filter: Option<Predicate>,
     ) -> Result<ArrowRecordBatchStream, CatalogError>;
+
+    /// Return all morsels for parallel execution.
+    ///
+    /// Each morsel is a fixed-size (default 10K rows) row range within a single
+    /// Parquet file. The caller distributes morsels to worker threads.
+    async fn list_morsels(
+        &self,
+        space: &SpaceUri,
+        snapshot_id: i64,
+        morsel_size: usize,
+    ) -> Result<Vec<Morsel>, CatalogError>;
 }

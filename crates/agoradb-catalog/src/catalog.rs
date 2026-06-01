@@ -587,7 +587,7 @@ impl Catalog for AgoraCatalog {
 }
 
 use crate::scan_provider::StorageScanProvider;
-use agoradb_core::{CatalogError, SpaceUri};
+use agoradb_core::{CatalogError, Morsel, SpaceUri};
 use iceberg::expr::Predicate;
 
 #[async_trait]
@@ -622,6 +622,33 @@ impl StorageScanProvider for AgoraCatalog {
         scan.to_arrow()
             .await
             .map_err(|e| CatalogError::Iceberg(e.to_string()))
+    }
+
+    async fn list_morsels(
+        &self,
+        _space: &SpaceUri,
+        _snapshot_id: i64,
+        _morsel_size: usize,
+    ) -> std::result::Result<Vec<Morsel>, CatalogError> {
+        // Phase 1a: Simplified — return one morsel per Parquet file.
+        // Phase 1b: Read Parquet footer, split each row group into fixed-size morsels.
+        let data_dir = format!("{}/data", self.root_path);
+        let mut morsels = Vec::new();
+
+        if let Ok(entries) = std::fs::read_dir(&data_dir) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                let path = entry.path().to_string_lossy().to_string();
+                if path.ends_with(".parquet") {
+                    morsels.push(Morsel {
+                        file_path: path,
+                        row_start: 0,
+                        row_count: 0, // TODO: read actual row count from Parquet footer
+                    });
+                }
+            }
+        }
+
+        Ok(morsels)
     }
 }
 
