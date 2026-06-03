@@ -556,27 +556,64 @@ impl Catalog for AgoraCatalog {
     }
 
     /// Update a table in the catalog.
+    ///
+    /// Uses optimistic concurrency control: no locks are held during read/apply.
+    /// After writing the new metadata file we re-read the latest metadata to
+    /// verify our write won the race.  If another commit raced ahead we delete
+    /// our stale file and return a retryable error so the caller (typically
+    /// [`Transaction::commit`]) can re-try with the updated state.
     async fn update_table(&self, commit: TableCommit) -> Result<Table> {
         let table_ident = commit.identifier().clone();
 
-        // Load current table
+        // 1. Optimistic read — no lock.
         let current_table = self.load_table(&table_ident).await?;
 
-        // Apply commit
+        // 2. Apply commit (validates requirements, e.g. snapshot-id match).
         let staged_table = commit.apply(current_table)?;
 
-        // Write new metadata
+        // 3. Build the new metadata file path.
         let metadata_location = staged_table.metadata_location_result()?;
         let new_metadata_location = MetadataLocation::from_str(metadata_location)?
             .with_next_version()
             .to_string();
 
+        // 4. Write the new metadata file.
         staged_table
             .metadata()
             .write_to(staged_table.file_io(), &new_metadata_location)
             .await?;
 
-        // Build updated table
+        // 5. Verify: did our write win the race?
+        let latest_table = self.load_table(&table_ident).await?;
+        let latest_location = latest_table
+            .metadata_location()
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+
+        if latest_location != new_metadata_location {
+            // We lost the race — another commit wrote a newer metadata file.
+            // Clean up our stale file and signal the caller to retry.
+            let _ = self
+                .file_io
+                .delete(&new_metadata_location)
+                .await
+                .map_err(|e| {
+                    eprintln!(
+                        "Warning: failed to delete stale metadata file {}: {}",
+                        new_metadata_location, e
+                    );
+                });
+            return Err(Error::new(
+                ErrorKind::CatalogCommitConflicts,
+                format!(
+                    "Concurrent modification detected on table {}: expected latest metadata to be {}, but found {}",
+                    table_ident, new_metadata_location, latest_location
+                ),
+            )
+            .with_retryable(true));
+        }
+
+        // 6. Our write won — return the updated table.
         Table::builder()
             .file_io(self.file_io.clone())
             .metadata(staged_table.metadata().clone())
@@ -588,6 +625,7 @@ impl Catalog for AgoraCatalog {
 
 use crate::scan_provider::StorageScanProvider;
 use agoradb_core::{CatalogError, Morsel, SpaceUri};
+use futures::StreamExt;
 use iceberg::expr::Predicate;
 
 #[async_trait]
@@ -626,43 +664,60 @@ impl StorageScanProvider for AgoraCatalog {
 
     async fn list_morsels(
         &self,
-        _space: &SpaceUri,
-        _snapshot_id: i64,
+        space: &SpaceUri,
+        snapshot_id: i64,
         morsel_size: usize,
     ) -> std::result::Result<Vec<Morsel>, CatalogError> {
-        let data_dir = format!("{}/data", self.root_path);
+        let table_ident = TableIdent::from_strs(["default", &space.name])
+            .map_err(|e| CatalogError::Iceberg(e.to_string()))?;
+
+        let table = self
+            .load_table(&table_ident)
+            .await
+            .map_err(|e| CatalogError::Iceberg(e.to_string()))?;
+
+        let scan = table
+            .scan()
+            .snapshot_id(snapshot_id)
+            .build()
+            .map_err(|e| CatalogError::Iceberg(e.to_string()))?;
+
+        let mut task_stream = scan
+            .plan_files()
+            .await
+            .map_err(|e| CatalogError::Iceberg(e.to_string()))?;
+
+        let chunk_size = if morsel_size == 0 { 10_000 } else { morsel_size };
         let mut morsels = Vec::new();
 
-        if let Ok(entries) = std::fs::read_dir(&data_dir) {
-            for entry in entries.filter_map(|e| e.ok()) {
-                let path = entry.path().to_string_lossy().to_string();
-                if !path.ends_with(".parquet") {
-                    continue;
-                }
+        while let Some(result) = task_stream.next().await {
+            let task = result.map_err(|e| CatalogError::Iceberg(e.to_string()))?;
+            let path = task.data_file_path().to_string();
 
-                let total_rows = match crate::parquet_util::parquet_row_count(&path) {
-                    Ok(n) => n,
-                    Err(e) => {
-                        eprintln!("Warning: failed to read parquet footer for {path}: {e}");
-                        continue;
-                    }
-                };
+            // record_count comes from Iceberg metadata; fall back to reading
+            // the Parquet footer when the metadata field is absent.
+            let total_rows = match task.record_count {
+                Some(n) => n as usize,
+                None => crate::parquet_util::parquet_row_count(&path).map_err(|e| {
+                    CatalogError::Iceberg(format!(
+                        "missing record_count and failed to read parquet footer for {path}: {e}"
+                    ))
+                })?,
+            };
 
-                if total_rows == 0 {
-                    continue;
-                }
+            if total_rows == 0 {
+                continue;
+            }
 
-                let chunk_size = if morsel_size == 0 { 10_000 } else { morsel_size };
-                let mut row_start = 0usize;
-                while row_start < total_rows {
-                    let row_count = chunk_size.min(total_rows - row_start);
-                    morsels.push(Morsel {
-                        file_path: path.clone(),
-                        row_start,
-                        row_count,
-                    });
-                    row_start += row_count;
-                }
+            let mut row_start = 0usize;
+            while row_start < total_rows {
+                let row_count = chunk_size.min(total_rows - row_start);
+                morsels.push(Morsel {
+                    file_path: path.clone(),
+                    row_start,
+                    row_count,
+                });
+                row_start += row_count;
             }
         }
 

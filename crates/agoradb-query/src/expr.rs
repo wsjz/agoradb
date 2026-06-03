@@ -12,12 +12,29 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod execution_plan;
-pub mod expr;
-pub mod logical;
-pub mod parser;
-pub mod physical;
+pub use agoradb_core::DataType;
 
-pub use execution_plan::StageBuilder;
-pub use expr::{BinaryOp, LiteralValue};
-pub use physical::plan::{PhysicalExpr, PhysicalPlan};
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BinaryOp {
+    Eq,
+    Neq,
+    Lt,
+    LtEq,
+    Gt,
+    GtEq,
+    And,
+    Or,
+    Add,
+    Sub,
+    Mul,
+    Div,
+}
+
+#[derive(Debug, Clone)]
+pub enum LiteralValue {
+    Int64(i64),
+    Float64(f64),
+    Boolean(bool),
+    String(String),
+    Null,
+}

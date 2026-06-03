@@ -1,3 +1,5 @@
 .worktrees/
 target/
+.idea
+docs
 Cargo.lock

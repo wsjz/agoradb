@@ -13,9 +13,9 @@
 // limitations under the License.
 
 use agoradb_query::logical::plan::{
-    AggFunction as LogicalAgg, BinaryOp as LogicalBinOp, JoinType as LogicalJoinType, LogicalExpr,
-    LogicalPlan,
+    AggFunction as LogicalAgg, JoinType as LogicalJoinType, LogicalExpr, LogicalPlan,
 };
+use agoradb_query::BinaryOp as LogicalBinOp;
 use agoradb_query::physical::planner::PhysicalPlanner;
 use std::collections::HashMap;
 

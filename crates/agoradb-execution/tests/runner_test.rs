@@ -13,10 +13,10 @@
 // limitations under the License.
 
 use agoradb_catalog::AgoraCatalog;
-use agoradb_core::{AggFunction, BinaryOp, JoinType};
+use agoradb_core::{AggFunction, JoinType};
 use agoradb_core::SpaceUri;
 use agoradb_execution::executor::Executor;
-use agoradb_query::{PhysicalExpr, PhysicalPlan, StageBuilder};
+use agoradb_query::{BinaryOp, PhysicalExpr, PhysicalPlan, StageBuilder};
 use agoradb_storage::StorageEngine;
 use arrow_array::{ArrayRef, Int64Array, RecordBatch, StringArray};
 use arrow_schema::{DataType as ArrowDataType, Field, Schema};
@@ -93,7 +93,7 @@ async fn test_runner_scan_filter_project() {
             predicate: PhysicalExpr::BinaryOp {
                 op: BinaryOp::Gt,
                 left: Box::new(PhysicalExpr::Column(0)),
-                right: Box::new(PhysicalExpr::Literal(agoradb_query::physical::plan::LiteralValue::Int64(1))),
+                right: Box::new(PhysicalExpr::Literal(agoradb_query::LiteralValue::Int64(1))),
             },
             input: Box::new(PhysicalPlan::Scan {
                 space,

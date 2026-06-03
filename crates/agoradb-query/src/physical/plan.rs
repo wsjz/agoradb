@@ -12,8 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use agoradb_core::{AggFunction, BinaryOp, JoinType};
+use agoradb_core::{AggFunction, JoinType};
 use agoradb_core::SpaceUri;
+use crate::{BinaryOp, LiteralValue};
 
 /// A physical query plan — the output of the PhysicalPlanner.
 ///
@@ -46,6 +47,10 @@ pub enum PhysicalPlan {
         group_exprs: Vec<PhysicalExpr>,
         agg_exprs: Vec<(PhysicalExpr, AggFunction)>,
     },
+    Sort {
+        expressions: Vec<(PhysicalExpr, agoradb_core::SortDirection)>,
+        input: Box<PhysicalPlan>,
+    },
     Limit {
         skip: usize,
         fetch: usize,
@@ -65,4 +70,3 @@ pub enum PhysicalExpr {
     },
 }
 
-pub use crate::logical::plan::LiteralValue;

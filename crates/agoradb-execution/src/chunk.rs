@@ -16,6 +16,7 @@ use agoradb_core::{DataType, ExecutionError};
 use arrow_array::Array;
 
 /// A column of data — the core computational unit.
+#[derive(Clone)]
 pub struct ColumnVector {
     pub data_type: DataType,
     pub validity: Vec<bool>,  // true = valid (not null)
@@ -150,6 +151,7 @@ impl ColumnVector {
 }
 
 /// A batch of rows — passed between operators in the pipeline.
+#[derive(Clone)]
 pub struct DataChunk {
     pub columns: Vec<ColumnVector>,
     pub len: usize,
@@ -182,6 +184,58 @@ impl DataChunk {
     pub fn slice_rows(&self, start: usize, end: usize) -> Self {
         let columns = self.columns.iter().map(|c| c.slice_rows(start, end)).collect();
         Self::new(columns)
+    }
+
+    /// Append another DataChunk to this one, merging columns row-wise.
+    pub fn append_chunk(&mut self, other: DataChunk) -> Result<(), ExecutionError> {
+        if self.columns.is_empty() {
+            *self = other;
+            return Ok(());
+        }
+        if self.columns.len() != other.columns.len() {
+            return Err(ExecutionError::OperatorError(format!(
+                "Cannot append chunks with different column counts: {} vs {}",
+                self.columns.len(),
+                other.columns.len()
+            )));
+        }
+        for (self_col, other_col) in self.columns.iter_mut().zip(other.columns.iter()) {
+            if self_col.data_type != other_col.data_type {
+                return Err(ExecutionError::OperatorError(format!(
+                    "Cannot append chunks with different column types"
+                )));
+            }
+            match self_col.data_type {
+                DataType::Int64 => {
+                    for &v in other_col.as_i64_slice() {
+                        self_col.push_i64(v);
+                    }
+                }
+                DataType::Float64 => {
+                    let slice = unsafe {
+                        std::slice::from_raw_parts(other_col.data.as_ptr() as *const f64, other_col.len)
+                    };
+                    for &v in slice {
+                        self_col.push_f64(v);
+                    }
+                }
+                DataType::Boolean => {
+                    for i in 0..other_col.len {
+                        self_col.push_bool(other_col.data[i] != 0);
+                    }
+                }
+                DataType::Utf8 => {
+                    for s in &other_col.strings {
+                        self_col.push_utf8(s);
+                    }
+                }
+            }
+            // Extend validity
+            self_col.validity.truncate(self_col.len - other_col.len);
+            self_col.validity.extend_from_slice(&other_col.validity[..other_col.len]);
+        }
+        self.len += other.len;
+        Ok(())
     }
 
     /// Convert from Arrow RecordBatch (used at IO boundary).

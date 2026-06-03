@@ -47,7 +47,7 @@ fn test_parse_select_where() {
             agoradb_query::logical::plan::LogicalPlan::Filter { predicate, input } => {
                 match predicate {
                     agoradb_query::logical::plan::LogicalExpr::BinaryOp { op, .. } => {
-                        assert!(matches!(op, agoradb_query::logical::plan::BinaryOp::Gt));
+                        assert!(matches!(op, agoradb_query::BinaryOp::Gt));
                     }
                     _ => panic!("Expected binary op, got {:?}", predicate),
                 }

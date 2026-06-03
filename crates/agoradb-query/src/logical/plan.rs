@@ -12,7 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub use agoradb_core::{AggFunction, BinaryOp, DataType, JoinType};
+pub use agoradb_core::{AggFunction, DataType, JoinType, SortDirection};
+use crate::{BinaryOp, LiteralValue};
 
 #[derive(Debug, Clone)]
 pub enum LogicalPlan {
@@ -39,6 +40,10 @@ pub enum LogicalPlan {
         group_by: Vec<LogicalExpr>,
         aggregates: Vec<(String, AggFunction, LogicalExpr)>,
     },
+    Sort {
+        expressions: Vec<(LogicalExpr, SortDirection)>,
+        input: Box<LogicalPlan>,
+    },
     Limit {
         skip: usize,
         fetch: usize,
@@ -61,11 +66,3 @@ pub enum LogicalExpr {
     },
 }
 
-#[derive(Debug, Clone)]
-pub enum LiteralValue {
-    Int64(i64),
-    Float64(f64),
-    Boolean(bool),
-    String(String),
-    Null,
-}

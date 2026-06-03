@@ -22,9 +22,12 @@ pub use constants::*;
 pub use error::{
     AgoraError, CatalogError, CompactionError, ExecutionError, StorageError, VfsError,
 };
-pub use operator::{AggFunction, BinaryOp, DataType, JoinType, OperatorDef, PredicateDef};
+pub use operator::{AggFunction, DataType, JoinType, OperatorSpec, PredicateDef};
 pub use space::{Mode, SpaceUri};
-pub use stage::{Stage, StagePlan, StageTask};
+pub use stage::{
+    ExchangeSpec, ExchangeType, ExecutionPlan, GlobalStateId, Partitioning, PipelineId, SortDirection,
+    Stage, StageId, StagePlan,
+};
 
 /// A unit of parallel work — a fixed-size row range within a single Parquet file.
 /// The scheduler assigns morsels to worker threads. Default size: 10K rows.

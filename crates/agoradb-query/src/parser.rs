@@ -12,9 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::logical::plan::{
-    AggFunction, BinaryOp, JoinType, LiteralValue, LogicalExpr, LogicalPlan,
-};
+use crate::logical::plan::{AggFunction, JoinType, LogicalExpr, LogicalPlan};
+use crate::{BinaryOp, LiteralValue};
 use agoradb_core::ExecutionError;
 use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::Parser;
@@ -107,7 +106,23 @@ impl SqlParser {
             }
         }
 
-        // ORDER BY (Phase 1c: ignored for now — would add Sort operator)
+        // ORDER BY → Sort (before Limit)
+        if let Some(order_by) = query.order_by.as_ref() {
+            let mut sort_exprs = Vec::new();
+            for ob in &order_by.exprs {
+                let expr = self.expr_to_logical(&ob.expr)?;
+                let direction = match ob.asc {
+                    Some(true) | None => crate::logical::plan::SortDirection::Asc,
+                    Some(false) => crate::logical::plan::SortDirection::Desc,
+                };
+                sort_exprs.push((expr, direction));
+            }
+            plan = LogicalPlan::Sort {
+                expressions: sort_exprs,
+                input: Box::new(plan),
+            };
+        }
+
         // LIMIT → Limit
         if let Some(limit) = &query.limit {
             let fetch = match limit {

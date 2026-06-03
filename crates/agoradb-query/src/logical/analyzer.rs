@@ -117,6 +117,13 @@ impl Analyzer {
                 let input_schema = self.analyze_plan(input, provider)?;
                 Ok(input_schema)
             }
+            LogicalPlan::Sort { expressions, input } => {
+                let input_schema = self.analyze_plan(input, provider)?;
+                for (expr, _) in expressions {
+                    self.validate_expr(expr, &input_schema)?;
+                }
+                Ok(input_schema)
+            }
         }
     }
 
@@ -158,11 +165,11 @@ impl Analyzer {
                 .cloned()
                 .ok_or_else(|| ExecutionError::ColumnNotFound(name.clone())),
             LogicalExpr::Literal(val) => match val {
-                crate::logical::plan::LiteralValue::Int64(_) => Ok(DataType::Int64),
-                crate::logical::plan::LiteralValue::Float64(_) => Ok(DataType::Float64),
-                crate::logical::plan::LiteralValue::Boolean(_) => Ok(DataType::Boolean),
-                crate::logical::plan::LiteralValue::String(_) => Ok(DataType::Utf8),
-                crate::logical::plan::LiteralValue::Null => Ok(DataType::Int64), // simplified
+                crate::LiteralValue::Int64(_) => Ok(DataType::Int64),
+                crate::LiteralValue::Float64(_) => Ok(DataType::Float64),
+                crate::LiteralValue::Boolean(_) => Ok(DataType::Boolean),
+                crate::LiteralValue::String(_) => Ok(DataType::Utf8),
+                crate::LiteralValue::Null => Ok(DataType::Int64), // simplified
             },
             LogicalExpr::BinaryOp { .. } => Ok(DataType::Boolean),
             LogicalExpr::Function { .. } => Ok(DataType::Int64),

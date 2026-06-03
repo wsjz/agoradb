@@ -647,3 +647,115 @@ async fn test_e2e_join_aggregate() {
     );
     assert_eq!(all_sums[bob_idx], 200, "Bob sum should be 200");
 }
+
+// ============================================================================
+// Test 5: ORDER BY
+// ============================================================================
+
+#[tokio::test]
+async fn test_e2e_order_by() {
+    let (catalog, temp_dir) = setup_catalog().await;
+
+    // Create "scores" table (id, score)
+    let scores_iceberg_schema = iceberg::spec::Schema::builder()
+        .with_fields(vec![
+            iceberg::spec::NestedField::required(
+                1,
+                "id",
+                iceberg::spec::Type::Primitive(iceberg::spec::PrimitiveType::Long),
+            )
+            .into(),
+            iceberg::spec::NestedField::required(
+                2,
+                "score",
+                iceberg::spec::Type::Primitive(iceberg::spec::PrimitiveType::Long),
+            )
+            .into(),
+        ])
+        .build()
+        .unwrap();
+
+    catalog
+        .create_table(
+            &NamespaceIdent::new("default".to_string()),
+            iceberg::TableCreation::builder()
+                .name("scores".to_string())
+                .schema(scores_iceberg_schema)
+                .build(),
+        )
+        .await
+        .unwrap();
+
+    // Write data: [(1, 30), (2, 50), (3, 20), (4, 40)]
+    let scores_arrow_schema = Arc::new(Schema::new(vec![
+        Field::new("id", ArrowDataType::Int64, false),
+        Field::new("score", ArrowDataType::Int64, false),
+    ]));
+    let mut scores_engine = StorageEngine::new(
+        catalog.clone(),
+        scores_arrow_schema.clone(),
+        temp_dir.path().to_path_buf(),
+        "scores".to_string(),
+    );
+
+    let scores_batch = RecordBatch::try_new(
+        scores_arrow_schema.clone(),
+        vec![
+            Arc::new(Int64Array::from(vec![1, 2, 3, 4])) as ArrayRef,
+            Arc::new(Int64Array::from(vec![30, 50, 20, 40])) as ArrayRef,
+        ],
+    )
+    .unwrap();
+    scores_engine.append(scores_batch).await.unwrap();
+    scores_engine.flush().await.unwrap();
+
+    // Schema provider
+    let schema_provider = create_test_schema_provider(vec![(
+        "scores",
+        vec![("id", DataType::Int64), ("score", DataType::Int64)],
+    )]);
+
+    // Schema map
+    let mut schema_map = HashMap::new();
+    schema_map.insert("id".to_string(), 0);
+    schema_map.insert("score".to_string(), 1);
+
+    // Test ORDER BY ASC
+    let sql = "SELECT id, score FROM scores ORDER BY score";
+    let chunks = run_sql_pipeline(sql, &catalog, &schema_provider, &schema_map)
+        .await
+        .unwrap();
+
+    let total_rows: usize = chunks.iter().map(|c| c.len).sum();
+    assert_eq!(total_rows, 4, "Expected 4 rows");
+
+    let mut all_ids = Vec::new();
+    let mut all_scores = Vec::new();
+    for chunk in &chunks {
+        for row in 0..chunk.len {
+            all_ids.push(chunk.columns[0].as_i64_slice()[row]);
+            all_scores.push(chunk.columns[1].as_i64_slice()[row]);
+        }
+    }
+
+    assert_eq!(all_scores, vec![20, 30, 40, 50]);
+    assert_eq!(all_ids, vec![3, 1, 4, 2]);
+
+    // Test ORDER BY DESC
+    let sql = "SELECT id, score FROM scores ORDER BY score DESC";
+    let chunks = run_sql_pipeline(sql, &catalog, &schema_provider, &schema_map)
+        .await
+        .unwrap();
+
+    let mut all_ids = Vec::new();
+    let mut all_scores = Vec::new();
+    for chunk in &chunks {
+        for row in 0..chunk.len {
+            all_ids.push(chunk.columns[0].as_i64_slice()[row]);
+            all_scores.push(chunk.columns[1].as_i64_slice()[row]);
+        }
+    }
+
+    assert_eq!(all_scores, vec![50, 40, 30, 20]);
+    assert_eq!(all_ids, vec![2, 4, 1, 3]);
+}

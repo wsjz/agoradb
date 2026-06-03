@@ -23,22 +23,6 @@ pub enum DataType {
     Utf8,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub enum BinaryOp {
-    Eq,
-    Neq,
-    Lt,
-    LtEq,
-    Gt,
-    GtEq,
-    And,
-    Or,
-    Add,
-    Sub,
-    Mul,
-    Div,
-}
-
 #[derive(Debug, Clone)]
 pub enum JoinType {
     Inner,
@@ -57,7 +41,7 @@ pub enum AggFunction {
 }
 
 /// A predicate definition — serializable, self-contained filter expression.
-/// Used by [`OperatorDef::Filter`] and [`OperatorDef::Scan`].
+/// Used by [`OperatorSpec::Filter`] and [`OperatorSpec::Scan`].
 #[derive(Debug, Clone)]
 pub enum PredicateDef {
     Eq { column: usize, value: i64 },
@@ -74,7 +58,7 @@ pub enum PredicateDef {
 /// in a pipeline.  The [`Executor`] builds the actual runtime operator from
 /// this definition.
 #[derive(Debug, Clone)]
-pub enum OperatorDef {
+pub enum OperatorSpec {
     /// Read data from a table (space).
     Scan {
         space: SpaceUri,

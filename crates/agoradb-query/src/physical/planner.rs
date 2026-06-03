@@ -13,11 +13,11 @@
 // limitations under the License.
 
 use crate::logical::plan::{
-    AggFunction as LogicalAggFunction, BinaryOp as LogicalBinOp, JoinType as LogicalJoinType,
-    LogicalExpr, LogicalPlan,
+    AggFunction as LogicalAggFunction, JoinType as LogicalJoinType, LogicalExpr, LogicalPlan,
 };
 use crate::physical::plan::{PhysicalExpr, PhysicalPlan};
-use agoradb_core::{AggFunction, BinaryOp as PhysicalBinOp, JoinType};
+use crate::BinaryOp;
+use agoradb_core::{AggFunction, JoinType};
 use agoradb_core::{ExecutionError, SpaceUri};
 use std::collections::HashMap;
 
@@ -145,6 +145,18 @@ impl PhysicalPlanner {
                     agg_exprs: agg_exprs?,
                 })
             }
+            LogicalPlan::Sort { expressions, input } => {
+                let physical_input = self.plan_inner(input, schema_map)?;
+                let mut physical_exprs = Vec::new();
+                for (expr, dir) in expressions {
+                    let physical_expr = self.expr_to_physical(expr, schema_map)?;
+                    physical_exprs.push((physical_expr, *dir));
+                }
+                Ok(PhysicalPlan::Sort {
+                    expressions: physical_exprs,
+                    input: Box::new(physical_input),
+                })
+            }
             LogicalPlan::Limit { skip, fetch, input } => {
                 let physical_input = self.plan_inner(input, schema_map)?;
                 Ok(PhysicalPlan::Limit {
@@ -163,7 +175,7 @@ impl PhysicalPlanner {
     ) -> Result<Option<(usize, usize)>, ExecutionError> {
         match condition {
             LogicalExpr::BinaryOp {
-                op: LogicalBinOp::Eq,
+                op: BinaryOp::Eq,
                 left,
                 right,
             } => {
@@ -213,14 +225,14 @@ impl PhysicalPlanner {
             LogicalExpr::Literal(val) => Ok(PhysicalExpr::Literal(val.clone())),
             LogicalExpr::BinaryOp { op, left, right } => {
                 let physical_op = match op {
-                    LogicalBinOp::Eq => PhysicalBinOp::Eq,
-                    LogicalBinOp::Neq => PhysicalBinOp::Neq,
-                    LogicalBinOp::Lt => PhysicalBinOp::Lt,
-                    LogicalBinOp::LtEq => PhysicalBinOp::LtEq,
-                    LogicalBinOp::Gt => PhysicalBinOp::Gt,
-                    LogicalBinOp::GtEq => PhysicalBinOp::GtEq,
-                    LogicalBinOp::And => PhysicalBinOp::And,
-                    LogicalBinOp::Or => PhysicalBinOp::Or,
+                    BinaryOp::Eq => BinaryOp::Eq,
+                    BinaryOp::Neq => BinaryOp::Neq,
+                    BinaryOp::Lt => BinaryOp::Lt,
+                    BinaryOp::LtEq => BinaryOp::LtEq,
+                    BinaryOp::Gt => BinaryOp::Gt,
+                    BinaryOp::GtEq => BinaryOp::GtEq,
+                    BinaryOp::And => BinaryOp::And,
+                    BinaryOp::Or => BinaryOp::Or,
                     _ => {
                         return Err(ExecutionError::OperatorError(format!(
                             "Unsupported binary op: {:?}",

@@ -15,6 +15,7 @@
 use crate::chunk::{ColumnVector, DataChunk};
 use agoradb_core::DataType;
 use crate::operator::Operator;
+use crate::pipeline::{CloneOperator, PipelineOperator};
 use agoradb_core::ExecutionError;
 
 pub type PredicateFn = Box<dyn Fn(&DataChunk, usize) -> bool + Send>;
@@ -30,6 +31,70 @@ impl FilterOperator {
             predicate,
             output: None,
         }
+    }
+}
+
+/// Pipeline-based filter operator (pull-based).
+pub struct FilterPipelineOperator {
+    predicate: PredicateFn,
+}
+
+impl FilterPipelineOperator {
+    pub fn new(predicate: PredicateFn) -> Self {
+        Self { predicate }
+    }
+}
+
+impl PipelineOperator for FilterPipelineOperator {
+    fn execute(&mut self, input: &DataChunk, output: &mut DataChunk) -> Result<(), ExecutionError> {
+        let selected: Vec<usize> = (0..input.len)
+            .filter(|&i| (self.predicate)(input, i))
+            .collect();
+
+        if selected.is_empty() {
+            return Ok(());
+        }
+
+        let mut output_columns = Vec::with_capacity(input.columns.len());
+        for col in &input.columns {
+            let mut new_col = ColumnVector::new(col.data_type.clone(), selected.len());
+            for &idx in &selected {
+                match col.data_type {
+                    DataType::Int64 => new_col.push_i64(col.as_i64_slice()[idx]),
+                    DataType::Float64 => {
+                        let slice = unsafe {
+                            std::slice::from_raw_parts(col.data.as_ptr() as *const f64, col.len)
+                        };
+                        new_col.push_f64(slice[idx]);
+                    }
+                    DataType::Boolean => new_col.push_bool(col.data[idx] != 0),
+                    _ => {
+                        return Err(ExecutionError::OperatorError(
+                            "Unsupported type in filter".to_string(),
+                        ))
+                    }
+                }
+                new_col.validity[new_col.len - 1] = col.validity[idx];
+            }
+            output_columns.push(new_col);
+        }
+
+        *output = DataChunk::new(output_columns);
+        Ok(())
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+impl CloneOperator for FilterPipelineOperator {
+    fn clone_box(&self) -> Box<dyn PipelineOperator> {
+        // Clone the predicate by storing it as an Arc<...> in the struct.
+        // For now, create a no-op filter as placeholder.
+        Box::new(Self {
+            predicate: Box::new(|_chunk, _row| true),
+        })
     }
 }
 

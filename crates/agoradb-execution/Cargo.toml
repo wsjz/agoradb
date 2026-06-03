@@ -13,6 +13,7 @@ thiserror = { workspace = true }
 futures = "0.3"
 tokio = { workspace = true }
 iceberg = "0.9"
+crossbeam-deque = "0.8"
 
 [dev-dependencies]
 tokio = { workspace = true }

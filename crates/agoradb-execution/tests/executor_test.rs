@@ -13,10 +13,12 @@
 // limitations under the License.
 
 use agoradb_catalog::AgoraCatalog;
-use agoradb_core::{AggFunction, BinaryOp, JoinType, OperatorDef, PredicateDef, Stage, StagePlan, StageTask};
+use agoradb_core::{
+    AggFunction, ExecutionPlan, JoinType, PredicateDef, Stage, StagePlan,
+};
 use agoradb_core::SpaceUri;
 use agoradb_execution::executor::Executor;
-use agoradb_query::{PhysicalExpr, PhysicalPlan, StageBuilder};
+use agoradb_query::{BinaryOp, PhysicalExpr, PhysicalPlan, StageBuilder};
 use agoradb_storage::StorageEngine;
 use arrow_array::{ArrayRef, Int64Array, RecordBatch, StringArray};
 use arrow_schema::{DataType as ArrowDataType, Field, Schema};
@@ -104,7 +106,7 @@ async fn test_executor_pipeline_scan_filter_project() {
             predicate: PhysicalExpr::BinaryOp {
                 op: BinaryOp::Gt,
                 left: Box::new(PhysicalExpr::Column(0)),
-                right: Box::new(PhysicalExpr::Literal(agoradb_query::physical::plan::LiteralValue::Int64(1))),
+                right: Box::new(PhysicalExpr::Literal(agoradb_query::LiteralValue::Int64(1))),
             },
             input: Box::new(PhysicalPlan::Scan {
                 space,
@@ -114,18 +116,18 @@ async fn test_executor_pipeline_scan_filter_project() {
         }),
     };
 
-    // Build StagePlan via StageBuilder
+    // Build ExecutionPlan via StageBuilder
     let builder = StageBuilder::new();
-    let stage_plan = builder.build(&physical_plan).unwrap();
-    assert_eq!(stage_plan.stages.len(), 1);
+    let exec_plan = builder.build(&physical_plan).unwrap();
+    assert_eq!(exec_plan.stages.len(), 1);
     assert!(
-        matches!(stage_plan.stages[0].task, agoradb_core::StageTask::Pipeline { .. }),
-        "Expected Pipeline"
+        matches!(exec_plan.stages[0].plan, StagePlan::Project { .. }),
+        "Expected Project at root"
     );
 
     // Execute via Executor
     let executor = Executor;
-    let chunks = executor.execute(&stage_plan, &catalog).await.unwrap();
+    let chunks = executor.execute(&exec_plan, &catalog).await.unwrap();
 
     // Verify: 2 rows (id=2, id=3)
     let total_rows: usize = chunks.iter().map(|c| c.len).sum();
@@ -267,29 +269,29 @@ async fn test_executor_hash_join() {
         join_type: JoinType::Inner,
     };
 
-    // Build StagePlan
+    // Build ExecutionPlan
     let builder = StageBuilder::new();
-    let stage_plan = builder.build(&physical_plan).unwrap();
-    assert_eq!(stage_plan.stages.len(), 2);
+    let exec_plan = builder.build(&physical_plan).unwrap();
+    assert_eq!(exec_plan.stages.len(), 2);
     assert!(
         matches!(
-            stage_plan.stages[0].task,
-            agoradb_core::StageTask::HashJoinBuild { .. }
+            exec_plan.stages[0].plan,
+            StagePlan::HashJoinBuild { .. }
         ),
         "Expected HashJoinBuild"
     );
     assert!(
         matches!(
-            stage_plan.stages[1].task,
-            agoradb_core::StageTask::HashJoinProbe { .. }
+            exec_plan.stages[1].plan,
+            StagePlan::HashJoinProbe { .. }
         ),
         "Expected HashJoinProbe"
     );
-    assert_eq!(stage_plan.stages[1].dependencies, vec![0]);
+    assert_eq!(exec_plan.stages[1].dependencies, vec![0]);
 
     // Execute
     let executor = Executor;
-    let chunks = executor.execute(&stage_plan, &catalog).await.unwrap();
+    let chunks = executor.execute(&exec_plan, &catalog).await.unwrap();
 
     // Verify: 3 joined rows
     let total_rows: usize = chunks.iter().map(|c| c.len).sum();
@@ -405,29 +407,29 @@ async fn test_executor_hash_aggregate() {
         agg_exprs: vec![(PhysicalExpr::Column(1), AggFunction::Sum)],
     };
 
-    // Build StagePlan
+    // Build ExecutionPlan
     let builder = StageBuilder::new();
-    let stage_plan = builder.build(&physical_plan).unwrap();
-    assert_eq!(stage_plan.stages.len(), 2);
+    let exec_plan = builder.build(&physical_plan).unwrap();
+    assert_eq!(exec_plan.stages.len(), 2);
     assert!(
         matches!(
-            stage_plan.stages[0].task,
-            agoradb_core::StageTask::AggregateAccumulate { .. }
+            exec_plan.stages[0].plan,
+            StagePlan::HashAggregateAccumulate { .. }
         ),
-        "Expected AggregateAccumulate"
+        "Expected HashAggregateAccumulate"
     );
     assert!(
         matches!(
-            stage_plan.stages[1].task,
-            agoradb_core::StageTask::AggregateEmit { .. }
+            exec_plan.stages[1].plan,
+            StagePlan::HashAggregateEmit { .. }
         ),
-        "Expected AggregateEmit"
+        "Expected HashAggregateEmit"
     );
-    assert_eq!(stage_plan.stages[1].dependencies, vec![0]);
+    assert_eq!(exec_plan.stages[1].dependencies, vec![0]);
 
     // Execute
     let executor = Executor;
-    let chunks = executor.execute(&stage_plan, &catalog).await.unwrap();
+    let chunks = executor.execute(&exec_plan, &catalog).await.unwrap();
 
     // Verify: 2 groups (US: 300, EU: 150)
     let total_rows: usize = chunks.iter().map(|c| c.len).sum();
@@ -512,35 +514,32 @@ async fn test_executor_parallel_pipeline() {
     engine.append(batch2).await.unwrap();
     engine.flush().await.unwrap();
 
-    // Build a StagePlan with forced parallelism = 2
+    // Build an ExecutionPlan with forced parallelism = 2
     let space = SpaceUri::parse("space://did:agora:test/parallel_table").unwrap();
-    let stage_plan = StagePlan {
+    let exec_plan = ExecutionPlan {
         stages: vec![Stage {
             id: 0,
             label: "parallel_pipeline".to_string(),
             dependencies: vec![],
             parallelism: 2, // Force parallel execution
-            task: StageTask::Pipeline {
-                operators: vec![
-                    OperatorDef::Scan {
-                        space: space.clone(),
-                        projection: None,
-                        filter: None,
-                    },
-                    OperatorDef::Filter {
-                        predicate: PredicateDef::Gt {
-                            column: 0,
-                            value: 2,
-                        },
-                    },
-                ],
+            plan: StagePlan::Filter {
+                predicate: PredicateDef::Gt {
+                    column: 0,
+                    value: 2,
+                },
+                input: Box::new(StagePlan::Scan {
+                    space: space.clone(),
+                    projection: None,
+                    filter: None,
+                }),
             },
+            output: None,
         }],
     };
 
     // Execute via Executor
     let executor = Executor;
-    let chunks = executor.execute(&stage_plan, &catalog).await.unwrap();
+    let chunks = executor.execute(&exec_plan, &catalog).await.unwrap();
 
     // Verify: 4 rows (id = 3, 4, 5, 6)
     let total_rows: usize = chunks.iter().map(|c| c.len).sum();
