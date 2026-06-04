@@ -298,15 +298,14 @@ pub struct HashAggregateAccumulateSink {
 }
 
 impl HashAggregateAccumulateSink {
-    pub fn new(agg_id: usize, group_indices: Vec<usize>, agg_indices: Vec<(usize, AggFunction)>) -> Self {
-        let global = HashAggregateGlobalState::new(group_indices.clone(), agg_indices.clone());
+    pub fn new(agg_id: usize, group_indices: Vec<usize>, agg_indices: Vec<(usize, AggFunction)>, global_state: Arc<HashAggregateGlobalState>) -> Self {
         Self {
             agg_id,
             group_indices,
             agg_indices,
             groups: HashMap::new(),
             agg_input_types: Vec::new(),
-            global_state: Arc::new(global),
+            global_state,
         }
     }
 
@@ -398,20 +397,23 @@ pub struct HashAggregateEmitOperator {
 }
 
 impl HashAggregateEmitOperator {
-    pub fn new(agg_id: usize, group_indices: Vec<usize>, agg_indices: Vec<(usize, AggFunction)>) -> Self {
-        let global = HashAggregateGlobalState::new(group_indices.clone(), agg_indices.clone());
+    pub fn new(agg_id: usize, group_indices: Vec<usize>, agg_indices: Vec<(usize, AggFunction)>, global_state: Arc<HashAggregateGlobalState>) -> Self {
         Self {
             agg_id,
             group_indices,
             agg_indices,
-            global_state: Arc::new(global),
+            global_state,
             emitted: false,
         }
     }
 
     fn emit_results(&self) -> Result<DataChunk, ExecutionError> {
-        while !self.global_state.is_ready() {
-            std::thread::yield_now();
+        // Global state must be ready by the time emit pipeline starts
+        // (the executor ensures accumulate completes before launching emit).
+        if !self.global_state.is_ready() {
+            return Err(ExecutionError::OperatorError(
+                format!("HashAggregate {} emit started before accumulate completed", self.agg_id)
+            ));
         }
 
         let global_groups = self.global_state.get_global_groups()

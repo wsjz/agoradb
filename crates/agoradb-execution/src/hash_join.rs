@@ -166,13 +166,13 @@ pub struct HashJoinBuildSink {
 }
 
 impl HashJoinBuildSink {
-    pub fn new(join_id: usize, left_key: usize) -> Self {
+    pub fn new(join_id: usize, left_key: usize, global_state: Arc<HashJoinGlobalState>) -> Self {
         Self {
             join_id,
             left_key,
             local_table: HashMap::new(),
             local_chunks: Vec::new(),
-            global_state: Arc::new(HashJoinGlobalState::new()),
+            global_state,
         }
     }
 
@@ -267,20 +267,23 @@ pub struct HashJoinProbeOperator {
 }
 
 impl HashJoinProbeOperator {
-    pub fn new(left_key: usize, right_key: usize, join_type: JoinType, join_id: usize) -> Self {
+    pub fn new(left_key: usize, right_key: usize, join_type: JoinType, join_id: usize, global_state: Arc<HashJoinGlobalState>) -> Self {
         Self {
             left_key,
             right_key,
             join_type,
             join_id,
-            global_state: Arc::new(HashJoinGlobalState::new()),
+            global_state,
         }
     }
 
     fn probe(&self, chunk: &DataChunk, output: &mut DataChunk) -> Result<(), ExecutionError> {
-        // Wait for global state to be ready
-        while !self.global_state.is_ready() {
-            std::thread::yield_now();
+        // Global state must be ready by the time probe pipeline starts
+        // (the executor ensures build completes before launching probe).
+        if !self.global_state.is_ready() {
+            return Err(ExecutionError::OperatorError(
+                format!("HashJoin {} probe started before build completed", self.join_id)
+            ));
         }
 
         let global_data = self.global_state.get_global_data()
@@ -292,6 +295,11 @@ impl HashJoinProbeOperator {
         let build_chunks = &global_data.1;
 
         let right_key_col = &chunk.columns[self.right_key];
+
+        // Collect all joined chunks first, then merge into a single output chunk
+        // with sufficient capacity. This avoids the capacity=1 problem from
+        // build_joined_chunk when append_chunk is called multiple times.
+        let mut joined_chunks: Vec<DataChunk> = Vec::new();
 
         for row in 0..chunk.len {
             let key = match right_key_col.data_type {
@@ -308,14 +316,25 @@ impl HashJoinProbeOperator {
 
             if let Some(left_rows) = build_table.get(&key) {
                 for &left_row in left_rows {
-                    let joined = Self::build_joined_chunk(left_row, row, build_chunks, chunk)?;
-                    output.append_chunk(joined)?;
+                    joined_chunks.push(Self::build_joined_chunk(left_row, row, build_chunks, chunk)?);
                 }
             } else if matches!(self.join_type, JoinType::Left) {
-                let joined = Self::build_left_join_chunk(row, chunk, build_chunks)?;
-                output.append_chunk(joined)?;
+                joined_chunks.push(Self::build_left_join_chunk(row, chunk, build_chunks)?);
             }
         }
+
+        if joined_chunks.is_empty() {
+            return Ok(());
+        }
+
+        // Merge all joined chunks into a single output with pre-allocated capacity
+        let total_rows: usize = joined_chunks.iter().map(|c| c.len).sum();
+        let schema: Vec<DataType> = joined_chunks[0].columns.iter().map(|c| c.data_type.clone()).collect();
+        let mut merged = DataChunk::with_capacity(schema, total_rows);
+        for joined in joined_chunks {
+            merged.append_chunk(joined)?;
+        }
+        *output = merged;
 
         Ok(())
     }

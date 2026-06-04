@@ -126,7 +126,7 @@ async fn test_executor_pipeline_scan_filter_project() {
     );
 
     // Execute via Executor
-    let executor = Executor;
+    let executor = Executor::new();
     let chunks = executor.execute(&exec_plan, &catalog).await.unwrap();
 
     // Verify: 2 rows (id=2, id=3)
@@ -272,25 +272,18 @@ async fn test_executor_hash_join() {
     // Build ExecutionPlan
     let builder = StageBuilder::new();
     let exec_plan = builder.build(&physical_plan).unwrap();
-    assert_eq!(exec_plan.stages.len(), 2);
+    assert_eq!(exec_plan.stages.len(), 1);
     assert!(
         matches!(
             exec_plan.stages[0].plan,
-            StagePlan::HashJoinBuild { .. }
+            StagePlan::HashJoin { .. }
         ),
-        "Expected HashJoinBuild"
+        "Expected HashJoin"
     );
-    assert!(
-        matches!(
-            exec_plan.stages[1].plan,
-            StagePlan::HashJoinProbe { .. }
-        ),
-        "Expected HashJoinProbe"
-    );
-    assert_eq!(exec_plan.stages[1].dependencies, vec![0]);
+    assert_eq!(exec_plan.stages[0].dependencies.len(), 0);
 
     // Execute
-    let executor = Executor;
+    let executor = Executor::new();
     let chunks = executor.execute(&exec_plan, &catalog).await.unwrap();
 
     // Verify: 3 joined rows
@@ -410,25 +403,18 @@ async fn test_executor_hash_aggregate() {
     // Build ExecutionPlan
     let builder = StageBuilder::new();
     let exec_plan = builder.build(&physical_plan).unwrap();
-    assert_eq!(exec_plan.stages.len(), 2);
+    assert_eq!(exec_plan.stages.len(), 1);
     assert!(
         matches!(
             exec_plan.stages[0].plan,
-            StagePlan::HashAggregateAccumulate { .. }
+            StagePlan::HashAggregate { .. }
         ),
-        "Expected HashAggregateAccumulate"
+        "Expected HashAggregate"
     );
-    assert!(
-        matches!(
-            exec_plan.stages[1].plan,
-            StagePlan::HashAggregateEmit { .. }
-        ),
-        "Expected HashAggregateEmit"
-    );
-    assert_eq!(exec_plan.stages[1].dependencies, vec![0]);
+    assert_eq!(exec_plan.stages[0].dependencies.len(), 0);
 
     // Execute
-    let executor = Executor;
+    let executor = Executor::new();
     let chunks = executor.execute(&exec_plan, &catalog).await.unwrap();
 
     // Verify: 2 groups (US: 300, EU: 150)
@@ -538,7 +524,7 @@ async fn test_executor_parallel_pipeline() {
     };
 
     // Execute via Executor
-    let executor = Executor;
+    let executor = Executor::new();
     let chunks = executor.execute(&exec_plan, &catalog).await.unwrap();
 
     // Verify: 4 rows (id = 3, 4, 5, 6)

@@ -17,8 +17,44 @@ use agoradb_core::PipelineId;
 use crossbeam_deque::{Injector, Stealer, Worker as DequeWorker};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
+
+// ------------------------------------------------------------------
+// ActiveTaskTracker
+// ------------------------------------------------------------------
+
+/// Tracks how many tasks are still running for each pipeline.
+/// When the count reaches zero, the pipeline is marked completed.
+pub struct ActiveTaskTracker {
+    counts: Mutex<HashMap<PipelineId, AtomicUsize>>,
+}
+
+impl ActiveTaskTracker {
+    pub fn new() -> Self {
+        Self {
+            counts: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Register that `count` tasks will be submitted for this pipeline.
+    pub fn register(&self, pipeline_id: PipelineId, count: usize) {
+        let mut map = self.counts.lock().unwrap();
+        map.insert(pipeline_id, AtomicUsize::new(count));
+    }
+
+    /// Atomically decrement the count for a pipeline.
+    /// Returns true if the count reached zero (caller should mark pipeline completed).
+    pub fn finish_one(&self, pipeline_id: PipelineId) -> bool {
+        let map = self.counts.lock().unwrap();
+        if let Some(counter) = map.get(&pipeline_id) {
+            let remaining = counter.fetch_sub(1, Ordering::SeqCst);
+            remaining == 1 // was 1 before decrement, now 0
+        } else {
+            false
+        }
+    }
+}
 
 // ------------------------------------------------------------------
 // SchedulerMetrics
@@ -45,8 +81,16 @@ pub struct TaskScheduler {
     pub stealers: Vec<Stealer<PipelineTask>>,
     /// Pipeline states — tracks NotStarted/Running/Completed.
     pub pipeline_states: Mutex<HashMap<PipelineId, PipelineState>>,
+    /// Per-pipeline active task tracker.
+    pub active_tasks: ActiveTaskTracker,
     /// Global metrics.
     pub metrics: SchedulerMetrics,
+    /// Blocked tasks waiting for Source data (event-driven wake).
+    blocked_registry: Mutex<Vec<PipelineTask>>,
+    /// Condvar for event-driven worker wake-up (broadcast).
+    condvar: Condvar,
+    /// Flag paired with condvar — set to true when work is available.
+    has_work: Mutex<bool>,
     /// Shutdown flag.
     shutdown: AtomicUsize,
 }
@@ -64,15 +108,21 @@ impl TaskScheduler {
             global_queue,
             stealers,
             pipeline_states: Mutex::new(HashMap::new()),
+            active_tasks: ActiveTaskTracker::new(),
             metrics: SchedulerMetrics::default(),
+            blocked_registry: Mutex::new(Vec::new()),
+            condvar: Condvar::new(),
+            has_work: Mutex::new(false),
             shutdown: AtomicUsize::new(0),
         })
     }
 
-    /// Submit a task to the global queue.
+    /// Submit a task to the global queue and wake one worker.
     pub fn submit_task(&self, task: PipelineTask) {
         self.metrics.ready_tasks.fetch_add(1, Ordering::Relaxed);
         self.global_queue.push(task);
+        *self.has_work.lock().unwrap() = true;
+        self.condvar.notify_one();
     }
 
     /// Submit multiple tasks.
@@ -85,6 +135,12 @@ impl TaskScheduler {
     /// Register a pipeline's state.
     pub fn register_pipeline(&self, pipeline_id: PipelineId, state: PipelineState) {
         self.pipeline_states.lock().unwrap().insert(pipeline_id, state);
+    }
+
+    /// Register the expected number of tasks for a pipeline.
+    /// Call this before submitting any tasks for the pipeline.
+    pub fn register_pipeline_tasks(&self, pipeline_id: PipelineId, count: usize) {
+        self.active_tasks.register(pipeline_id, count);
     }
 
     /// Atomically start a pipeline (CAS NotStarted → Running).
@@ -112,13 +168,43 @@ impl TaskScheduler {
         states.get(&pipeline_id).map(|s| s.is_completed()).unwrap_or(false)
     }
 
-    /// Signal shutdown.
+    /// Signal shutdown and wake all workers so they can exit.
     pub fn shutdown(&self) {
         self.shutdown.store(1, Ordering::SeqCst);
+        *self.has_work.lock().unwrap() = true;
+        self.condvar.notify_all();
     }
 
     pub fn is_shutdown(&self) -> bool {
         self.shutdown.load(Ordering::SeqCst) != 0
+    }
+
+    /// Register a task that yielded because its Source returned `NotReady`.
+    pub fn register_blocked_task(&self, task: PipelineTask) {
+        self.blocked_registry.lock().unwrap().push(task);
+        self.metrics.blocked_tasks.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Wake all blocked tasks by re-submitting them to the global queue,
+    /// then unpark one worker thread so it can pick up the new work.
+    /// Called by Sources when new data arrives.
+    pub fn wake_blocked_tasks(&self) {
+        let tasks: Vec<PipelineTask> = {
+            let mut blocked = self.blocked_registry.lock().unwrap();
+            if blocked.is_empty() {
+                return;
+            }
+            std::mem::take(&mut *blocked)
+        };
+        let count = tasks.len();
+        for task in tasks {
+            self.submit_task(task);
+        }
+        self.metrics.blocked_tasks.fetch_sub(count, Ordering::Relaxed);
+        // Broadcast wake to ALL workers — Condvar::notify_all correctly wakes
+        // every waiting thread, unlike thread::unpark which races.
+        *self.has_work.lock().unwrap() = true;
+        self.condvar.notify_all();
     }
 
     /// Steal a task from another worker.
@@ -170,8 +256,13 @@ pub fn spawn_workers(
                         if let Some(task) = sched.steal_from_others(worker_id) {
                             task
                         } else {
-                            // 4. Nothing to do — yield briefly
-                            thread::yield_now();
+                            // 4. Nothing to do — wait on condvar until woken by
+                            //    submit_task or wake_blocked_tasks().
+                            let mut has_work = sched.has_work.lock().unwrap();
+                            while !*has_work && !sched.is_shutdown() {
+                                has_work = sched.condvar.wait(has_work).unwrap();
+                            }
+                            *has_work = false;
                             continue;
                         }
                     }
@@ -181,21 +272,43 @@ pub fn spawn_workers(
                 sched.metrics.ready_tasks.fetch_sub(1, Ordering::Relaxed);
                 sched.metrics.running_tasks.fetch_add(1, Ordering::Relaxed);
 
-                match task.run() {
-                    TaskStatus::Finished => {
+                let pipeline_id = task.pipeline_id;
+                // Catch panics so a single failing task doesn't crash the worker thread.
+                // This prevents deadlocks where a crashed worker leaves pipelines
+                // permanently uncompleted.
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || task.run()));
+                match result {
+                    Ok(TaskStatus::Finished) => {
                         sched.metrics.running_tasks.fetch_sub(1, Ordering::Relaxed);
                         sched.metrics.finished_tasks.fetch_add(1, Ordering::Relaxed);
+                        // Track per-pipeline completion
+                        if sched.active_tasks.finish_one(pipeline_id) {
+                            sched.complete_pipeline(pipeline_id);
+                        }
                     }
-                    TaskStatus::Yielded(task) => {
+                    Ok(TaskStatus::Yielded(task)) => {
                         sched.metrics.running_tasks.fetch_sub(1, Ordering::Relaxed);
-                        sched.metrics.blocked_tasks.fetch_add(1, Ordering::Relaxed);
-                        // v1: re-submit immediately. v2: proper blocked registry.
-                        sched.submit_task(task);
-                        sched.metrics.blocked_tasks.fetch_sub(1, Ordering::Relaxed);
+                        // Register in the global blocked registry.
+                        // The Source will wake this task via wake_blocked_tasks()
+                        // when new data arrives.
+                        sched.register_blocked_task(task);
                     }
-                    TaskStatus::Error(e) => {
+                    Ok(TaskStatus::Error(e)) => {
                         sched.metrics.running_tasks.fetch_sub(1, Ordering::Relaxed);
                         eprintln!("PipelineTask error: {:?}", e);
+                        // Even on error, track completion so executor doesn't hang
+                        if sched.active_tasks.finish_one(pipeline_id) {
+                            sched.complete_pipeline(pipeline_id);
+                        }
+                    }
+                    Err(_) => {
+                        sched.metrics.running_tasks.fetch_sub(1, Ordering::Relaxed);
+                        eprintln!("PipelineTask panicked in pipeline {}", pipeline_id);
+                        // Mark task as finished so pipeline can complete and executor
+                        // doesn't hang forever waiting for a dead task.
+                        if sched.active_tasks.finish_one(pipeline_id) {
+                            sched.complete_pipeline(pipeline_id);
+                        }
                     }
                 }
             }

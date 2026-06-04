@@ -102,7 +102,7 @@ async fn run_sql_pipeline(
     let stage_plan = stage_builder.build(&physical_plan)?;
 
     // 5. Execute -> DataChunks
-    let executor = Executor;
+    let executor = Executor::new();
     executor.execute(&stage_plan, catalog).await
 }
 

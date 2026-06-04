@@ -16,8 +16,10 @@ use crate::chunk::DataChunk;
 use crate::hash_aggregate::HashAggregateOperator;
 use crate::hash_join::HashJoinOperator;
 use crate::operator::Operator;
+use crate::pipeline::{CloneSink, Sink};
 use crate::sort::SortState;
 use agoradb_core::ExecutionError;
+use std::any::Any;
 use std::sync::{Arc, Mutex};
 
 /// Operator adapter that forwards push() calls to a shared [`HashJoinOperator`].
@@ -64,26 +66,49 @@ impl Operator for SortAdapter {
     fn set_output(&mut self, _output: Box<dyn Operator>) {}
 }
 
-/// A collecting sink operator — stores all pushed chunks in a Vec.
+/// A collecting sink — stores all consumed chunks in a Vec, implements `Sink`.
 pub struct CollectSink {
     results: Arc<Mutex<Vec<DataChunk>>>,
 }
 
 impl CollectSink {
-    pub fn new(results: Arc<Mutex<Vec<DataChunk>>>) -> Self {
-        Self { results }
+    pub fn new() -> Self {
+        Self {
+            results: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    pub fn into_results(self) -> Vec<DataChunk> {
+        match Arc::try_unwrap(self.results) {
+            Ok(mutex) => mutex.into_inner().unwrap(),
+            Err(arc) => arc.lock().unwrap().clone(),
+        }
+    }
+
+    pub fn get_results_arc(&self) -> Arc<Mutex<Vec<DataChunk>>> {
+        self.results.clone()
     }
 }
 
-impl Operator for CollectSink {
-    fn push(&mut self, chunk: DataChunk) -> Result<(), ExecutionError> {
+impl Sink for CollectSink {
+    fn consume(&mut self, chunk: DataChunk) -> Result<(), ExecutionError> {
         self.results.lock().unwrap().push(chunk);
         Ok(())
     }
+
     fn finalize(&mut self) -> Result<(), ExecutionError> {
         Ok(())
     }
-    fn set_output(&mut self, _output: Box<dyn Operator>) {
-        // Sink has no output
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+impl CloneSink for CollectSink {
+    fn clone_box(&self) -> Box<dyn Sink> {
+        Box::new(Self {
+            results: self.results.clone(),
+        })
     }
 }

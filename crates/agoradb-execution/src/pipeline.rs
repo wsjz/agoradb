@@ -76,7 +76,7 @@ pub fn clone_operator(op: &dyn PipelineOperator) -> Box<dyn PipelineOperator> {
 
 /// Clone a Sink by downcasting to known types.
 pub fn clone_sink(sink: &dyn Sink) -> Box<dyn Sink> {
-    if let Some(c) = sink.as_any().downcast_ref::<crate::pipeline_builder::CollectSink>() {
+    if let Some(c) = sink.as_any().downcast_ref::<crate::adapters::CollectSink>() {
         return c.clone_box();
     }
     if let Some(h) = sink.as_any().downcast_ref::<crate::hash_join::HashJoinBuildSink>() {
@@ -111,11 +111,31 @@ pub struct Pipeline {
 impl Pipeline {
     /// Create a `PipelineTask` for the given task index.
     pub fn create_task(&self, task_id: usize) -> PipelineTask {
+        let mut source = (self.source_factory)(task_id);
         PipelineTask {
             task_id,
             pipeline_id: self.id,
             stage_id: self.stage_id,
-            source: (self.source_factory)(task_id),
+            source,
+            operators: self.operators.iter().map(|op| clone_operator(op.as_ref())).collect(),
+            sink: clone_sink(self.sink.as_ref()),
+            pending_chunk: None,
+        }
+    }
+
+    /// Create a `PipelineTask` with scheduler injection for event-driven wake.
+    pub fn create_task_with_scheduler(
+        &self,
+        task_id: usize,
+        scheduler: std::sync::Arc<crate::scheduler::TaskScheduler>,
+    ) -> PipelineTask {
+        let mut source = (self.source_factory)(task_id);
+        source.set_scheduler(scheduler);
+        PipelineTask {
+            task_id,
+            pipeline_id: self.id,
+            stage_id: self.stage_id,
+            source,
             operators: self.operators.iter().map(|op| clone_operator(op.as_ref())).collect(),
             sink: clone_sink(self.sink.as_ref()),
             pending_chunk: None,

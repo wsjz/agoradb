@@ -301,13 +301,11 @@ pub struct SortCollectSink {
 impl SortCollectSink {
     pub fn new(
         _sort_id: usize,
-        sort_columns: Vec<usize>,
-        directions: Vec<SortDirection>,
-        limit: Option<usize>,
+        sort_state: Arc<SortState>,
     ) -> Self {
         Self {
             sort_id: _sort_id,
-            sort_state: Arc::new(SortState::new(sort_columns, directions, limit)),
+            sort_state,
         }
     }
 }
@@ -351,13 +349,11 @@ pub struct SortEmitOperator {
 impl SortEmitOperator {
     pub fn new(
         _sort_id: usize,
-        sort_columns: Vec<usize>,
-        directions: Vec<SortDirection>,
-        limit: Option<usize>,
+        sort_state: Arc<SortState>,
     ) -> Self {
         Self {
             sort_id: _sort_id,
-            sort_state: Arc::new(SortState::new(sort_columns, directions, limit)),
+            sort_state,
             emitted: false,
         }
     }

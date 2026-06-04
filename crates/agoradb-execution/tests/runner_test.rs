@@ -106,7 +106,7 @@ async fn test_runner_scan_filter_project() {
     // Build StagePlan and execute
     let builder = StageBuilder::new();
     let stage_plan = builder.build(&plan).unwrap();
-    let executor = Executor;
+    let executor = Executor::new();
     let chunks = executor.execute(&stage_plan, &catalog).await.unwrap();
 
     // Verify: 2 rows (id=2, id=3)
@@ -260,7 +260,7 @@ async fn test_runner_hash_join() {
     // Execute
     let builder = StageBuilder::new();
     let stage_plan = builder.build(&plan).unwrap();
-    let executor = Executor;
+    let executor = Executor::new();
     let chunks = executor.execute(&stage_plan, &catalog).await.unwrap();
 
     // Verify: 3 rows joined
@@ -387,7 +387,7 @@ async fn test_runner_hash_aggregate() {
     // Execute
     let builder = StageBuilder::new();
     let stage_plan = builder.build(&plan).unwrap();
-    let executor = Executor;
+    let executor = Executor::new();
     let chunks = executor.execute(&stage_plan, &catalog).await.unwrap();
 
     // Verify: 2 groups (US: 300, EU: 150)

@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::adapters::CollectSink;
 use crate::chunk::DataChunk;
 use crate::filter::FilterOperator;
 use crate::limit::LimitOperator;
@@ -20,9 +21,9 @@ use crate::pipeline::{Pipeline, Sink};
 use crate::predicate_builder::build_predicate_fn;
 use crate::project::ProjectOperator;
 use crate::scan::ScanOperator;
-use crate::source::{EmptySource, TableScanSource};
+use crate::source::{EmptySource, EmitSource, TableScanSource};
 use agoradb_catalog::{AgoraCatalog, StorageScanProvider};
-use agoradb_core::{ExecutionError, OperatorSpec, SpaceUri, StageId, StagePlan};
+use agoradb_core::{ExecutionError, Morsel, OperatorSpec, SpaceUri, StageId, StagePlan};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -149,9 +150,20 @@ impl PipelineBuilder {
 
     /// New constructor for Pipeline-based building.
     pub fn new_with_catalog(stage_id: StageId, catalog: Arc<AgoraCatalog>, default_parallelism: usize) -> Self {
+        Self::new_with_pipeline_offset(stage_id, catalog, default_parallelism, 0)
+    }
+
+    /// New constructor with a global pipeline ID offset.
+    /// Ensures globally unique pipeline IDs when multiple stages share one scheduler.
+    pub fn new_with_pipeline_offset(
+        stage_id: StageId,
+        catalog: Arc<AgoraCatalog>,
+        default_parallelism: usize,
+        pipeline_id_offset: usize,
+    ) -> Self {
         Self {
             stage_id,
-            next_pipeline_id: 0,
+            next_pipeline_id: pipeline_id_offset,
             next_join_id: 0,
             next_agg_id: 0,
             next_sort_id: 0,
@@ -270,11 +282,17 @@ impl PipelineBuilder {
                 let join_id = self.next_join_id;
                 self.next_join_id += 1;
 
+                // Shared global state between build and probe
+                let hj_global = Arc::new(crate::hash_join::HashJoinGlobalState::new());
+                hj_global.set_expected_tasks(self.default_parallelism);
+
                 // Build Pipeline: left subtree → HashJoinBuildSink
                 let build_pipeline_id = self.next_pipeline_id();
                 let build_source = self.build_source(left).await?;
                 let build_ops = self.build_operators(left)?;
-                let build_sink = Box::new(crate::hash_join::HashJoinBuildSink::new(join_id, *left_key));
+                let build_sink = Box::new(crate::hash_join::HashJoinBuildSink::new(
+                    join_id, *left_key, hj_global.clone(),
+                ));
 
                 pipelines.push(Pipeline {
                     id: build_pipeline_id,
@@ -295,6 +313,7 @@ impl PipelineBuilder {
                     *right_key,
                     join_type.clone(),
                     join_id,
+                    hj_global.clone(),
                 )));
 
                 let probe_sink = parent_sink.unwrap_or_else(|| Box::new(CollectSink::new()));
@@ -321,25 +340,24 @@ impl PipelineBuilder {
                 let agg_id = self.next_agg_id;
                 self.next_agg_id += 1;
 
-                // Accumulate Pipeline
-                let accum_pipeline_id = self.next_pipeline_id();
-                let accum_source = self.build_source(input).await?;
-                let accum_ops = self.build_operators(input)?;
+                // Shared global state between accumulate and emit
+                let agg_global = Arc::new(crate::hash_aggregate::HashAggregateGlobalState::new(
+                    group_columns.clone(),
+                    agg_columns.clone(),
+                ));
+                agg_global.set_expected_tasks(self.default_parallelism);
+
+                // Build input with accumulate sink as parent.
+                // If input is a nested breaker (e.g. HashJoin), the inner breaker's
+                // result pipeline will use the accumulate sink directly.
                 let accum_sink = Box::new(crate::hash_aggregate::HashAggregateAccumulateSink::new(
                     agg_id,
                     group_columns.clone(),
                     agg_columns.clone(),
+                    agg_global.clone(),
                 ));
-
-                pipelines.push(Pipeline {
-                    id: accum_pipeline_id,
-                    stage_id: self.stage_id,
-                    source_factory: accum_source,
-                    operators: accum_ops,
-                    sink: accum_sink,
-                    parallelism: self.default_parallelism,
-                    dependencies: vec![],
-                });
+                self.build_inner(input, pipelines, Some(accum_sink)).await?;
+                let accum_pipeline_id = pipelines.last().map(|p| p.id).unwrap_or(0);
 
                 // Emit Pipeline
                 let emit_pipeline_id = self.next_pipeline_id();
@@ -348,11 +366,12 @@ impl PipelineBuilder {
                 pipelines.push(Pipeline {
                     id: emit_pipeline_id,
                     stage_id: self.stage_id,
-                    source_factory: Box::new(|_| Box::new(EmptySource)),
+                    source_factory: Box::new(|_| Box::new(EmitSource::new())),
                     operators: vec![Box::new(crate::hash_aggregate::HashAggregateEmitOperator::new(
                         agg_id,
                         group_columns.clone(),
                         agg_columns.clone(),
+                        agg_global.clone(),
                     ))],
                     sink: emit_sink,
                     parallelism: 1,
@@ -372,26 +391,22 @@ impl PipelineBuilder {
                 let sort_id = self.next_sort_id;
                 self.next_sort_id += 1;
 
-                // Collect Pipeline
-                let collect_pipeline_id = self.next_pipeline_id();
-                let collect_source = self.build_source(input).await?;
-                let collect_ops = self.build_operators(input)?;
-                let collect_sink = Box::new(crate::sort::SortCollectSink::new(
-                    sort_id,
+                // Shared sort state between collect and emit
+                let sort_state = Arc::new(crate::sort::SortState::new(
                     sort_columns.clone(),
                     directions.clone(),
                     *limit,
                 ));
 
-                pipelines.push(Pipeline {
-                    id: collect_pipeline_id,
-                    stage_id: self.stage_id,
-                    source_factory: collect_source,
-                    operators: collect_ops,
-                    sink: collect_sink,
-                    parallelism: self.default_parallelism,
-                    dependencies: vec![],
-                });
+                // Build input with collect sink as parent.
+                // If input is a nested breaker, the inner breaker's result
+                // pipeline will use the collect sink directly.
+                let collect_sink = Box::new(crate::sort::SortCollectSink::new(
+                    sort_id,
+                    sort_state.clone(),
+                ));
+                self.build_inner(input, pipelines, Some(collect_sink)).await?;
+                let collect_pipeline_id = pipelines.last().map(|p| p.id).unwrap_or(0);
 
                 // Emit Pipeline
                 let emit_pipeline_id = self.next_pipeline_id();
@@ -400,12 +415,10 @@ impl PipelineBuilder {
                 pipelines.push(Pipeline {
                     id: emit_pipeline_id,
                     stage_id: self.stage_id,
-                    source_factory: Box::new(|_| Box::new(EmptySource)),
+                    source_factory: Box::new(|_| Box::new(EmitSource::new())),
                     operators: vec![Box::new(crate::sort::SortEmitOperator::new(
                         sort_id,
-                        sort_columns.clone(),
-                        directions.clone(),
-                        *limit,
+                        sort_state.clone(),
                     ))],
                     sink: emit_sink,
                     parallelism: 1,
@@ -416,23 +429,21 @@ impl PipelineBuilder {
             }
 
             // ========== Linear operators ==========
-            StagePlan::Filter { predicate, input } => {
-                let mut ops = self.build_operators(input)?;
-                ops.push(Box::new(crate::filter::FilterPipelineOperator::new(
-                    build_predicate_fn(predicate)?,
-                )));
+            // ========== Linear operators ==========
+            // build_operators(plan) collects all operators from this node down to the leaf.
+            // build_sink_pipeline then finds the actual leaf (Scan/ExchangeSource).
+            StagePlan::Filter { input, .. } => {
+                let ops = self.build_operators(plan)?;
                 self.build_sink_pipeline(input, ops, parent_sink, pipelines).await
             }
 
-            StagePlan::Project { columns, input } => {
-                let mut ops = self.build_operators(input)?;
-                ops.push(Box::new(crate::project::ProjectPipelineOperator::new(columns.clone())));
+            StagePlan::Project { input, .. } => {
+                let ops = self.build_operators(plan)?;
                 self.build_sink_pipeline(input, ops, parent_sink, pipelines).await
             }
 
-            StagePlan::Limit { skip, fetch, input } => {
-                let mut ops = self.build_operators(input)?;
-                ops.push(Box::new(crate::limit::LimitPipelineOperator::new(*skip, *fetch)));
+            StagePlan::Limit { input, .. } => {
+                let ops = self.build_operators(plan)?;
                 self.build_sink_pipeline(input, ops, parent_sink, pipelines).await
             }
 
@@ -505,7 +516,7 @@ impl PipelineBuilder {
             StagePlan::Filter { predicate, input } => {
                 self.collect_operators(input, ops)?;
                 ops.push(Box::new(crate::filter::FilterPipelineOperator::new(
-                    build_predicate_fn(predicate)?,
+                    predicate.clone(),
                 )));
                 Ok(())
             }
@@ -539,16 +550,25 @@ impl PipelineBuilder {
         &self,
         plan: &StagePlan,
     ) -> Result<Box<dyn Fn(usize) -> Box<dyn crate::source::Source> + Send + Sync>, ExecutionError> {
-        match plan {
-            StagePlan::Scan { space, .. } => {
-                self.build_scan_source(space.clone()).await
-            }
-            StagePlan::ExchangeSource => {
-                Ok(Box::new(|_| Box::new(EmptySource)))
-            }
-            _ => {
-                // For non-leaf plans, the source is handled by recursive build_inner
-                Ok(Box::new(|_| Box::new(EmptySource)))
+        // Walk down linear operators to find the actual leaf (Scan or ExchangeSource).
+        let mut current = plan;
+        loop {
+            match current {
+                StagePlan::Scan { space, .. } => {
+                    return self.build_scan_source(space.clone()).await;
+                }
+                StagePlan::ExchangeSource => {
+                    return Ok(Box::new(|_| Box::new(EmptySource)));
+                }
+                StagePlan::Filter { input, .. }
+                | StagePlan::Project { input, .. }
+                | StagePlan::Limit { input, .. } => {
+                    current = input;
+                }
+                _ => {
+                    // Breaker plans should not reach here — their source is built separately.
+                    return Ok(Box::new(|_| Box::new(EmptySource)));
+                }
             }
         }
     }
@@ -559,17 +579,28 @@ impl PipelineBuilder {
     ) -> Result<Box<dyn Fn(usize) -> Box<dyn crate::source::Source> + Send + Sync>, ExecutionError> {
         let catalog = self.catalog.clone();
         let snapshot_id = self.get_snapshot_id(&space).await?;
-        let morsels = catalog
+        let all_morsels = catalog
             .list_morsels(&space, snapshot_id, 10_000)
             .await
             .map_err(ExecutionError::Catalog)?;
 
-        Ok(Box::new(move |_task_id: usize| {
+        // Partition morsels round-robin across tasks so each worker reads a distinct subset.
+        let parallelism = self.default_parallelism.max(1);
+        let mut partitioned: Vec<Vec<Morsel>> = (0..parallelism).map(|_| Vec::new()).collect();
+        for (i, morsel) in all_morsels.into_iter().enumerate() {
+            partitioned[i % parallelism].push(morsel);
+        }
+
+        Ok(Box::new(move |task_id: usize| {
+            let task_morsels = partitioned
+                .get(task_id)
+                .cloned()
+                .unwrap_or_default();
             Box::new(TableScanSource::new(
                 catalog.clone(),
                 space.clone(),
                 snapshot_id,
-                morsels.clone(),
+                task_morsels,
             ))
         }))
     }
@@ -620,7 +651,45 @@ impl PipelineBuilder {
                 });
                 Ok(())
             }
-            _ => self.build_inner(input, pipelines, parent_sink).await,
+            _ => {
+                // Input is not a leaf — follow linear operators down to the actual leaf.
+                let mut current = input;
+                loop {
+                    match current {
+                        StagePlan::Scan { .. } | StagePlan::ExchangeSource => {
+                            let source = self.build_source(current).await?;
+                            let sink = parent_sink.unwrap_or_else(|| Box::new(CollectSink::new()));
+                            pipelines.push(Pipeline {
+                                id: self.next_pipeline_id(),
+                                stage_id: self.stage_id,
+                                source_factory: source,
+                                operators: ops,
+                                sink,
+                                parallelism: self.default_parallelism,
+                                dependencies: vec![],
+                            });
+                            return Ok(());
+                        }
+                        StagePlan::Filter { input: next, .. }
+                        | StagePlan::Project { input: next, .. }
+                        | StagePlan::Limit { input: next, .. } => {
+                            current = next;
+                        }
+                        _ => {
+                            let before_count = pipelines.len();
+                            self.build_inner(current, pipelines, parent_sink).await?;
+                            let after_count = pipelines.len();
+                            // Attach any downstream linear operators collected above
+                            // the breaker to the breaker's result pipeline.
+                            if after_count > before_count && !ops.is_empty() {
+                                let last_idx = after_count - 1;
+                                pipelines[last_idx].operators.extend(ops);
+                            }
+                            return Ok(());
+                        }
+                    }
+                }
+            }
         }
         })
     }
@@ -638,54 +707,4 @@ impl Default for PipelineBuilder {
     }
 }
 
-// ------------------------------------------------------------------
-// CollectSink — collects DataChunks into a Vec, implements Sink
-// ------------------------------------------------------------------
-
-use std::sync::Mutex;
-
-pub struct CollectSink {
-    results: Arc<Mutex<Vec<DataChunk>>>,
-}
-
-impl CollectSink {
-    pub fn new() -> Self {
-        Self {
-            results: Arc::new(Mutex::new(Vec::new())),
-        }
-    }
-
-    pub fn into_results(self) -> Vec<DataChunk> {
-        match Arc::try_unwrap(self.results) {
-            Ok(mutex) => mutex.into_inner().unwrap(),
-            Err(arc) => arc.lock().unwrap().clone(),
-        }
-    }
-
-    pub fn get_results_arc(&self) -> Arc<Mutex<Vec<DataChunk>>> {
-        self.results.clone()
-    }
-}
-
-impl Sink for CollectSink {
-    fn consume(&mut self, chunk: DataChunk) -> Result<(), ExecutionError> {
-        self.results.lock().unwrap().push(chunk);
-        Ok(())
-    }
-
-    fn finalize(&mut self) -> Result<(), ExecutionError> {
-        Ok(())
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-}
-
-impl crate::pipeline::CloneSink for CollectSink {
-    fn clone_box(&self) -> Box<dyn Sink> {
-        Box::new(Self {
-            results: Arc::new(Mutex::new(Vec::new())),
-        })
-    }
-}
+// CollectSink moved to adapters.rs (implements new Sink trait)

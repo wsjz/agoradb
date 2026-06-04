@@ -13,10 +13,11 @@
 // limitations under the License.
 
 use crate::chunk::{ColumnVector, DataChunk};
+use crate::predicate_builder::build_predicate_fn;
 use agoradb_core::DataType;
 use crate::operator::Operator;
 use crate::pipeline::{CloneOperator, PipelineOperator};
-use agoradb_core::ExecutionError;
+use agoradb_core::{ExecutionError, PredicateDef};
 
 pub type PredicateFn = Box<dyn Fn(&DataChunk, usize) -> bool + Send>;
 
@@ -35,20 +36,22 @@ impl FilterOperator {
 }
 
 /// Pipeline-based filter operator (pull-based).
+/// Stores the `PredicateDef` (cloneable) and builds the closure on each `execute` call.
 pub struct FilterPipelineOperator {
-    predicate: PredicateFn,
+    predicate_def: PredicateDef,
 }
 
 impl FilterPipelineOperator {
-    pub fn new(predicate: PredicateFn) -> Self {
-        Self { predicate }
+    pub fn new(predicate_def: PredicateDef) -> Self {
+        Self { predicate_def }
     }
 }
 
 impl PipelineOperator for FilterPipelineOperator {
     fn execute(&mut self, input: &DataChunk, output: &mut DataChunk) -> Result<(), ExecutionError> {
+        let predicate = build_predicate_fn(&self.predicate_def)?;
         let selected: Vec<usize> = (0..input.len)
-            .filter(|&i| (self.predicate)(input, i))
+            .filter(|&i| predicate(input, i))
             .collect();
 
         if selected.is_empty() {
@@ -90,10 +93,8 @@ impl PipelineOperator for FilterPipelineOperator {
 
 impl CloneOperator for FilterPipelineOperator {
     fn clone_box(&self) -> Box<dyn PipelineOperator> {
-        // Clone the predicate by storing it as an Arc<...> in the struct.
-        // For now, create a no-op filter as placeholder.
         Box::new(Self {
-            predicate: Box::new(|_chunk, _row| true),
+            predicate_def: self.predicate_def.clone(),
         })
     }
 }

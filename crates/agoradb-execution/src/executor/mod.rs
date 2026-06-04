@@ -12,7 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use futures::StreamExt;
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use agoradb_catalog::AgoraCatalog;
@@ -20,7 +22,9 @@ use agoradb_core::{ExecutionError, ExecutionPlan, Stage};
 
 use crate::chunk::DataChunk;
 use crate::pipeline::PipelineState;
-use crate::pipeline_builder::{CollectSink, PipelineBuilder};
+use crate::adapters::CollectSink;
+use crate::pipeline::Pipeline;
+use crate::pipeline_builder::PipelineBuilder;
 use crate::scheduler::{spawn_workers, TaskScheduler};
 
 /// An executor that runs an ExecutionPlan using yield-based pipeline scheduling.
@@ -30,6 +34,8 @@ use crate::scheduler::{spawn_workers, TaskScheduler};
 /// Worker threads pull tasks from work-stealing queues.
 pub struct Executor {
     num_workers: usize,
+    /// Global pipeline ID counter to ensure uniqueness across concurrent stages.
+    next_pipeline_id: AtomicUsize,
 }
 
 impl Executor {
@@ -37,11 +43,17 @@ impl Executor {
         let num_workers = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4);
-        Self { num_workers }
+        Self {
+            num_workers,
+            next_pipeline_id: AtomicUsize::new(0),
+        }
     }
 
     pub fn with_workers(num_workers: usize) -> Self {
-        Self { num_workers }
+        Self {
+            num_workers,
+            next_pipeline_id: AtomicUsize::new(0),
+        }
     }
 
     /// Execute an ExecutionPlan and return the final result chunks.
@@ -92,11 +104,55 @@ impl Executor {
                 ready_stages.push(remaining_stages.remove(idx));
             }
 
-            // Execute ready stages sequentially for now
-            // (can be parallelized with FuturesUnordered in the future)
+            // Build pipelines for all ready stages (fast, no I/O).
+            // Reassign globally unique pipeline IDs to avoid conflicts when
+            // multiple stages share the same scheduler.
+            let mut stage_pipeline_list: Vec<(usize, Vec<Pipeline>)> = Vec::new();
             for stage in ready_stages {
-                let result = self.execute_stage(stage, catalog, scheduler.clone()).await?;
-                completed_stages.insert(stage.id, result);
+                let pipeline_offset = self
+                    .next_pipeline_id
+                    .fetch_add(1000, Ordering::SeqCst);
+                let mut builder = PipelineBuilder::new_with_pipeline_offset(
+                    stage.id,
+                    catalog.clone(),
+                    stage.parallelism.max(1),
+                    pipeline_offset,
+                );
+                let mut pipelines = builder.build_pipelines(&stage.plan).await?;
+
+                // Reassign globally unique pipeline IDs and update dependencies.
+                let mut id_map: HashMap<usize, usize> = HashMap::new();
+                for pipeline in &mut pipelines {
+                    let old_id = pipeline.id;
+                    let new_id = self.next_pipeline_id.fetch_add(1, Ordering::SeqCst);
+                    pipeline.id = new_id;
+                    id_map.insert(old_id, new_id);
+                }
+                for pipeline in &mut pipelines {
+                    for dep in &mut pipeline.dependencies {
+                        if let Some(&new_id) = id_map.get(dep) {
+                            *dep = new_id;
+                        }
+                    }
+                }
+
+                stage_pipeline_list.push((stage.id, pipelines));
+            }
+
+            // Execute ready stages concurrently using FuturesUnordered.
+            let mut futures = futures::stream::FuturesUnordered::new();
+            for (stage_id, pipelines) in stage_pipeline_list {
+                let catalog = catalog.clone();
+                let scheduler = scheduler.clone();
+                futures.push(async move {
+                    let result = Self::run_pipelines(pipelines, &catalog, scheduler).await?;
+                    Ok::<(usize, Vec<DataChunk>), ExecutionError>((stage_id, result))
+                });
+            }
+
+            while let Some(result) = futures.next().await {
+                let (stage_id, chunks) = result?;
+                completed_stages.insert(stage_id, chunks);
             }
         }
 
@@ -111,20 +167,13 @@ impl Executor {
         Ok(completed_stages.remove(&last_stage_id).unwrap_or_default())
     }
 
-    async fn execute_stage(
-        &self,
-        stage: &Stage,
-        catalog: &Arc<AgoraCatalog>,
+    /// Run a set of pipelines to completion and return collected results.
+    /// Pipelines must already have globally unique IDs.
+    async fn run_pipelines(
+        pipelines: Vec<Pipeline>,
+        _catalog: &Arc<AgoraCatalog>,
         scheduler: Arc<TaskScheduler>,
     ) -> Result<Vec<DataChunk>, ExecutionError> {
-        // Build pipelines for this stage
-        let mut builder = PipelineBuilder::new_with_catalog(
-            stage.id,
-            catalog.clone(),
-            stage.parallelism.max(1),
-        );
-        let pipelines = builder.build_pipelines(&stage.plan).await?;
-
         if pipelines.is_empty() {
             return Ok(Vec::new());
         }
@@ -144,7 +193,7 @@ impl Executor {
         // Start pipelines with no dependencies
         for pipeline in &pipelines {
             if pipeline.dependencies.is_empty() {
-                self.start_pipeline(pipeline, &scheduler);
+                Self::start_pipeline(pipeline, scheduler.clone());
             }
         }
 
@@ -164,11 +213,14 @@ impl Executor {
                 drop(state);
 
                 if can_start && scheduler.start_pipeline(pipeline.id) {
-                    self.start_pipeline(pipeline, &scheduler);
+                    Self::start_pipeline(pipeline, scheduler.clone());
                 }
             }
 
-            std::thread::sleep(std::time::Duration::from_millis(1));
+            // Yield to tokio runtime so background tasks (e.g. TableScanSource I/O)
+            // can make progress. Using tokio::time::sleep instead of thread::sleep
+            // is critical when running on single-thread tokio runtimes.
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
         }
 
         // Extract results
@@ -181,13 +233,17 @@ impl Executor {
     }
 
     fn start_pipeline(
-        &self,
         pipeline: &crate::pipeline::Pipeline,
-        scheduler: &TaskScheduler,
+        scheduler: Arc<TaskScheduler>,
     ) {
+        // Ensure pipeline state transitions to RUNNING before submitting tasks.
+        // This is required so that complete_pipeline() can later CAS to COMPLETED.
+        let _ = scheduler.start_pipeline(pipeline.id);
         let parallelism = pipeline.parallelism;
+        // Register the expected number of tasks so scheduler can detect completion
+        scheduler.register_pipeline_tasks(pipeline.id, parallelism);
         for task_id in 0..parallelism {
-            let task = pipeline.create_task(task_id);
+            let task = pipeline.create_task_with_scheduler(task_id, scheduler.clone());
             scheduler.submit_task(task);
         }
     }
