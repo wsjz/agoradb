@@ -71,11 +71,7 @@ impl PipelineOperator for FilterPipelineOperator {
                         new_col.push_f64(slice[idx]);
                     }
                     DataType::Boolean => new_col.push_bool(col.data[idx] != 0),
-                    _ => {
-                        return Err(ExecutionError::OperatorError(
-                            "Unsupported type in filter".to_string(),
-                        ))
-                    }
+                    DataType::Utf8 => new_col.push_utf8(col.as_utf8_slice()[idx]),
                 }
                 new_col.validity[new_col.len - 1] = col.validity[idx];
             }
@@ -122,11 +118,7 @@ impl Operator for FilterOperator {
                         new_col.push_f64(slice[idx]);
                     }
                     DataType::Boolean => new_col.push_bool(col.data[idx] != 0),
-                    _ => {
-                        return Err(ExecutionError::OperatorError(
-                            "Unsupported type in filter".to_string(),
-                        ))
-                    }
+                    DataType::Utf8 => new_col.push_utf8(col.as_utf8_slice()[idx]),
                 }
                 new_col.validity[new_col.len - 1] = col.validity[idx];
             }

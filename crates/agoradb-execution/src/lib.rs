@@ -31,6 +31,7 @@ pub mod scheduler;
 pub mod scan;
 pub mod sort;
 pub mod source;
+pub mod worker_pool;
 
 pub use agoradb_core::DataType;
 pub use chunk::{ColumnVector, DataChunk};
@@ -45,7 +46,8 @@ pub use operator::Operator;
 pub use parallel_executor::ParallelExecutor;
 pub use pipeline::{Pipeline, PipelineOperator, PipelineTask, Sink, TaskStatus, PipelineState};
 pub use project::{ProjectOperator, ProjectPipelineOperator};
-pub use scheduler::{TaskScheduler, SchedulerMetrics, spawn_workers};
+pub use scheduler::{TaskScheduler, SchedulerMetrics, TaskWaker};
 pub use scan::ScanOperator;
 pub use sort::{SortCollectSink, SortEmitOperator, SortState};
 pub use source::{EmptySource, EmitSource, ExchangeSource, InMemorySource, Source, SourceResult, TableScanSource};
+pub use worker_pool::WorkerPool;

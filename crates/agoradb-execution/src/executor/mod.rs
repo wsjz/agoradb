@@ -25,15 +25,16 @@ use crate::pipeline::PipelineState;
 use crate::adapters::CollectSink;
 use crate::pipeline::Pipeline;
 use crate::pipeline_builder::PipelineBuilder;
-use crate::scheduler::{spawn_workers, TaskScheduler};
+use crate::scheduler::TaskScheduler;
+use crate::worker_pool::{get_or_create_pool, WorkerPool};
 
 /// An executor that runs an ExecutionPlan using yield-based pipeline scheduling.
 ///
 /// Each Stage is converted into a DAG of Pipelines. Pipelines with dependencies
 /// (e.g., Probe depends on Build) are started only after their upstream completes.
-/// Worker threads pull tasks from work-stealing queues.
+/// Worker threads are provided by a `WorkerPool` which is reused across queries.
 pub struct Executor {
-    num_workers: usize,
+    worker_pool: Arc<WorkerPool>,
     /// Global pipeline ID counter to ensure uniqueness across concurrent stages.
     next_pipeline_id: AtomicUsize,
 }
@@ -44,14 +45,14 @@ impl Executor {
             .map(|n| n.get())
             .unwrap_or(4);
         Self {
-            num_workers,
+            worker_pool: get_or_create_pool(num_workers),
             next_pipeline_id: AtomicUsize::new(0),
         }
     }
 
     pub fn with_workers(num_workers: usize) -> Self {
         Self {
-            num_workers,
+            worker_pool: get_or_create_pool(num_workers),
             next_pipeline_id: AtomicUsize::new(0),
         }
     }
@@ -69,10 +70,6 @@ impl Executor {
         // Validate stage dependencies with topo sort
         let _order = Self::topo_sort(&plan.stages)?;
 
-        // Create scheduler and spawn workers
-        let scheduler = TaskScheduler::new(self.num_workers);
-        let worker_handles = spawn_workers(scheduler.clone(), self.num_workers);
-
         // Execute stages with dependencies respected.
         let mut completed_stages: HashMap<usize, Vec<DataChunk>> = HashMap::new();
         let mut remaining_stages: Vec<_> = plan.stages.iter().collect();
@@ -89,10 +86,6 @@ impl Executor {
                 .collect();
 
             if ready_indices.is_empty() && !remaining_stages.is_empty() {
-                scheduler.shutdown();
-                for handle in worker_handles {
-                    let _ = handle.join();
-                }
                 return Err(ExecutionError::OperatorError(
                     "Deadlock: no stage can proceed".to_string(),
                 ));
@@ -143,9 +136,9 @@ impl Executor {
             let mut futures = futures::stream::FuturesUnordered::new();
             for (stage_id, pipelines) in stage_pipeline_list {
                 let catalog = catalog.clone();
-                let scheduler = scheduler.clone();
+                let worker_pool = self.worker_pool.clone();
                 futures.push(async move {
-                    let result = Self::run_pipelines(pipelines, &catalog, scheduler).await?;
+                    let result = Self::run_pipelines(pipelines, &catalog, worker_pool).await?;
                     Ok::<(usize, Vec<DataChunk>), ExecutionError>((stage_id, result))
                 });
             }
@@ -156,27 +149,28 @@ impl Executor {
             }
         }
 
-        // Shutdown workers
-        scheduler.shutdown();
-        for handle in worker_handles {
-            let _ = handle.join();
-        }
-
         // Return results from the last stage (highest id)
         let last_stage_id = plan.stages.iter().map(|s| s.id).max().unwrap_or(0);
         Ok(completed_stages.remove(&last_stage_id).unwrap_or_default())
     }
 
     /// Run a set of pipelines to completion and return collected results.
-    /// Pipelines must already have globally unique IDs.
+    /// Uses an event-driven completion channel instead of polling.
     async fn run_pipelines(
         pipelines: Vec<Pipeline>,
         _catalog: &Arc<AgoraCatalog>,
-        scheduler: Arc<TaskScheduler>,
+        worker_pool: Arc<WorkerPool>,
     ) -> Result<Vec<DataChunk>, ExecutionError> {
         if pipelines.is_empty() {
             return Ok(Vec::new());
         }
+
+        // Completion channel for event-driven DAG scheduling.
+        // Each pipeline sends its ID here when the last task finishes.
+        let (completion_tx, mut completion_rx) =
+            tokio::sync::mpsc::channel(pipelines.len());
+
+        let scheduler = TaskScheduler::new(worker_pool, Some(completion_tx));
 
         // Register pipeline states and find the "result" pipeline (last one with CollectSink)
         let mut result_sink: Option<Arc<std::sync::Mutex<Vec<DataChunk>>>> = None;
@@ -197,30 +191,30 @@ impl Executor {
             }
         }
 
-        // Wait for all pipelines to complete
-        loop {
-            let all_complete = pipelines.iter().all(|p| scheduler.is_pipeline_completed(p.id));
-            if all_complete {
-                break;
-            }
+        // Event-driven wait: when a pipeline completes, immediately check
+        // and start any downstream pipelines whose dependencies are now satisfied.
+        let mut completed_count = 0;
+        let total = pipelines.len();
 
-            // Check if any dependency-satisfied pipeline can start
-            for pipeline in &pipelines {
-                let state = scheduler.pipeline_states.lock().unwrap();
-                let can_start = pipeline.dependencies.iter().all(|dep| {
-                    state.get(dep).map(|s| s.is_completed()).unwrap_or(false)
-                });
-                drop(state);
+        while completed_count < total {
+            match completion_rx.recv().await {
+                Some(completed_id) => {
+                    completed_count += 1;
 
-                if can_start && scheduler.start_pipeline(pipeline.id) {
-                    Self::start_pipeline(pipeline, scheduler.clone());
+                    // Check all pipelines that depend on the completed one
+                    for pipeline in &pipelines {
+                        if pipeline.dependencies.contains(&completed_id) {
+                            let all_deps_done = pipeline.dependencies.iter().all(|dep| {
+                                scheduler.is_pipeline_completed(*dep)
+                            });
+                            if all_deps_done && scheduler.start_pipeline(pipeline.id) {
+                                Self::start_pipeline(pipeline, scheduler.clone());
+                            }
+                        }
+                    }
                 }
+                None => break,
             }
-
-            // Yield to tokio runtime so background tasks (e.g. TableScanSource I/O)
-            // can make progress. Using tokio::time::sleep instead of thread::sleep
-            // is critical when running on single-thread tokio runtimes.
-            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
         }
 
         // Extract results

@@ -23,7 +23,7 @@ use crate::project::ProjectOperator;
 use crate::scan::ScanOperator;
 use crate::source::{EmptySource, EmitSource, TableScanSource};
 use agoradb_catalog::{AgoraCatalog, StorageScanProvider};
-use agoradb_core::{ExecutionError, Morsel, OperatorSpec, SpaceUri, StageId, StagePlan};
+use agoradb_core::{ExecutionError, ExchangeType, Morsel, OperatorSpec, SpaceUri, StageId, StagePlan};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -584,23 +584,19 @@ impl PipelineBuilder {
             .await
             .map_err(ExecutionError::Catalog)?;
 
-        // Partition morsels round-robin across tasks so each worker reads a distinct subset.
-        let parallelism = self.default_parallelism.max(1);
-        let mut partitioned: Vec<Vec<Morsel>> = (0..parallelism).map(|_| Vec::new()).collect();
-        for (i, morsel) in all_morsels.into_iter().enumerate() {
-            partitioned[i % parallelism].push(morsel);
-        }
+        // Central dynamic morsel scheduling: all tasks for this scan share
+        // one `MorselScheduler` and compete for the next morsel via an
+        // atomic fetch_add.  This eliminates static pre-allocation imbalances
+        // where one task gets stuck on a large morsel while others idle.
+        // It also naturally handles task failures: remaining tasks pick up
+        // the unprocessed morsels.
+        let morsel_scheduler =
+            Arc::new(crate::morsel_scheduler::MorselScheduler::new(all_morsels));
 
-        Ok(Box::new(move |task_id: usize| {
-            let task_morsels = partitioned
-                .get(task_id)
-                .cloned()
-                .unwrap_or_default();
-            Box::new(TableScanSource::new(
+        Ok(Box::new(move |_task_id: usize| {
+            Box::new(TableScanSource::new_with_scheduler(
                 catalog.clone(),
-                space.clone(),
-                snapshot_id,
-                task_morsels,
+                morsel_scheduler.clone(),
             ))
         }))
     }
@@ -698,6 +694,63 @@ impl PipelineBuilder {
         let id = self.next_pipeline_id;
         self.next_pipeline_id += 1;
         id
+    }
+
+    // ------------------------------------------------------------------
+    // LocalExchange connector
+    // ------------------------------------------------------------------
+
+    /// Connect two pipelines with a `LocalExchange`.
+    ///
+    /// Replaces `from_pipeline`'s sink with `LocalExchangeSink` and
+    /// `to_pipeline`'s source with `ExchangeSource` reading from the same
+    /// `LocalExchangeBuffer`.
+    ///
+    /// # Panics
+    /// Panics if `from_idx` or `to_idx` are out of bounds.
+    pub fn connect_local_exchange(
+        pipelines: &mut [Pipeline],
+        from_idx: usize,
+        to_idx: usize,
+        exchange_type: ExchangeType,
+    ) {
+        assert!(
+            from_idx < pipelines.len(),
+            "from_idx {} out of bounds (pipelines.len = {})",
+            from_idx,
+            pipelines.len()
+        );
+        assert!(
+            to_idx < pipelines.len(),
+            "to_idx {} out of bounds (pipelines.len = {})",
+            to_idx,
+            pipelines.len()
+        );
+
+        let num_sinks = pipelines[from_idx].parallelism;
+        let num_partitions = pipelines[to_idx].parallelism;
+
+        let buffer = Arc::new(crate::local_exchange::LocalExchangeBuffer::new_with_partitions(
+            exchange_type,
+            num_sinks,
+            num_partitions,
+        ));
+
+        // Replace from_pipeline's sink with LocalExchangeSink.
+        // Each task gets its own sink (via clone_sink in create_task).
+        pipelines[from_idx].sink = Box::new(crate::local_exchange::LocalExchangeSink::new(
+            buffer.clone(),
+            0,
+        ));
+
+        // Replace to_pipeline's source with ExchangeSource.
+        // Each task reads from its corresponding partition.
+        let buf = buffer.clone();
+        pipelines[to_idx].source_factory = Box::new(move |task_id: usize| {
+            Box::new(crate::source::ExchangeSource::new(
+                crate::local_exchange::LocalExchangeSource::new(buf.clone(), task_id),
+            ))
+        });
     }
 }
 

@@ -14,10 +14,36 @@
 
 use crate::chunk::DataChunk;
 use crate::local_exchange::LocalExchangeSource;
+use crate::morsel_scheduler::MorselScheduler;
 use agoradb_catalog::{AgoraCatalog, StorageScanProvider};
 use agoradb_core::{ExecutionError, Morsel, SpaceUri};
 use std::sync::mpsc;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+
+// ------------------------------------------------------------------
+// Global I/O Runtime
+// ------------------------------------------------------------------
+
+/// Shared multi-threaded tokio runtime for all storage I/O.
+///
+/// Instead of spawning a new thread (or a new runtime) per
+/// `TableScanSource`, every source submits its async read work to this
+/// single runtime.  This caps the total I/O threads at a fixed number
+/// (4) regardless of how many concurrent queries or sources exist.
+static IO_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+
+fn get_io_runtime() -> &'static tokio::runtime::Runtime {
+    IO_RUNTIME.get_or_init(|| {
+        let num_io_threads = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(num_io_threads)
+            .thread_name("agoradb-io")
+            .build()
+            .expect("Failed to create global I/O runtime")
+    })
+}
 
 /// Result of a non-blocking pull from a Source.
 pub enum SourceResult {
@@ -36,90 +62,88 @@ pub trait Source: Send {
     /// Optional: inject scheduler reference for event-driven wake.
     /// Called once when the PipelineTask is created.
     fn set_scheduler(&mut self, _scheduler: Arc<crate::scheduler::TaskScheduler>) {}
+    /// Optional: inject a per-task waker for precise wakeups.
+    /// Called once when the PipelineTask is created.
+    fn set_waker(&mut self, _waker: crate::scheduler::TaskWaker) {}
 }
 
 // ------------------------------------------------------------------
 // TableScanSource
 // ------------------------------------------------------------------
 
-/// Reads morsels from storage. A background tokio task loads
-/// data into a channel; `try_next` pulls from that channel.
-/// Background task is started lazily on first `try_next` so that
-/// `set_scheduler` has already been called and wake events work.
+/// Reads morsels from storage using a central `MorselScheduler`.
+///
+/// All tasks for the same table share one `MorselScheduler`, which
+/// dynamically assigns morsels via an atomic counter.  This means:
+/// - Fast workers process more morsels; slow workers process fewer.
+/// - No task is stuck with a large morsel while others idle.
+/// - If a task panics or hangs, its unprocessed morsels are picked up
+///   by the remaining tasks.
+///
+/// A background tokio task loads data into a channel; `try_next`
+/// pulls from that channel.  The background task is started lazily
+/// on first `try_next` so that `set_scheduler` has already been called.
 pub struct TableScanSource {
     rx: mpsc::Receiver<DataChunk>,
-    tx: Option<mpsc::Sender<DataChunk>>,
+    tx: Option<mpsc::SyncSender<DataChunk>>,
     #[allow(dead_code)]
     total_morsels: usize,
     /// Scheduler handle set by `create_task_with_scheduler`.
     scheduler: Option<std::sync::Arc<crate::scheduler::TaskScheduler>>,
+    /// Per-task waker for precise wakeups (StarRocks/Doris style).
+    waker: Option<crate::scheduler::TaskWaker>,
     /// Deferred start state — moved into the background task on first `try_next`.
     catalog: Option<Arc<AgoraCatalog>>,
-    morsels: Option<Vec<Morsel>>,
+    /// Central morsel scheduler shared across all tasks of the same scan.
+    morsel_scheduler: Option<Arc<MorselScheduler>>,
 }
 
 impl TableScanSource {
-    pub fn new(catalog: Arc<AgoraCatalog>, _space: SpaceUri, _snapshot_id: i64, morsels: Vec<Morsel>) -> Self {
-        let total_morsels = morsels.len();
-        let (tx, rx) = mpsc::channel::<DataChunk>();
+    pub fn new_with_scheduler(
+        catalog: Arc<AgoraCatalog>,
+        morsel_scheduler: Arc<MorselScheduler>,
+    ) -> Self {
+        let total_morsels = morsel_scheduler.total();
+        let (tx, rx) = mpsc::sync_channel::<DataChunk>(4);
         Self {
             rx,
             tx: Some(tx),
             total_morsels,
             scheduler: None,
+            waker: None,
             catalog: Some(catalog),
-            morsels: Some(morsels),
+            morsel_scheduler: Some(morsel_scheduler),
         }
     }
 
     /// Start the background I/O task lazily.
     /// Called from `try_next` so that `set_scheduler` has already run.
     fn ensure_started(&mut self) {
-        if self.morsels.is_none() {
+        if self.morsel_scheduler.is_none() {
             return; // Already started
         }
         let catalog = self.catalog.take().unwrap();
-        let morsels = self.morsels.take().unwrap();
+        let morsel_scheduler = self.morsel_scheduler.take().unwrap();
         let tx = self.tx.take().unwrap();
         let scheduler = self.scheduler.clone();
+        let waker = self.waker.clone();
 
-        // Worker threads are plain OS threads (not tokio runtime threads).
-        // We cannot call tokio::spawn() here — it would panic with
-        // "there is no reactor running".
-        //
-        // Strategy:
-        //   - If we're inside a tokio runtime (e.g. test calling directly),
-        //     use Handle::try_current() + spawn.
-        //   - Otherwise (worker thread), spawn a new std::thread with its
-        //     own tokio::runtime::Runtime and block_on the async I/O.
-        match tokio::runtime::Handle::try_current() {
-            Ok(handle) => {
-                handle.spawn(async move {
-                    Self::read_morsels(catalog, morsels, tx, scheduler).await;
-                });
-            }
-            Err(_) => {
-                std::thread::spawn(move || {
-                    let rt = match tokio::runtime::Runtime::new() {
-                        Ok(rt) => rt,
-                        Err(e) => {
-                            eprintln!("TableScanSource: failed to create tokio runtime: {}", e);
-                            return;
-                        }
-                    };
-                    rt.block_on(Self::read_morsels(catalog, morsels, tx, scheduler));
-                });
-            }
-        }
+        // All I/O is dispatched to the shared global runtime.
+        get_io_runtime().spawn(async move {
+            Self::read_morsels(catalog, morsel_scheduler, tx, scheduler, waker).await;
+        });
     }
 
     async fn read_morsels(
         catalog: Arc<AgoraCatalog>,
-        morsels: Vec<Morsel>,
-        tx: mpsc::Sender<DataChunk>,
+        morsel_scheduler: Arc<MorselScheduler>,
+        tx: mpsc::SyncSender<DataChunk>,
         scheduler: Option<std::sync::Arc<crate::scheduler::TaskScheduler>>,
+        waker: Option<crate::scheduler::TaskWaker>,
     ) {
-        for morsel in morsels {
+        // Dynamic morsel allocation: all tasks for this table compete
+        // for the next morsel via a central atomic counter.
+        while let Some(morsel) = morsel_scheduler.next() {
             match catalog.read_morsel(&morsel).await {
                 Ok(batches) => {
                     for batch in batches {
@@ -128,10 +152,9 @@ impl TableScanSource {
                                 if tx.send(chunk).is_err() {
                                     return;
                                 }
-                                // Data arrived — wake blocked workers
-                                // so they can retry their sources.
-                                if let Some(ref sched) = scheduler {
-                                    sched.wake_blocked_tasks();
+                                // Data arrived — wake this task precisely.
+                                if let Some(ref w) = waker {
+                                    w.wake();
                                 }
                             }
                             Err(_) => continue,
@@ -141,10 +164,14 @@ impl TableScanSource {
                 Err(_) => break,
             }
         }
-        // After all data sent, wake any remaining blocked tasks
-        // so they see Done instead of waiting forever.
+        // After all data sent, wake this task precisely...
+        if let Some(ref w) = waker {
+            w.wake();
+        }
+        // ...and broadcast-wake all blocked tasks as a safety net.
+        // This prevents lost tasks when wake() races with register_blocked_task().
         if let Some(ref sched) = scheduler {
-            sched.wake_blocked_tasks();
+            sched.wake_all_blocked_tasks();
         }
     }
 }
@@ -164,6 +191,10 @@ impl Source for TableScanSource {
         scheduler: std::sync::Arc<crate::scheduler::TaskScheduler>,
     ) {
         self.scheduler = Some(scheduler);
+    }
+
+    fn set_waker(&mut self, waker: crate::scheduler::TaskWaker) {
+        self.waker = Some(waker);
     }
 }
 

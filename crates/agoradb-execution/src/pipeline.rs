@@ -88,6 +88,9 @@ pub fn clone_sink(sink: &dyn Sink) -> Box<dyn Sink> {
     if let Some(s) = sink.as_any().downcast_ref::<crate::sort::SortCollectSink>() {
         return s.clone_box();
     }
+    if let Some(e) = sink.as_any().downcast_ref::<crate::local_exchange::LocalExchangeSink>() {
+        return e.clone_box();
+    }
     panic!("Unknown Sink type — cannot clone");
 }
 
@@ -120,6 +123,7 @@ impl Pipeline {
             operators: self.operators.iter().map(|op| clone_operator(op.as_ref())).collect(),
             sink: clone_sink(self.sink.as_ref()),
             pending_chunk: None,
+            scheduler: None,
         }
     }
 
@@ -130,7 +134,9 @@ impl Pipeline {
         scheduler: std::sync::Arc<crate::scheduler::TaskScheduler>,
     ) -> PipelineTask {
         let mut source = (self.source_factory)(task_id);
-        source.set_scheduler(scheduler);
+        source.set_scheduler(scheduler.clone());
+        let waker = crate::scheduler::TaskWaker::new(scheduler.clone(), self.id, task_id);
+        source.set_waker(waker);
         PipelineTask {
             task_id,
             pipeline_id: self.id,
@@ -139,6 +145,7 @@ impl Pipeline {
             operators: self.operators.iter().map(|op| clone_operator(op.as_ref())).collect(),
             sink: clone_sink(self.sink.as_ref()),
             pending_chunk: None,
+            scheduler: Some(scheduler),
         }
     }
 }
@@ -221,6 +228,10 @@ pub struct PipelineTask {
     pub operators: Vec<Box<dyn PipelineOperator>>,
     pub sink: Box<dyn Sink>,
     pub pending_chunk: Option<DataChunk>,
+    /// Reference to the query-level scheduler. Used by the worker thread
+    /// to notify pipeline completion / blocked tasks without needing
+    /// the scheduler reference passed externally.
+    pub scheduler: Option<std::sync::Arc<crate::scheduler::TaskScheduler>>,
 }
 
 impl PipelineTask {

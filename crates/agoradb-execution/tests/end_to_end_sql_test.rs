@@ -759,3 +759,320 @@ async fn test_e2e_order_by() {
     assert_eq!(all_scores, vec![50, 40, 30, 20]);
     assert_eq!(all_ids, vec![2, 4, 1, 3]);
 }
+
+// ============================================================================
+// Test 6: Max complexity — JOIN + multi-condition WHERE + multi-column GROUP BY
+//         + multiple aggregates + LIMIT
+// ============================================================================
+
+#[tokio::test]
+async fn test_e2e_max_complexity() {
+    let (catalog, temp_dir) = setup_catalog().await;
+
+    // Create "orders" table (id, customer_id, region, amount)
+    let orders_iceberg_schema = iceberg::spec::Schema::builder()
+        .with_fields(vec![
+            iceberg::spec::NestedField::required(
+                1,
+                "id",
+                iceberg::spec::Type::Primitive(iceberg::spec::PrimitiveType::Long),
+            )
+            .into(),
+            iceberg::spec::NestedField::required(
+                2,
+                "customer_id",
+                iceberg::spec::Type::Primitive(iceberg::spec::PrimitiveType::Long),
+            )
+            .into(),
+            iceberg::spec::NestedField::required(
+                3,
+                "region",
+                iceberg::spec::Type::Primitive(iceberg::spec::PrimitiveType::String),
+            )
+            .into(),
+            iceberg::spec::NestedField::required(
+                4,
+                "amount",
+                iceberg::spec::Type::Primitive(iceberg::spec::PrimitiveType::Long),
+            )
+            .into(),
+        ])
+        .build()
+        .unwrap();
+
+    catalog
+        .create_table(
+            &NamespaceIdent::new("default".to_string()),
+            iceberg::TableCreation::builder()
+                .name("orders".to_string())
+                .schema(orders_iceberg_schema)
+                .build(),
+        )
+        .await
+        .unwrap();
+
+    // Create "customers" table (id, name, tier)
+    let customers_iceberg_schema = iceberg::spec::Schema::builder()
+        .with_fields(vec![
+            iceberg::spec::NestedField::required(
+                1,
+                "id",
+                iceberg::spec::Type::Primitive(iceberg::spec::PrimitiveType::Long),
+            )
+            .into(),
+            iceberg::spec::NestedField::required(
+                2,
+                "name",
+                iceberg::spec::Type::Primitive(iceberg::spec::PrimitiveType::String),
+            )
+            .into(),
+            iceberg::spec::NestedField::required(
+                3,
+                "tier",
+                iceberg::spec::Type::Primitive(iceberg::spec::PrimitiveType::String),
+            )
+            .into(),
+        ])
+        .build()
+        .unwrap();
+
+    catalog
+        .create_table(
+            &NamespaceIdent::new("default".to_string()),
+            iceberg::TableCreation::builder()
+                .name("customers".to_string())
+                .schema(customers_iceberg_schema)
+                .build(),
+        )
+        .await
+        .unwrap();
+
+    // Write data to orders
+    // Rows: [(1, 10, 'US', 100), (2, 20, 'US', 200), (3, 10, 'EU', 150),
+    //        (4, 20, 'EU', 250), (5, 10, 'US', 80),  (6, 20, 'US', 120),
+    //        (7, 10, 'US', 30)]  <- filtered out by amount > 50
+    let orders_arrow_schema = Arc::new(Schema::new(vec![
+        Field::new("id", ArrowDataType::Int64, false),
+        Field::new("customer_id", ArrowDataType::Int64, false),
+        Field::new("region", ArrowDataType::Utf8, false),
+        Field::new("amount", ArrowDataType::Int64, false),
+    ]));
+    let mut orders_engine = StorageEngine::new(
+        catalog.clone(),
+        orders_arrow_schema.clone(),
+        temp_dir.path().to_path_buf(),
+        "orders".to_string(),
+    );
+
+    let orders_batch = RecordBatch::try_new(
+        orders_arrow_schema.clone(),
+        vec![
+            Arc::new(Int64Array::from(vec![1, 2, 3, 4, 5, 6, 7])) as ArrayRef,
+            Arc::new(Int64Array::from(vec![10, 20, 10, 20, 10, 20, 10])) as ArrayRef,
+            Arc::new(StringArray::from(vec!["US", "US", "EU", "EU", "US", "US", "US"])) as ArrayRef,
+            Arc::new(Int64Array::from(vec![100, 200, 150, 250, 80, 120, 30])) as ArrayRef,
+        ],
+    )
+    .unwrap();
+    orders_engine.append(orders_batch).await.unwrap();
+    orders_engine.flush().await.unwrap();
+
+    // Write data to customers
+    // Rows: [(10, 'Alice', 'A'), (20, 'Bob', 'B')]
+    let customers_arrow_schema = Arc::new(Schema::new(vec![
+        Field::new("id", ArrowDataType::Int64, false),
+        Field::new("name", ArrowDataType::Utf8, false),
+        Field::new("tier", ArrowDataType::Utf8, false),
+    ]));
+    let mut customers_engine = StorageEngine::new(
+        catalog.clone(),
+        customers_arrow_schema.clone(),
+        temp_dir.path().to_path_buf(),
+        "customers".to_string(),
+    );
+
+    let customers_batch = RecordBatch::try_new(
+        customers_arrow_schema.clone(),
+        vec![
+            Arc::new(Int64Array::from(vec![10, 20])) as ArrayRef,
+            Arc::new(StringArray::from(vec!["Alice", "Bob"])) as ArrayRef,
+            Arc::new(StringArray::from(vec!["A", "B"])) as ArrayRef,
+        ],
+    )
+    .unwrap();
+    customers_engine.append(customers_batch).await.unwrap();
+    customers_engine.flush().await.unwrap();
+
+    // Schema provider with qualified names for alias support
+    let schema_provider = create_test_schema_provider(vec![
+        (
+            "orders",
+            vec![
+                ("id", DataType::Int64),
+                ("customer_id", DataType::Int64),
+                ("region", DataType::Utf8),
+                ("amount", DataType::Int64),
+                // qualified names for JOIN keys
+                ("o.id", DataType::Int64),
+                ("o.customer_id", DataType::Int64),
+                ("o.region", DataType::Utf8),
+                ("o.amount", DataType::Int64),
+            ],
+        ),
+        (
+            "customers",
+            vec![
+                ("id", DataType::Int64),
+                ("name", DataType::Utf8),
+                ("tier", DataType::Utf8),
+                ("c.id", DataType::Int64),
+                ("c.name", DataType::Utf8),
+                ("c.tier", DataType::Utf8),
+            ],
+        ),
+    ]);
+
+    // Schema map:
+    // Combined join output: [orders.id(0), orders.customer_id(1), orders.region(2), orders.amount(3),
+    //                        customers.id(4), customers.name(5), customers.tier(6)]
+    //
+    // JOIN keys (local indices):
+    //   o.customer_id -> 1 (local in orders)
+    //   c.id -> 0 (local in customers)
+    //
+    // GROUP BY / aggregate (combined indices):
+    //   o.region -> 2
+    //   c.tier -> 6
+    //   o.amount -> 3
+    let mut schema_map = HashMap::new();
+    schema_map.insert("o.id".to_string(), 0);
+    schema_map.insert("o.customer_id".to_string(), 1); // local for join key
+    schema_map.insert("o.region".to_string(), 2);
+    schema_map.insert("o.amount".to_string(), 3);
+    schema_map.insert("c.id".to_string(), 0); // local for join key
+    schema_map.insert("c.name".to_string(), 5);
+    schema_map.insert("c.tier".to_string(), 6);
+
+    // Step 1: Just JOIN + SELECT (no WHERE, no GROUP BY)
+    let sql1 = "SELECT o.region, c.tier, o.amount FROM orders o JOIN customers c ON o.customer_id = c.id";
+    let chunks1 = run_sql_pipeline(sql1, &catalog, &schema_provider, &schema_map)
+        .await
+        .unwrap();
+    let total_rows1: usize = chunks1.iter().map(|c| c.len).sum();
+    assert_eq!(total_rows1, 7, "JOIN should return 7 rows (7 orders × 1 customer match)");
+
+    // Step 2: JOIN + WHERE (single condition)
+    let sql2 = "SELECT o.region, c.tier, o.amount FROM orders o JOIN customers c ON o.customer_id = c.id WHERE o.amount > 50";
+    let chunks2 = run_sql_pipeline(sql2, &catalog, &schema_provider, &schema_map)
+        .await
+        .unwrap();
+    let total_rows2: usize = chunks2.iter().map(|c| c.len).sum();
+    assert_eq!(total_rows2, 6, "JOIN + WHERE > 50 should return 6 rows (all rows have amount > 50)");
+
+    // Step 3: JOIN + WHERE (multi-condition)
+    let sql3 = "SELECT o.region, c.tier, o.amount FROM orders o JOIN customers c ON o.customer_id = c.id WHERE o.amount > 50 AND o.amount < 300";
+    let chunks3 = run_sql_pipeline(sql3, &catalog, &schema_provider, &schema_map)
+        .await
+        .unwrap();
+    let total_rows3: usize = chunks3.iter().map(|c| c.len).sum();
+    assert_eq!(total_rows3, 6, "JOIN + multi-WHERE should return 6 rows");
+
+    // Run full pipeline
+    // SQL: JOIN + WHERE (multi-condition, all Int64) + GROUP BY (multi-column) + aggregates + LIMIT
+    let sql = concat!(
+        "SELECT o.region, c.tier, SUM(o.amount), COUNT(o.amount), AVG(o.amount), MIN(o.amount), MAX(o.amount) ",
+        "FROM orders o JOIN customers c ON o.customer_id = c.id ",
+        "WHERE o.amount > 50 AND o.amount < 300 ",
+        "GROUP BY o.region, c.tier ",
+        "LIMIT 10"
+    );
+    let chunks = run_sql_pipeline(sql, &catalog, &schema_provider, &schema_map)
+        .await
+        .unwrap();
+
+    // Expected after WHERE filtering (amount > 50 AND amount < 300):
+    //   (1, 10, 'US', 100) -> amount=100, pass
+    //   (2, 20, 'US', 200) -> amount=200, pass
+    //   (3, 10, 'EU', 150) -> amount=150, pass
+    //   (4, 20, 'EU', 250) -> amount=250, pass
+    //   (5, 10, 'US', 80)  -> amount=80,  pass
+    //   (6, 20, 'US', 120) -> amount=120, pass
+    //   (7, 10, 'US', 30)  -> amount=30,  fail
+    //
+    // JOIN with customers:
+    //   customer_id 10 -> Alice, tier='A'
+    //   customer_id 20 -> Bob,   tier='B'
+    //
+    // After JOIN (6 rows):
+    //   (1, 'US', 'A', 100), (3, 'EU', 'A', 150), (5, 'US', 'A', 80), (6... wait 6 is customer_id 20)
+    //   (2, 'US', 'B', 200), (4, 'EU', 'B', 250), (6, 'US', 'B', 120)
+    //
+    // GROUP BY o.region, c.tier:
+    //   ('US', 'A'): amounts [100, 80]  -> SUM=180, COUNT=2, AVG=90,  MIN=80,  MAX=100
+    //   ('US', 'B'): amounts [200, 120] -> SUM=320, COUNT=2, AVG=160, MIN=120, MAX=200
+    //   ('EU', 'A'): amounts [150]      -> SUM=150, COUNT=1, AVG=150, MIN=150, MAX=150
+    //   ('EU', 'B'): amounts [250]      -> SUM=250, COUNT=1, AVG=250, MIN=250, MAX=250
+
+    let total_rows: usize = chunks.iter().map(|c| c.len).sum();
+    assert_eq!(total_rows, 4, "Expected 4 groups after filtering");
+
+    // Collect all groups for verification
+    let mut all_regions = Vec::new();
+    let mut all_tiers = Vec::new();
+    let mut all_sums = Vec::new();
+    let mut all_counts = Vec::new();
+    let mut all_avgs = Vec::new();
+    let mut all_mins = Vec::new();
+    let mut all_maxs = Vec::new();
+
+    for chunk in &chunks {
+        for row in 0..chunk.len {
+            all_regions.push(chunk.columns[0].as_utf8_slice()[row].to_string());
+            all_tiers.push(chunk.columns[1].as_utf8_slice()[row].to_string());
+            all_sums.push(chunk.columns[2].as_i64_slice()[row]);
+            all_counts.push(chunk.columns[3].as_i64_slice()[row]);
+            // AVG output is Float64
+            let avg_slice = unsafe {
+                std::slice::from_raw_parts(chunk.columns[4].data.as_ptr() as *const f64, chunk.columns[4].len)
+            };
+            all_avgs.push(avg_slice[row] as i64); // round to i64 for comparison
+            all_mins.push(chunk.columns[5].as_i64_slice()[row]);
+            all_maxs.push(chunk.columns[6].as_i64_slice()[row]);
+        }
+    }
+
+    // Verify each group
+    let us_a_idx = all_regions.iter().position(|r| r == "US" && all_tiers[all_regions.iter().position(|x| x == "US").unwrap()] == "A").unwrap_or_else(|| {
+        all_regions.iter().zip(all_tiers.iter()).position(|(r, t)| r == "US" && t == "A").unwrap()
+    });
+
+    // Find indices for each group
+    let us_a = all_regions.iter().zip(all_tiers.iter()).position(|(r, t)| r == "US" && t == "A").unwrap();
+    let us_b = all_regions.iter().zip(all_tiers.iter()).position(|(r, t)| r == "US" && t == "B").unwrap();
+    let eu_a = all_regions.iter().zip(all_tiers.iter()).position(|(r, t)| r == "EU" && t == "A").unwrap();
+    let eu_b = all_regions.iter().zip(all_tiers.iter()).position(|(r, t)| r == "EU" && t == "B").unwrap();
+
+    assert_eq!(all_sums[us_a], 180, "US-A sum should be 100+80=180");
+    assert_eq!(all_counts[us_a], 2);
+    assert_eq!(all_avgs[us_a], 90);
+    assert_eq!(all_mins[us_a], 80);
+    assert_eq!(all_maxs[us_a], 100);
+
+    assert_eq!(all_sums[us_b], 320, "US-B sum should be 200+120=320");
+    assert_eq!(all_counts[us_b], 2);
+    assert_eq!(all_avgs[us_b], 160);
+    assert_eq!(all_mins[us_b], 120);
+    assert_eq!(all_maxs[us_b], 200);
+
+    assert_eq!(all_sums[eu_a], 150);
+    assert_eq!(all_counts[eu_a], 1);
+    assert_eq!(all_avgs[eu_a], 150);
+    assert_eq!(all_mins[eu_a], 150);
+    assert_eq!(all_maxs[eu_a], 150);
+
+    assert_eq!(all_sums[eu_b], 250);
+    assert_eq!(all_counts[eu_b], 1);
+    assert_eq!(all_avgs[eu_b], 250);
+    assert_eq!(all_mins[eu_b], 250);
+    assert_eq!(all_maxs[eu_b], 250);
+}

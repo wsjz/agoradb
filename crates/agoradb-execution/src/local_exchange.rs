@@ -13,13 +13,13 @@
 // limitations under the License.
 
 use crate::chunk::DataChunk;
-use crate::operator::Operator;
+use crate::pipeline::{CloneSink, Sink};
 use agoradb_core::{ExecutionError, ExchangeType};
 use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// Shared buffer for local data exchange between pipeline stages.
+/// Shared buffer for local data exchange between pipelines.
 ///
 /// Supports three modes:
 /// - **Gather**: All sink data is collected into a single partition.
@@ -42,14 +42,23 @@ pub struct ExchangeQueue {
 }
 
 impl LocalExchangeBuffer {
-    /// Create a new exchange buffer with the given exchange type and number of sinks.
-    pub fn new(exchange_type: ExchangeType, num_sinks: usize) -> Self {
-        let num_partitions = match &exchange_type {
+    /// Create a new exchange buffer.
+    ///
+    /// - `num_sinks`: number of producer tasks (used to detect completion).
+    /// - `num_partitions`: number of consumer partitions.
+    ///
+    /// For **Gather** `num_partitions` is always 1 regardless of this argument.
+    pub fn new_with_partitions(
+        exchange_type: ExchangeType,
+        num_sinks: usize,
+        num_partitions: usize,
+    ) -> Self {
+        let actual_partitions = match &exchange_type {
             ExchangeType::Gather => 1,
-            ExchangeType::Broadcast => num_sinks,
-            ExchangeType::HashPartition { .. } => num_sinks,
+            ExchangeType::Broadcast => num_partitions,
+            ExchangeType::HashPartition { .. } => num_partitions,
         };
-        let partitions = (0..num_partitions)
+        let partitions = (0..actual_partitions)
             .map(|_| ExchangeQueue::new(1024))
             .collect();
         Self {
@@ -58,6 +67,11 @@ impl LocalExchangeBuffer {
             partitions,
             finished_sinks: AtomicUsize::new(0),
         }
+    }
+
+    /// Convenience constructor where `num_sinks == num_partitions`.
+    pub fn new(exchange_type: ExchangeType, num_sinks: usize) -> Self {
+        Self::new_with_partitions(exchange_type, num_sinks, num_sinks)
     }
 
     /// Push a chunk from the given sink into the appropriate partition(s).
@@ -141,21 +155,25 @@ fn partition_chunk(
     Ok(result)
 }
 
-/// Push-based sink operator that feeds data into a `LocalExchangeBuffer`.
+// ------------------------------------------------------------------
+// LocalExchangeSink — Pipeline-architecture Sink trait
+// ------------------------------------------------------------------
+
+/// A Sink that feeds data into a `LocalExchangeBuffer`.
+/// Used as the sink of a producer pipeline in the Pipeline architecture.
 pub struct LocalExchangeSink {
     buffer: Arc<LocalExchangeBuffer>,
     sink_id: usize,
 }
 
 impl LocalExchangeSink {
-    /// Create a new sink targeting the given buffer and sink ID.
     pub fn new(buffer: Arc<LocalExchangeBuffer>, sink_id: usize) -> Self {
         Self { buffer, sink_id }
     }
 }
 
-impl Operator for LocalExchangeSink {
-    fn push(&mut self, chunk: DataChunk) -> Result<(), ExecutionError> {
+impl Sink for LocalExchangeSink {
+    fn consume(&mut self, chunk: DataChunk) -> Result<(), ExecutionError> {
         self.buffer.push(chunk, self.sink_id)
     }
 
@@ -164,15 +182,25 @@ impl Operator for LocalExchangeSink {
         Ok(())
     }
 
-    fn set_output(&mut self, _output: Box<dyn Operator>) {
-        // Sink has no downstream output
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }
 
+impl CloneSink for LocalExchangeSink {
+    fn clone_box(&self) -> Box<dyn Sink> {
+        Box::new(Self {
+            buffer: self.buffer.clone(),
+            sink_id: self.sink_id,
+        })
+    }
+}
+
+// ------------------------------------------------------------------
+// LocalExchangeSource
+// ------------------------------------------------------------------
+
 /// Pull-based source that reads data from a `LocalExchangeBuffer` partition.
-///
-/// This is not an `Operator` — it is consumed directly by a scan-like driver
-/// or wrapped into an adapter.
 pub struct LocalExchangeSource {
     buffer: Arc<LocalExchangeBuffer>,
     partition_idx: usize,
@@ -219,8 +247,8 @@ mod tests {
         let mut sink0 = LocalExchangeSink::new(buffer.clone(), 0);
         let mut sink1 = LocalExchangeSink::new(buffer.clone(), 1);
 
-        sink0.push(make_chunk(&[1, 2])).unwrap();
-        sink1.push(make_chunk(&[3, 4])).unwrap();
+        sink0.consume(make_chunk(&[1, 2])).unwrap();
+        sink1.consume(make_chunk(&[3, 4])).unwrap();
         sink0.finalize().unwrap();
         sink1.finalize().unwrap();
 
@@ -236,7 +264,7 @@ mod tests {
         let buffer = Arc::new(LocalExchangeBuffer::new(ExchangeType::Broadcast, 2));
         let mut sink0 = LocalExchangeSink::new(buffer.clone(), 0);
 
-        sink0.push(make_chunk(&[1, 2])).unwrap();
+        sink0.consume(make_chunk(&[1, 2])).unwrap();
         sink0.finalize().unwrap();
 
         let mut source0 = LocalExchangeSource::new(buffer.clone(), 0);
@@ -256,7 +284,7 @@ mod tests {
         ));
         let mut sink0 = LocalExchangeSink::new(buffer.clone(), 0);
 
-        sink0.push(make_chunk(&[1, 2, 3])).unwrap();
+        sink0.consume(make_chunk(&[1, 2, 3])).unwrap();
         sink0.finalize().unwrap();
 
         // Round-robin fallback puts everything in partition 0
