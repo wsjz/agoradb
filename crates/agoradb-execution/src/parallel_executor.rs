@@ -75,8 +75,7 @@ mod tests {
 
         let results = ParallelExecutor::execute(scheduler, 2, |morsel| async move {
             // Simulate work: return a DataChunk with row_count rows
-            let mut col =
-                ColumnVector::new(DataType::Int64, morsel.row_count);
+            let mut col = ColumnVector::new(DataType::Int64, morsel.row_count);
             for i in 0..morsel.row_count {
                 col.push_i64(i as i64);
             }

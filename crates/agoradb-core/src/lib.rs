@@ -15,6 +15,7 @@
 pub mod constants;
 pub mod error;
 pub mod operator;
+pub mod schema_provider;
 pub mod space;
 pub mod stage;
 
@@ -23,10 +24,11 @@ pub use error::{
     AgoraError, CatalogError, CompactionError, ExecutionError, StorageError, VfsError,
 };
 pub use operator::{AggFunction, DataType, JoinType, OperatorSpec, PredicateDef};
+pub use schema_provider::SchemaProvider;
 pub use space::{Mode, SpaceUri};
 pub use stage::{
-    ExchangeSpec, ExchangeType, ExecutionPlan, GlobalStateId, Partitioning, PipelineId, SortDirection,
-    Stage, StageId, StagePlan,
+    ExchangeSpec, ExchangeType, ExecutionPlan, GlobalStateId, Partitioning, PipelineId,
+    SortDirection, Stage, StageId, StagePlan,
 };
 
 /// A unit of parallel work — a fixed-size row range within a single Parquet file.

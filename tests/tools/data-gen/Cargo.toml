@@ -1,0 +1,23 @@
+[package]
+name = "test-data-gen"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "generate-test-data"
+path = "src/main.rs"
+
+[dependencies]
+agoradb-catalog = { path = "../../../crates/agoradb-catalog" }
+agoradb-storage = { path = "../../../crates/agoradb-storage" }
+agoradb-core = { path = "../../../crates/agoradb-core" }
+arrow-array = "57"
+arrow-schema = "57"
+arrow = "57"
+iceberg = "0.9"
+tokio = { workspace = true }
+clap = { version = "4", features = ["derive"] }
+rand = { version = "0.8", features = ["small_rng"] }
+uuid = { workspace = true }

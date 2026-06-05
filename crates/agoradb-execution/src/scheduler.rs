@@ -55,7 +55,6 @@ impl ActiveTaskTracker {
     }
 }
 
-
 // ------------------------------------------------------------------
 // TaskWaker — per-task precise wake (StarRocks/Doris style)
 // ------------------------------------------------------------------
@@ -156,7 +155,10 @@ impl TaskScheduler {
 
     /// Register a pipeline's state.
     pub fn register_pipeline(&self, pipeline_id: PipelineId, state: PipelineState) {
-        self.pipeline_states.lock().unwrap().insert(pipeline_id, state);
+        self.pipeline_states
+            .lock()
+            .unwrap()
+            .insert(pipeline_id, state);
     }
 
     /// Register the expected number of tasks for a pipeline.
@@ -194,7 +196,10 @@ impl TaskScheduler {
     /// Check if a pipeline is completed.
     pub fn is_pipeline_completed(&self, pipeline_id: PipelineId) -> bool {
         let states = self.pipeline_states.lock().unwrap();
-        states.get(&pipeline_id).map(|s| s.is_completed()).unwrap_or(false)
+        states
+            .get(&pipeline_id)
+            .map(|s| s.is_completed())
+            .unwrap_or(false)
     }
 
     /// Register a task that yielded because its Source returned `NotReady`.
@@ -228,6 +233,8 @@ impl TaskScheduler {
         for task in tasks {
             self.submit_task(task);
         }
-        self.metrics.blocked_tasks.fetch_sub(count, Ordering::Relaxed);
+        self.metrics
+            .blocked_tasks
+            .fetch_sub(count, Ordering::Relaxed);
     }
 }

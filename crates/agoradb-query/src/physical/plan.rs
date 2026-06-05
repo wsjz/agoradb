@@ -12,9 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use agoradb_core::{AggFunction, JoinType};
-use agoradb_core::SpaceUri;
 use crate::{BinaryOp, LiteralValue};
+use agoradb_core::SpaceUri;
+use agoradb_core::{AggFunction, JoinType};
 
 /// A physical query plan — the output of the PhysicalPlanner.
 ///
@@ -69,4 +69,3 @@ pub enum PhysicalExpr {
         right: Box<PhysicalExpr>,
     },
 }
-

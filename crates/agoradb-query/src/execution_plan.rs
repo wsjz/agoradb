@@ -46,11 +46,19 @@ impl StageBuilder {
     ) -> Result<(), ExecutionError> {
         let id = stages.len();
         let stage_plan = self.physical_to_stage_plan(plan)?;
+        // Sort must be single-threaded: global ordering requires all data
+        // in one place. Parallel sort would produce N sorted runs, not a
+        // single globally sorted output.
+        let parallelism = if matches!(plan, PhysicalPlan::Sort { .. }) {
+            1
+        } else {
+            Self::default_parallelism()
+        };
         stages.push(Stage {
             id,
             label: self.label_for_plan(plan),
             dependencies: vec![], // v1: no cross-stage Exchange within single-node
-            parallelism: Self::default_parallelism(),
+            parallelism,
             plan: stage_plan,
             output: None,
         });
@@ -73,23 +81,26 @@ impl StageBuilder {
     ///
     /// This recursively processes the entire tree, including breakers.
     /// The resulting StagePlan is a complete operator tree.
-    fn physical_to_stage_plan(
-        &self,
-        plan: &PhysicalPlan,
-    ) -> Result<StagePlan, ExecutionError> {
+    fn physical_to_stage_plan(&self, plan: &PhysicalPlan) -> Result<StagePlan, ExecutionError> {
         match plan {
             PhysicalPlan::Scan {
                 space,
                 projection,
                 filter,
-            } => Ok(StagePlan::Scan {
-                space: space.clone(),
-                projection: projection.clone(),
-                filter: filter
+            } => {
+                // Attempt predicate pushdown to storage. If expr_to_predicate fails
+                // (e.g. non-Int64 literal), silently ignore — the Filter node above
+                // still handles the predicate at execution time.
+                let pushed_filter = filter
                     .as_ref()
                     .map(Self::expr_to_predicate)
-                    .transpose()?,
-            }),
+                    .and_then(Result::ok);
+                Ok(StagePlan::Scan {
+                    space: space.clone(),
+                    projection: projection.clone(),
+                    filter: pushed_filter,
+                })
+            }
 
             PhysicalPlan::Filter { predicate, input } => Ok(StagePlan::Filter {
                 predicate: Self::expr_to_predicate(predicate)?,
@@ -133,9 +144,41 @@ impl StageBuilder {
 
             PhysicalPlan::Sort { expressions, input } => {
                 let (limit, remaining_exprs) = Self::extract_limit_from_sort(expressions);
+
+                // Remap sort column indices if the input is a Project.
+                // PhysicalPlanner resolves sort expressions against the *original*
+                // table schema, but Sort operates on the Project's output which
+                // may have fewer columns. We need to find each sort column's
+                // position in the Project's output.
+                let sort_columns = if let PhysicalPlan::Project {
+                    expressions: proj_exprs,
+                    ..
+                } = input.as_ref()
+                {
+                    remaining_exprs
+                        .iter()
+                        .map(|(expr, _)| match expr {
+                            PhysicalExpr::Column(orig_idx) => proj_exprs
+                                .iter()
+                                .position(|e| matches!(e, PhysicalExpr::Column(i) if i == orig_idx))
+                                .ok_or_else(|| {
+                                    ExecutionError::OperatorError(format!(
+                                        "Sort column {} not found in Project output",
+                                        orig_idx
+                                    ))
+                                }),
+                            _ => Err(ExecutionError::OperatorError(
+                                "Non-column sort expression in StagePlan".to_string(),
+                            )),
+                        })
+                        .collect::<Result<Vec<_>, _>>()?
+                } else {
+                    Self::extract_columns_from_sort(&remaining_exprs)?
+                };
+
                 Ok(StagePlan::Sort {
                     input: Box::new(self.physical_to_stage_plan(input)?),
-                    sort_columns: Self::extract_columns_from_sort(&remaining_exprs)?,
+                    sort_columns,
                     directions: remaining_exprs.iter().map(|(_, d)| *d).collect(),
                     limit,
                 })
@@ -157,16 +200,24 @@ impl StageBuilder {
         (None, expressions.to_vec())
     }
 
-    fn expr_to_predicate(expr: &PhysicalExpr) -> Result<agoradb_core::PredicateDef, ExecutionError> {
+    fn expr_to_predicate(
+        expr: &PhysicalExpr,
+    ) -> Result<agoradb_core::PredicateDef, ExecutionError> {
         use crate::LiteralValue;
         match expr {
             PhysicalExpr::BinaryOp { op, left, right } => {
                 // Try (Column, Literal) pattern first
                 match (left.as_ref(), right.as_ref()) {
-                    (PhysicalExpr::Column(col), PhysicalExpr::Literal(LiteralValue::Int64(val))) => {
+                    (
+                        PhysicalExpr::Column(col),
+                        PhysicalExpr::Literal(LiteralValue::Int64(val)),
+                    ) => {
                         return Self::make_predicate(*op, *col, *val);
                     }
-                    (PhysicalExpr::Literal(LiteralValue::Int64(val)), PhysicalExpr::Column(col)) => {
+                    (
+                        PhysicalExpr::Literal(LiteralValue::Int64(val)),
+                        PhysicalExpr::Column(col),
+                    ) => {
                         // Flip comparison: col op val  ->  val op col
                         let flipped = Self::flip_op(*op)?;
                         return Self::make_predicate(flipped, *col, *val);
@@ -221,12 +272,30 @@ impl StageBuilder {
         val: i64,
     ) -> Result<agoradb_core::PredicateDef, ExecutionError> {
         Ok(match op {
-            BinaryOp::Eq => agoradb_core::PredicateDef::Eq { column: col, value: val },
-            BinaryOp::Neq => agoradb_core::PredicateDef::Neq { column: col, value: val },
-            BinaryOp::Lt => agoradb_core::PredicateDef::Lt { column: col, value: val },
-            BinaryOp::LtEq => agoradb_core::PredicateDef::LtEq { column: col, value: val },
-            BinaryOp::Gt => agoradb_core::PredicateDef::Gt { column: col, value: val },
-            BinaryOp::GtEq => agoradb_core::PredicateDef::GtEq { column: col, value: val },
+            BinaryOp::Eq => agoradb_core::PredicateDef::Eq {
+                column: col,
+                value: val,
+            },
+            BinaryOp::Neq => agoradb_core::PredicateDef::Neq {
+                column: col,
+                value: val,
+            },
+            BinaryOp::Lt => agoradb_core::PredicateDef::Lt {
+                column: col,
+                value: val,
+            },
+            BinaryOp::LtEq => agoradb_core::PredicateDef::LtEq {
+                column: col,
+                value: val,
+            },
+            BinaryOp::Gt => agoradb_core::PredicateDef::Gt {
+                column: col,
+                value: val,
+            },
+            BinaryOp::GtEq => agoradb_core::PredicateDef::GtEq {
+                column: col,
+                value: val,
+            },
             other => {
                 return Err(ExecutionError::OperatorError(format!(
                     "Unsupported comparison op in predicate: {:?}",
@@ -284,11 +353,19 @@ impl StageBuilder {
     ) -> Result<Vec<(usize, AggFunction)>, ExecutionError> {
         expressions
             .iter()
-            .map(|(expr, agg)| match expr {
-                PhysicalExpr::Column(idx) => Ok((*idx, agg.clone())),
-                _ => Err(ExecutionError::OperatorError(
-                    "Only column references supported in aggregate".to_string(),
-                )),
+            .map(|(expr, agg)| {
+                // COUNT counts rows regardless of argument (COUNT(*) == COUNT(1) == COUNT(col))
+                // so we allow any expression here. Use column index when available, else 0.
+                let idx = match expr {
+                    PhysicalExpr::Column(i) => *i,
+                    _ if matches!(agg, AggFunction::Count) => 0,
+                    _ => {
+                        return Err(ExecutionError::OperatorError(
+                            "Only column references supported in aggregate".to_string(),
+                        ))
+                    }
+                };
+                Ok((idx, agg.clone()))
             })
             .collect()
     }
@@ -349,10 +426,75 @@ mod tests {
         assert_eq!(exec_plan.stages.len(), 1);
         match &exec_plan.stages[0].plan {
             StagePlan::Filter { predicate, input } => {
-                assert!(matches!(predicate, PredicateDef::Gt { column: 0, value: 1 }));
+                assert!(matches!(
+                    predicate,
+                    PredicateDef::Gt {
+                        column: 0,
+                        value: 1
+                    }
+                ));
                 assert!(matches!(input.as_ref(), StagePlan::Scan { .. }));
             }
             other => panic!("Expected Filter -> Scan, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_predicate_pushdown_to_scan() {
+        use crate::LiteralValue;
+        // Scan with a filter attached (simulating predicate pushdown from planner)
+        let plan = PhysicalPlan::Scan {
+            space: SpaceUri::parse("space://did:agora:test/t").unwrap(),
+            projection: None,
+            filter: Some(PhysicalExpr::BinaryOp {
+                op: crate::BinaryOp::Eq,
+                left: Box::new(PhysicalExpr::Column(0)),
+                right: Box::new(PhysicalExpr::Literal(LiteralValue::Int64(42))),
+            }),
+        };
+
+        let builder = StageBuilder::new();
+        let exec_plan = builder.build(&plan).unwrap();
+
+        assert_eq!(exec_plan.stages.len(), 1);
+        match &exec_plan.stages[0].plan {
+            StagePlan::Scan { filter, .. } => {
+                assert!(matches!(
+                    filter,
+                    Some(PredicateDef::Eq {
+                        column: 0,
+                        value: 42
+                    })
+                ));
+            }
+            other => panic!("Expected Scan with pushed filter, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_predicate_pushdown_non_int64_ignored() {
+        use crate::LiteralValue;
+        // String literal predicate cannot be converted to PredicateDef (Int64-only),
+        // but should not error — it is silently ignored and the Filter node handles it.
+        let plan = PhysicalPlan::Scan {
+            space: SpaceUri::parse("space://did:agora:test/t").unwrap(),
+            projection: None,
+            filter: Some(PhysicalExpr::BinaryOp {
+                op: crate::BinaryOp::Eq,
+                left: Box::new(PhysicalExpr::Column(0)),
+                right: Box::new(PhysicalExpr::Literal(LiteralValue::String("hello".to_string()))),
+            }),
+        };
+
+        let builder = StageBuilder::new();
+        let exec_plan = builder.build(&plan).unwrap();
+
+        assert_eq!(exec_plan.stages.len(), 1);
+        match &exec_plan.stages[0].plan {
+            StagePlan::Scan { filter, .. } => {
+                assert!(filter.is_none(), "Non-Int64 predicate should be ignored");
+            }
+            other => panic!("Expected Scan, got {:?}", other),
         }
     }
 
@@ -379,7 +521,13 @@ mod tests {
 
         assert_eq!(exec_plan.stages.len(), 1);
         match &exec_plan.stages[0].plan {
-            StagePlan::HashJoin { left, right, left_key, right_key, join_type } => {
+            StagePlan::HashJoin {
+                left,
+                right,
+                left_key,
+                right_key,
+                join_type,
+            } => {
                 assert!(matches!(left.as_ref(), StagePlan::Scan { .. }));
                 assert!(matches!(right.as_ref(), StagePlan::Scan { .. }));
                 assert_eq!(*left_key, 0);

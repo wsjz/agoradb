@@ -51,6 +51,9 @@ impl SqlParser {
     ) -> Result<LogicalPlan, ExecutionError> {
         match stmt {
             sqlparser::ast::Statement::Query(query) => self.query_to_plan(query),
+            sqlparser::ast::Statement::Explain { statement, .. } => {
+                self.statement_to_plan(statement)
+            }
             _ => Err(ExecutionError::OperatorError(
                 "Only SELECT queries supported".to_string(),
             )),
@@ -95,15 +98,44 @@ impl SqlParser {
             };
         }
 
+        // HAVING → Filter (post-aggregate)
+        if let Some(having) = &select.having {
+            plan = LogicalPlan::Filter {
+                predicate: self.expr_to_logical(having)?,
+                input: Box::new(plan),
+            };
+        }
+
         // SELECT clause → Project (non-aggregate expressions)
-        if group_by_exprs.is_none() || !self.has_non_aggregate_projection(&select.projection) {
-            let projections = self.build_projections(&select.projection)?;
-            if !projections.is_empty() {
-                plan = LogicalPlan::Project {
-                    expressions: projections,
-                    input: Box::new(plan),
-                };
-            }
+        // Build projections conditionally: when GROUP BY exists and projection
+        // contains non-aggregate columns, we skip Project (Aggregate output
+        // already contains the right columns).
+        let needs_project = group_by_exprs.is_none()
+            || !self.has_non_aggregate_projection(&select.projection);
+        let projections = if needs_project || select.distinct.is_some() {
+            self.build_projections(&select.projection)?
+        } else {
+            vec![]
+        };
+
+        // DISTINCT → group by all projected columns with no aggregates
+        if select.distinct.is_some() {
+            let distinct_group_by = projections
+                .iter()
+                .map(|(_, expr)| expr.clone())
+                .collect();
+            plan = LogicalPlan::Aggregate {
+                input: Box::new(plan),
+                group_by: distinct_group_by,
+                aggregates: vec![],
+            };
+        }
+
+        if needs_project && !projections.is_empty() {
+            plan = LogicalPlan::Project {
+                expressions: projections,
+                input: Box::new(plan),
+            };
         }
 
         // ORDER BY → Sort (before Limit)
@@ -192,10 +224,14 @@ impl SqlParser {
         factor: &sqlparser::ast::TableFactor,
     ) -> Result<LogicalPlan, ExecutionError> {
         match factor {
-            sqlparser::ast::TableFactor::Table { name, .. } => Ok(LogicalPlan::Scan {
-                table: name.to_string(),
-                schema: Vec::new(),
-            }),
+            sqlparser::ast::TableFactor::Table { name, alias, .. } => {
+                let alias_str = alias.as_ref().map(|a| a.name.value.clone());
+                Ok(LogicalPlan::Scan {
+                    table: name.to_string(),
+                    alias: alias_str,
+                    schema: Vec::new(),
+                })
+            }
             _ => Err(ExecutionError::OperatorError(
                 "Only simple table references supported".to_string(),
             )),
@@ -262,6 +298,9 @@ impl SqlParser {
                             arg_expr.and_then(|expr| match expr {
                                 sqlparser::ast::FunctionArgExpr::Expr(e) => {
                                     self.expr_to_logical(e).ok()
+                                }
+                                sqlparser::ast::FunctionArgExpr::Wildcard => {
+                                    Some(LogicalExpr::Literal(LiteralValue::Int64(1)))
                                 }
                                 _ => None,
                             })

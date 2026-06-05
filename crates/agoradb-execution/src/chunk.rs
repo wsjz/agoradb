@@ -44,6 +44,34 @@ impl ColumnVector {
         }
     }
 
+    /// Grow the underlying storage to at least `new_capacity`.
+    fn grow(&mut self, new_capacity: usize) {
+        if new_capacity <= self.capacity {
+            return;
+        }
+        self.validity.resize(new_capacity, true);
+        match self.data_type {
+            DataType::Int64 | DataType::Float64 => {
+                self.data.resize(new_capacity * 8, 0);
+            }
+            DataType::Boolean => {
+                self.data.resize(new_capacity, 0);
+            }
+            DataType::Utf8 => {
+                // strings vec grows on demand
+            }
+        }
+        self.capacity = new_capacity;
+    }
+
+    /// Ensure there is room for one more element.
+    fn ensure_space(&mut self) {
+        if self.len >= self.capacity {
+            let new_cap = (self.capacity * 2).max(16);
+            self.grow(new_cap);
+        }
+    }
+
     /// Get a slice of i64 values (panics if wrong type).
     pub fn as_i64_slice(&self) -> &[i64] {
         assert!(matches!(self.data_type, DataType::Int64));
@@ -56,10 +84,16 @@ impl ColumnVector {
         unsafe { std::slice::from_raw_parts_mut(self.data.as_ptr() as *mut i64, self.len) }
     }
 
+    /// Get a slice of f64 values (panics if wrong type).
+    pub fn as_f64_slice(&self) -> &[f64] {
+        assert!(matches!(self.data_type, DataType::Float64));
+        unsafe { std::slice::from_raw_parts(self.data.as_ptr() as *const f64, self.len) }
+    }
+
     /// Append a single i64 value.
     pub fn push_i64(&mut self, value: i64) {
         assert!(matches!(self.data_type, DataType::Int64));
-        assert!(self.len < self.capacity);
+        self.ensure_space();
         unsafe {
             let ptr = self.data.as_mut_ptr() as *mut i64;
             ptr.add(self.len).write(value);
@@ -70,7 +104,7 @@ impl ColumnVector {
     /// Append a single f64 value.
     pub fn push_f64(&mut self, value: f64) {
         assert!(matches!(self.data_type, DataType::Float64));
-        assert!(self.len < self.capacity);
+        self.ensure_space();
         unsafe {
             let ptr = self.data.as_mut_ptr() as *mut f64;
             ptr.add(self.len).write(value);
@@ -81,7 +115,7 @@ impl ColumnVector {
     /// Append a single bool value.
     pub fn push_bool(&mut self, value: bool) {
         assert!(matches!(self.data_type, DataType::Boolean));
-        assert!(self.len < self.capacity);
+        self.ensure_space();
         self.data[self.len] = if value { 1 } else { 0 };
         self.len += 1;
     }
@@ -89,7 +123,7 @@ impl ColumnVector {
     /// Append a single Utf8 value.
     pub fn push_utf8(&mut self, value: &str) {
         assert!(matches!(self.data_type, DataType::Utf8));
-        assert!(self.len < self.capacity);
+        self.ensure_space();
         self.strings.push(value.to_string());
         self.len += 1;
     }
@@ -182,7 +216,11 @@ impl DataChunk {
 
     /// Create a new DataChunk containing only rows in [start, end).
     pub fn slice_rows(&self, start: usize, end: usize) -> Self {
-        let columns = self.columns.iter().map(|c| c.slice_rows(start, end)).collect();
+        let columns = self
+            .columns
+            .iter()
+            .map(|c| c.slice_rows(start, end))
+            .collect();
         Self::new(columns)
     }
 
@@ -213,7 +251,10 @@ impl DataChunk {
                 }
                 DataType::Float64 => {
                     let slice = unsafe {
-                        std::slice::from_raw_parts(other_col.data.as_ptr() as *const f64, other_col.len)
+                        std::slice::from_raw_parts(
+                            other_col.data.as_ptr() as *const f64,
+                            other_col.len,
+                        )
                     };
                     for &v in slice {
                         self_col.push_f64(v);
@@ -232,7 +273,9 @@ impl DataChunk {
             }
             // Extend validity
             self_col.validity.truncate(self_col.len - other_col.len);
-            self_col.validity.extend_from_slice(&other_col.validity[..other_col.len]);
+            self_col
+                .validity
+                .extend_from_slice(&other_col.validity[..other_col.len]);
         }
         self.len += other.len;
         Ok(())
@@ -250,6 +293,18 @@ impl DataChunk {
                         col.push_i64(0);
                     } else {
                         col.push_i64(arr.value(i));
+                    }
+                }
+                col
+            } else if let Some(arr) = array.as_any().downcast_ref::<arrow_array::Int32Array>() {
+                // Promote Int32 to Int64 (engine only supports Int64, not Int32)
+                let mut col = ColumnVector::new(DataType::Int64, arr.len());
+                for i in 0..arr.len() {
+                    if arr.is_null(i) {
+                        col.validity[i] = false;
+                        col.push_i64(0);
+                    } else {
+                        col.push_i64(arr.value(i) as i64);
                     }
                 }
                 col
@@ -283,6 +338,38 @@ impl DataChunk {
                         col.push_utf8("");
                     } else {
                         col.push_utf8(arr.value(i));
+                    }
+                }
+                col
+            } else if let Some(arr) = array
+                .as_any()
+                .downcast_ref::<arrow_array::Decimal128Array>()
+            {
+                // Convert Decimal128 to Float64 (value / 10^scale)
+                let scale = match array.data_type() {
+                    arrow_schema::DataType::Decimal128(_, s) => *s,
+                    _ => 2, // default fallback
+                };
+                let divisor = 10f64.powi(scale as i32);
+                let mut col = ColumnVector::new(DataType::Float64, arr.len());
+                for i in 0..arr.len() {
+                    if arr.is_null(i) {
+                        col.validity[i] = false;
+                        col.push_f64(0.0);
+                    } else {
+                        col.push_f64(arr.value(i) as f64 / divisor);
+                    }
+                }
+                col
+            } else if let Some(arr) = array.as_any().downcast_ref::<arrow_array::Date32Array>() {
+                // Convert Date32 (days since epoch) to Int64
+                let mut col = ColumnVector::new(DataType::Int64, arr.len());
+                for i in 0..arr.len() {
+                    if arr.is_null(i) {
+                        col.validity[i] = false;
+                        col.push_i64(0);
+                    } else {
+                        col.push_i64(arr.value(i) as i64);
                     }
                 }
                 col

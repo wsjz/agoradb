@@ -14,7 +14,27 @@
 
 use crate::chunk::DataChunk;
 use crate::filter::PredicateFn;
-use agoradb_core::{ExecutionError, PredicateDef};
+use agoradb_core::{DataType, ExecutionError, PredicateDef};
+
+/// Compare a column cell against an i64 value, handling both Int64 and Float64 types.
+fn compare_cell(chunk: &DataChunk, col: usize, row: usize, val: i64) -> (f64, f64) {
+    match chunk.columns[col].data_type {
+        DataType::Int64 => {
+            let v = chunk.columns[col].as_i64_slice()[row];
+            (v as f64, val as f64)
+        }
+        DataType::Float64 => {
+            let slice = unsafe {
+                std::slice::from_raw_parts(
+                    chunk.columns[col].data.as_ptr() as *const f64,
+                    chunk.columns[col].len,
+                )
+            };
+            (slice[row], val as f64)
+        }
+        _ => (0.0, val as f64),
+    }
+}
 
 /// Build a runtime predicate closure from a [`PredicateDef`].
 pub fn build_predicate_fn(pred: &PredicateDef) -> Result<PredicateFn, ExecutionError> {
@@ -23,42 +43,48 @@ pub fn build_predicate_fn(pred: &PredicateDef) -> Result<PredicateFn, ExecutionE
             let col = *column;
             let val = *value;
             Ok(Box::new(move |chunk: &DataChunk, row: usize| {
-                chunk.columns[col].as_i64_slice()[row] == val
+                let (a, b) = compare_cell(chunk, col, row, val);
+                (a - b).abs() < f64::EPSILON
             }))
         }
         PredicateDef::Neq { column, value } => {
             let col = *column;
             let val = *value;
             Ok(Box::new(move |chunk: &DataChunk, row: usize| {
-                chunk.columns[col].as_i64_slice()[row] != val
+                let (a, b) = compare_cell(chunk, col, row, val);
+                (a - b).abs() >= f64::EPSILON
             }))
         }
         PredicateDef::Lt { column, value } => {
             let col = *column;
             let val = *value;
             Ok(Box::new(move |chunk: &DataChunk, row: usize| {
-                chunk.columns[col].as_i64_slice()[row] < val
+                let (a, b) = compare_cell(chunk, col, row, val);
+                a < b
             }))
         }
         PredicateDef::LtEq { column, value } => {
             let col = *column;
             let val = *value;
             Ok(Box::new(move |chunk: &DataChunk, row: usize| {
-                chunk.columns[col].as_i64_slice()[row] <= val
+                let (a, b) = compare_cell(chunk, col, row, val);
+                a <= b
             }))
         }
         PredicateDef::Gt { column, value } => {
             let col = *column;
             let val = *value;
             Ok(Box::new(move |chunk: &DataChunk, row: usize| {
-                chunk.columns[col].as_i64_slice()[row] > val
+                let (a, b) = compare_cell(chunk, col, row, val);
+                a > b
             }))
         }
         PredicateDef::GtEq { column, value } => {
             let col = *column;
             let val = *value;
             Ok(Box::new(move |chunk: &DataChunk, row: usize| {
-                chunk.columns[col].as_i64_slice()[row] >= val
+                let (a, b) = compare_cell(chunk, col, row, val);
+                a >= b
             }))
         }
         PredicateDef::And { left, right } => {

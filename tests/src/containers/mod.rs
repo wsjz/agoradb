@@ -12,5 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod plan;
-pub mod planner;
+//! Container-level integration tests (future extension).
+//!
+//! This module is a placeholder for Docker-based system tests that run
+//! against full container environments. It will eventually contain:
+//!
+//! - Test container definitions (MinIO, PostgreSQL, etc.)
+//! - Environment setup/teardown helpers
+//! - Multi-node cluster test scenarios
+//!
+//! For now, all integration tests run against local pre-generated data
+//! in `tests/agora-local/`.

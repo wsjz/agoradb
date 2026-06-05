@@ -53,19 +53,28 @@ pub trait CloneSink {
 /// Clone a PipelineOperator by downcasting to known types.
 /// Each concrete operator type implements CloneOperator.
 pub fn clone_operator(op: &dyn PipelineOperator) -> Box<dyn PipelineOperator> {
-    if let Some(f) = op.as_any().downcast_ref::<crate::filter::FilterPipelineOperator>() {
+    if let Some(f) = op.as_any().downcast_ref::<crate::filter::FilterOperator>() {
         return f.clone_box();
     }
-    if let Some(p) = op.as_any().downcast_ref::<crate::project::ProjectPipelineOperator>() {
+    if let Some(p) = op
+        .as_any()
+        .downcast_ref::<crate::project::ProjectOperator>()
+    {
         return p.clone_box();
     }
-    if let Some(l) = op.as_any().downcast_ref::<crate::limit::LimitPipelineOperator>() {
+    if let Some(l) = op.as_any().downcast_ref::<crate::limit::LimitOperator>() {
         return l.clone_box();
     }
-    if let Some(j) = op.as_any().downcast_ref::<crate::hash_join::HashJoinProbeOperator>() {
+    if let Some(j) = op
+        .as_any()
+        .downcast_ref::<crate::hash_join::HashJoinProbeOperator>()
+    {
         return j.clone_box();
     }
-    if let Some(a) = op.as_any().downcast_ref::<crate::hash_aggregate::HashAggregateEmitOperator>() {
+    if let Some(a) = op
+        .as_any()
+        .downcast_ref::<crate::hash_aggregate::HashAggregateEmitOperator>()
+    {
         return a.clone_box();
     }
     if let Some(s) = op.as_any().downcast_ref::<crate::sort::SortEmitOperator>() {
@@ -79,16 +88,25 @@ pub fn clone_sink(sink: &dyn Sink) -> Box<dyn Sink> {
     if let Some(c) = sink.as_any().downcast_ref::<crate::adapters::CollectSink>() {
         return c.clone_box();
     }
-    if let Some(h) = sink.as_any().downcast_ref::<crate::hash_join::HashJoinBuildSink>() {
+    if let Some(h) = sink
+        .as_any()
+        .downcast_ref::<crate::hash_join::HashJoinBuildSink>()
+    {
         return h.clone_box();
     }
-    if let Some(a) = sink.as_any().downcast_ref::<crate::hash_aggregate::HashAggregateAccumulateSink>() {
+    if let Some(a) = sink
+        .as_any()
+        .downcast_ref::<crate::hash_aggregate::HashAggregateAccumulateSink>()
+    {
         return a.clone_box();
     }
     if let Some(s) = sink.as_any().downcast_ref::<crate::sort::SortCollectSink>() {
         return s.clone_box();
     }
-    if let Some(e) = sink.as_any().downcast_ref::<crate::local_exchange::LocalExchangeSink>() {
+    if let Some(e) = sink
+        .as_any()
+        .downcast_ref::<crate::local_exchange::LocalExchangeSink>()
+    {
         return e.clone_box();
     }
     panic!("Unknown Sink type — cannot clone");
@@ -114,13 +132,17 @@ pub struct Pipeline {
 impl Pipeline {
     /// Create a `PipelineTask` for the given task index.
     pub fn create_task(&self, task_id: usize) -> PipelineTask {
-        let mut source = (self.source_factory)(task_id);
+        let source = (self.source_factory)(task_id);
         PipelineTask {
             task_id,
             pipeline_id: self.id,
             stage_id: self.stage_id,
             source,
-            operators: self.operators.iter().map(|op| clone_operator(op.as_ref())).collect(),
+            operators: self
+                .operators
+                .iter()
+                .map(|op| clone_operator(op.as_ref()))
+                .collect(),
             sink: clone_sink(self.sink.as_ref()),
             pending_chunk: None,
             scheduler: None,
@@ -142,7 +164,11 @@ impl Pipeline {
             pipeline_id: self.id,
             stage_id: self.stage_id,
             source,
-            operators: self.operators.iter().map(|op| clone_operator(op.as_ref())).collect(),
+            operators: self
+                .operators
+                .iter()
+                .map(|op| clone_operator(op.as_ref()))
+                .collect(),
             sink: clone_sink(self.sink.as_ref()),
             pending_chunk: None,
             scheduler: Some(scheduler),

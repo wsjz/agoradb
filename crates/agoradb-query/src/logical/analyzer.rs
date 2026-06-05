@@ -12,15 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::logical::plan::{DataType, LogicalExpr, LogicalPlan};
-use agoradb_core::ExecutionError;
+use crate::logical::plan::{LogicalExpr, LogicalPlan};
+use agoradb_core::{DataType, ExecutionError, SchemaProvider};
 use std::collections::HashMap;
-
-/// Provides table schema information for the analyzer.
-pub trait SchemaProvider {
-    /// Return the schema (column name → DataType) for a given table.
-    fn get_table_schema(&self, table: &str) -> Result<HashMap<String, DataType>, ExecutionError>;
-}
 
 /// Validates and resolves a logical plan.
 ///
@@ -59,15 +53,41 @@ impl Analyzer {
         provider: &dyn SchemaProvider,
     ) -> Result<HashMap<String, DataType>, ExecutionError> {
         match plan {
-            LogicalPlan::Scan { table, schema } => {
+            LogicalPlan::Scan {
+                table,
+                alias,
+                schema,
+            } => {
                 let table_schema = provider.get_table_schema(table).map_err(|_| {
                     ExecutionError::OperatorError(format!("Table not found: {}", table))
                 })?;
-                *schema = table_schema
+                let resolved_schema = if let Some(ref a) = alias {
+                    // With alias: map column names to alias.column format.
+                    // E.g. table prefix "o_" removed, alias "o" added: "o_custkey" → "o.custkey"
+                    table_schema
+                        .iter()
+                        .map(|(name, dt)| {
+                            let base = if let Some(prefix) = name.split('_').next() {
+                                if prefix == a {
+                                    name.trim_start_matches(&format!("{}_", a))
+                                } else {
+                                    name.as_str()
+                                }
+                            } else {
+                                name.as_str()
+                            };
+                            let key = format!("{}.{}", a, base);
+                            (key, dt.clone())
+                        })
+                        .collect()
+                } else {
+                    table_schema
+                };
+                *schema = resolved_schema
                     .iter()
                     .map(|(name, dt)| (name.clone(), dt.clone()))
                     .collect();
-                Ok(table_schema)
+                Ok(resolved_schema)
             }
             LogicalPlan::Filter { predicate, input } => {
                 let input_schema = self.analyze_plan(input, provider)?;
@@ -103,10 +123,19 @@ impl Analyzer {
                 aggregates,
             } => {
                 let input_schema = self.analyze_plan(input, provider)?;
-                for expr in group_by {
+                for expr in &*group_by {
                     self.validate_expr(expr, &input_schema)?;
                 }
                 let mut output_schema = HashMap::new();
+                // GROUP BY columns are part of the output schema
+                for expr in &*group_by {
+                    if let LogicalExpr::Column(name) = expr {
+                        if let Some(dt) = input_schema.get(name) {
+                            output_schema.insert(name.clone(), dt.clone());
+                        }
+                    }
+                }
+                // Aggregate columns
                 for (name, _func, expr) in aggregates {
                     self.validate_expr(expr, &input_schema)?;
                     output_schema.insert(name.clone(), DataType::Int64); // simplified

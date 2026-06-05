@@ -15,8 +15,8 @@
 use agoradb_query::logical::plan::{
     AggFunction as LogicalAgg, JoinType as LogicalJoinType, LogicalExpr, LogicalPlan,
 };
-use agoradb_query::BinaryOp as LogicalBinOp;
 use agoradb_query::physical::planner::PhysicalPlanner;
+use agoradb_query::BinaryOp as LogicalBinOp;
 use std::collections::HashMap;
 
 #[test]
@@ -29,10 +29,12 @@ fn test_plan_join() {
     let logical = LogicalPlan::Join {
         left: Box::new(LogicalPlan::Scan {
             table: "a".to_string(),
+            alias: None,
             schema: vec![],
         }),
         right: Box::new(LogicalPlan::Scan {
             table: "b".to_string(),
+            alias: None,
             schema: vec![],
         }),
         join_type: LogicalJoinType::Inner,
@@ -69,6 +71,7 @@ fn test_plan_aggregate() {
     let logical = LogicalPlan::Aggregate {
         input: Box::new(LogicalPlan::Scan {
             table: "orders".to_string(),
+            alias: None,
             schema: vec![],
         }),
         group_by: vec![LogicalExpr::Column("region".to_string())],

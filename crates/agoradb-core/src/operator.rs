@@ -44,14 +44,38 @@ pub enum AggFunction {
 /// Used by [`OperatorSpec::Filter`] and [`OperatorSpec::Scan`].
 #[derive(Debug, Clone)]
 pub enum PredicateDef {
-    Eq { column: usize, value: i64 },
-    Neq { column: usize, value: i64 },
-    Lt { column: usize, value: i64 },
-    LtEq { column: usize, value: i64 },
-    Gt { column: usize, value: i64 },
-    GtEq { column: usize, value: i64 },
-    And { left: Box<PredicateDef>, right: Box<PredicateDef> },
-    Or { left: Box<PredicateDef>, right: Box<PredicateDef> },
+    Eq {
+        column: usize,
+        value: i64,
+    },
+    Neq {
+        column: usize,
+        value: i64,
+    },
+    Lt {
+        column: usize,
+        value: i64,
+    },
+    LtEq {
+        column: usize,
+        value: i64,
+    },
+    Gt {
+        column: usize,
+        value: i64,
+    },
+    GtEq {
+        column: usize,
+        value: i64,
+    },
+    And {
+        left: Box<PredicateDef>,
+        right: Box<PredicateDef>,
+    },
+    Or {
+        left: Box<PredicateDef>,
+        right: Box<PredicateDef>,
+    },
 }
 
 /// An operator definition — a serializable description of a single operator
@@ -66,16 +90,9 @@ pub enum OperatorSpec {
         filter: Option<PredicateDef>,
     },
     /// Filter rows using a predicate.
-    Filter {
-        predicate: PredicateDef,
-    },
+    Filter { predicate: PredicateDef },
     /// Project (select) columns.
-    Project {
-        columns: Vec<usize>,
-    },
+    Project { columns: Vec<usize> },
     /// Limit the number of output rows.
-    Limit {
-        skip: usize,
-        fetch: usize,
-    },
+    Limit { skip: usize, fetch: usize },
 }

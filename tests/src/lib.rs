@@ -12,5 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod plan;
-pub mod planner;
+//! AgoraDB integration test framework.
+//!
+//! Shared utilities for system-level tests that exercise the full
+//! query pipeline against pre-generated TPC-H data.
+
+pub mod containers;
+pub mod framework;

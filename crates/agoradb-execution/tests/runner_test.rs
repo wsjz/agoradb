@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use agoradb_catalog::AgoraCatalog;
-use agoradb_core::{AggFunction, JoinType};
 use agoradb_core::SpaceUri;
+use agoradb_core::{AggFunction, JoinType};
 use agoradb_execution::executor::Executor;
 use agoradb_query::{BinaryOp, PhysicalExpr, PhysicalPlan, StageBuilder};
 use agoradb_storage::StorageEngine;
@@ -37,9 +37,7 @@ async fn test_runner_scan_filter_project() {
     let catalog = Arc::new(AgoraCatalog::new(file_io, &root_path));
 
     catalog
-        .create_namespace(&NamespaceIdent::new("default".to_string()),
-            HashMap::new(),
-        )
+        .create_namespace(&NamespaceIdent::new("default".to_string()), HashMap::new())
         .await
         .unwrap();
 
@@ -127,9 +125,7 @@ async fn test_runner_hash_join() {
     let catalog = Arc::new(AgoraCatalog::new(file_io, &root_path));
 
     catalog
-        .create_namespace(&NamespaceIdent::new("default".to_string()),
-            HashMap::new(),
-        )
+        .create_namespace(&NamespaceIdent::new("default".to_string()), HashMap::new())
         .await
         .unwrap();
 
@@ -187,7 +183,10 @@ async fn test_runner_hash_join() {
         .build();
 
     catalog
-        .create_table(&NamespaceIdent::new("default".to_string()), customers_creation)
+        .create_table(
+            &NamespaceIdent::new("default".to_string()),
+            customers_creation,
+        )
         .await
         .unwrap();
 
@@ -313,9 +312,7 @@ async fn test_runner_hash_aggregate() {
     let catalog = Arc::new(AgoraCatalog::new(file_io, &root_path));
 
     catalog
-        .create_namespace(&NamespaceIdent::new("default".to_string()),
-            HashMap::new(),
-        )
+        .create_namespace(&NamespaceIdent::new("default".to_string()), HashMap::new())
         .await
         .unwrap();
 

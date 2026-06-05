@@ -114,7 +114,10 @@ fn top_k(
         }
     }
 
-    heap.into_vec().into_iter().map(|Reverse(k)| (k.chunk_idx, k.row_idx)).collect()
+    heap.into_vec()
+        .into_iter()
+        .map(|Reverse(k)| (k.chunk_idx, k.row_idx))
+        .collect()
 }
 
 /// Pre-computed sort key for a single row — used by the Top-K heap.
@@ -173,7 +176,6 @@ impl std::cmp::PartialOrd for RowKey {
     }
 }
 
-
 fn extract_key(col: &ColumnVector, row: usize) -> KeyValue {
     if !col.validity[row] {
         return KeyValue::Null;
@@ -229,17 +231,16 @@ fn compare_cell(
                 unsafe { std::slice::from_raw_parts(a.data.as_ptr() as *const f64, a.len) },
                 unsafe { std::slice::from_raw_parts(b.data.as_ptr() as *const f64, b.len) },
             );
-            as_[a_row].partial_cmp(&bs[b_row]).unwrap_or(std::cmp::Ordering::Equal)
+            as_[a_row]
+                .partial_cmp(&bs[b_row])
+                .unwrap_or(std::cmp::Ordering::Equal)
         }
         DataType::Boolean => a.data[a_row].cmp(&b.data[b_row]),
         DataType::Utf8 => a.as_utf8_slice()[a_row].cmp(b.as_utf8_slice()[b_row]),
     }
 }
 
-fn rebuild_chunks(
-    rows: Vec<(usize, usize)>,
-    chunks: &[DataChunk],
-) -> Vec<DataChunk> {
+fn rebuild_chunks(rows: Vec<(usize, usize)>, chunks: &[DataChunk]) -> Vec<DataChunk> {
     let ncols = chunks[0].columns.len();
     let mut out = Vec::new();
     let mut cols: Vec<ColumnVector> = (0..ncols)
@@ -299,10 +300,7 @@ pub struct SortCollectSink {
 }
 
 impl SortCollectSink {
-    pub fn new(
-        _sort_id: usize,
-        sort_state: Arc<SortState>,
-    ) -> Self {
+    pub fn new(_sort_id: usize, sort_state: Arc<SortState>) -> Self {
         Self {
             sort_id: _sort_id,
             sort_state,
@@ -312,6 +310,10 @@ impl SortCollectSink {
 
 impl Sink for SortCollectSink {
     fn consume(&mut self, chunk: DataChunk) -> Result<(), ExecutionError> {
+        eprintln!(
+            "[DEBUG-SORT] SortCollectSink received chunk: {} rows",
+            chunk.len
+        );
         self.sort_state.push(chunk);
         Ok(())
     }
@@ -347,10 +349,7 @@ pub struct SortEmitOperator {
 }
 
 impl SortEmitOperator {
-    pub fn new(
-        _sort_id: usize,
-        sort_state: Arc<SortState>,
-    ) -> Self {
+    pub fn new(_sort_id: usize, sort_state: Arc<SortState>) -> Self {
         Self {
             sort_id: _sort_id,
             sort_state,
@@ -360,7 +359,11 @@ impl SortEmitOperator {
 }
 
 impl PipelineOperator for SortEmitOperator {
-    fn execute(&mut self, _input: &DataChunk, output: &mut DataChunk) -> Result<(), ExecutionError> {
+    fn execute(
+        &mut self,
+        _input: &DataChunk,
+        output: &mut DataChunk,
+    ) -> Result<(), ExecutionError> {
         if self.emitted {
             return Ok(());
         }
@@ -403,9 +406,8 @@ fn append_chunks(mut result: DataChunk, other: &DataChunk) -> Result<DataChunk, 
                 }
             }
             DataType::Float64 => {
-                let slice = unsafe {
-                    std::slice::from_raw_parts(oc.data.as_ptr() as *const f64, oc.len)
-                };
+                let slice =
+                    unsafe { std::slice::from_raw_parts(oc.data.as_ptr() as *const f64, oc.len) };
                 for &val in slice {
                     rc.push_f64(val);
                 }

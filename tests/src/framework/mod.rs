@@ -12,5 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod plan;
-pub mod planner;
+//! Shared test framework for AgoraDB integration tests.
+
+pub mod catalog;
+pub mod runner;
+pub mod schema;

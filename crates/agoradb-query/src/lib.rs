@@ -13,6 +13,7 @@
 // limitations under the License.
 
 pub mod execution_plan;
+pub mod explain;
 pub mod expr;
 pub mod logical;
 pub mod parser;

@@ -14,10 +14,10 @@
 
 use crate::chunk::DataChunk;
 use crate::pipeline::{CloneSink, Sink};
-use agoradb_core::{ExecutionError, ExchangeType};
+use agoradb_core::{ExchangeType, ExecutionError};
 use std::collections::VecDeque;
-use std::sync::{Arc, Condvar, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 
 /// Shared buffer for local data exchange between pipelines.
 ///
@@ -75,11 +75,7 @@ impl LocalExchangeBuffer {
     }
 
     /// Push a chunk from the given sink into the appropriate partition(s).
-    pub fn push(
-        &self,
-        chunk: DataChunk,
-        _sink_id: usize,
-    ) -> Result<(), ExecutionError> {
+    pub fn push(&self, chunk: DataChunk, _sink_id: usize) -> Result<(), ExecutionError> {
         match &self.exchange_type {
             ExchangeType::Gather => {
                 self.partitions[0].push(chunk)?;

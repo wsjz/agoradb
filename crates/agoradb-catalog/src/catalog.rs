@@ -624,9 +624,10 @@ impl Catalog for AgoraCatalog {
 }
 
 use crate::scan_provider::StorageScanProvider;
-use agoradb_core::{CatalogError, Morsel, SpaceUri};
+use agoradb_core::{CatalogError, DataType, ExecutionError, Morsel, SchemaProvider, SpaceUri};
 use futures::StreamExt;
 use iceberg::expr::Predicate;
+use iceberg::spec::{PrimitiveType, Type};
 
 #[async_trait]
 impl StorageScanProvider for AgoraCatalog {
@@ -687,7 +688,11 @@ impl StorageScanProvider for AgoraCatalog {
             .await
             .map_err(|e| CatalogError::Iceberg(e.to_string()))?;
 
-        let chunk_size = if morsel_size == 0 { 10_000 } else { morsel_size };
+        let chunk_size = if morsel_size == 0 {
+            10_000
+        } else {
+            morsel_size
+        };
         let mut morsels = Vec::new();
 
         while let Some(result) = task_stream.next().await {
@@ -729,6 +734,87 @@ impl StorageScanProvider for AgoraCatalog {
         morsel: &Morsel,
     ) -> std::result::Result<Vec<arrow_array::RecordBatch>, CatalogError> {
         crate::parquet_util::read_morsel(morsel).await
+    }
+}
+
+// ------------------------------------------------------------------
+// SchemaProvider — bridges catalog metadata to the query analyzer
+// ------------------------------------------------------------------
+
+impl SchemaProvider for AgoraCatalog {
+    fn get_table_schema(
+        &self,
+        table: &str,
+    ) -> std::result::Result<HashMap<String, DataType>, ExecutionError> {
+        futures::executor::block_on(async {
+            // Search all namespaces for a table with the given name.
+            let namespaces = self.list_namespaces(None).await.map_err(|e| {
+                ExecutionError::OperatorError(format!("Failed to list namespaces: {}", e))
+            })?;
+
+            let mut found_table = None;
+            for ns in &namespaces {
+                let tables = self.list_tables(ns).await.map_err(|e| {
+                    ExecutionError::OperatorError(format!(
+                        "Failed to list tables in namespace '{}': {}",
+                        ns, e
+                    ))
+                })?;
+                if let Some(ident) = tables.iter().find(|t| t.name() == table) {
+                    found_table = Some(ident.clone());
+                    break;
+                }
+            }
+
+            let table_ident = found_table.ok_or_else(|| {
+                ExecutionError::OperatorError(format!("Table not found: {}", table))
+            })?;
+
+            let table = self.load_table(&table_ident).await.map_err(|e| {
+                ExecutionError::OperatorError(format!(
+                    "Failed to load table '{}': {}",
+                    table, e
+                ))
+            })?;
+
+            let schema = table.metadata().current_schema();
+            let mut result = HashMap::new();
+            for field in schema.as_struct().fields() {
+                let dt = iceberg_type_to_data_type(&field.field_type).ok_or_else(|| {
+                    ExecutionError::OperatorError(format!(
+                        "Unsupported Iceberg type for column '{}': {:?}",
+                        field.name, field.field_type
+                    ))
+                })?;
+                result.insert(field.name.clone(), dt);
+            }
+            Ok(result)
+        })
+    }
+}
+
+/// Convert an Iceberg [`Type`] to an AgoraDB [`DataType`].
+fn iceberg_type_to_data_type(ty: &Type) -> Option<DataType> {
+    match ty {
+        Type::Primitive(p) => match p {
+            PrimitiveType::Long => Some(DataType::Int64),
+            PrimitiveType::Int => Some(DataType::Int64),
+            PrimitiveType::Double => Some(DataType::Float64),
+            PrimitiveType::Float => Some(DataType::Float64),
+            PrimitiveType::Boolean => Some(DataType::Boolean),
+            PrimitiveType::String => Some(DataType::Utf8),
+            PrimitiveType::Date
+            | PrimitiveType::Time
+            | PrimitiveType::Timestamp
+            | PrimitiveType::Timestamptz
+            | PrimitiveType::TimestampNs
+            | PrimitiveType::TimestamptzNs
+            | PrimitiveType::Decimal { .. }
+            | PrimitiveType::Uuid
+            | PrimitiveType::Binary
+            | PrimitiveType::Fixed(_) => None,
+        },
+        Type::Struct(_) | Type::List(_) | Type::Map(_) => None,
     }
 }
 
@@ -925,5 +1011,37 @@ mod tests {
             updated.properties().get("owner"),
             Some(&"new_team".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn test_schema_provider() {
+        use agoradb_core::{DataType, SchemaProvider};
+        use iceberg::spec::{NestedField, Schema, Type};
+
+        let (_dir, catalog) = new_test_catalog().await;
+        let ns = NamespaceIdent::new("test_ns".to_string());
+        catalog.create_namespace(&ns, HashMap::new()).await.unwrap();
+
+        let schema = Schema::builder()
+            .with_fields(vec![
+                NestedField::required(1, "id", Type::Primitive(PrimitiveType::Long)).into(),
+                NestedField::required(2, "price", Type::Primitive(PrimitiveType::Double)).into(),
+                NestedField::required(3, "active", Type::Primitive(PrimitiveType::Boolean)).into(),
+                NestedField::required(4, "name", Type::Primitive(PrimitiveType::String)).into(),
+            ])
+            .build()
+            .unwrap();
+
+        let creation = TableCreation::builder()
+            .name("products".to_string())
+            .schema(schema)
+            .build();
+        catalog.create_table(&ns, creation).await.unwrap();
+
+        let table_schema = catalog.get_table_schema("products").unwrap();
+        assert_eq!(table_schema.get("id"), Some(&DataType::Int64));
+        assert_eq!(table_schema.get("price"), Some(&DataType::Float64));
+        assert_eq!(table_schema.get("active"), Some(&DataType::Boolean));
+        assert_eq!(table_schema.get("name"), Some(&DataType::Utf8));
     }
 }

@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use crate::pipeline::{PipelineTask, TaskStatus};
-use agoradb_core::PipelineId;
 use crossbeam_deque::{Injector, Stealer, Worker as DequeWorker};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -134,8 +133,7 @@ impl WorkerPool {
             let scheduler = task.scheduler.clone();
 
             // Execute task with panic safety
-            let result =
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || task.run()));
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || task.run()));
 
             match result {
                 Ok(TaskStatus::Finished) => {

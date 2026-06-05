@@ -16,7 +16,7 @@ use crate::chunk::DataChunk;
 use crate::local_exchange::LocalExchangeSource;
 use crate::morsel_scheduler::MorselScheduler;
 use agoradb_catalog::{AgoraCatalog, StorageScanProvider};
-use agoradb_core::{ExecutionError, Morsel, SpaceUri};
+use agoradb_core::ExecutionError;
 use std::sync::mpsc;
 use std::sync::{Arc, OnceLock};
 
@@ -141,15 +141,25 @@ impl TableScanSource {
         scheduler: Option<std::sync::Arc<crate::scheduler::TaskScheduler>>,
         waker: Option<crate::scheduler::TaskWaker>,
     ) {
+        let mut morsel_count = 0;
+        let mut batch_count = 0;
+        let mut chunk_count = 0;
         // Dynamic morsel allocation: all tasks for this table compete
         // for the next morsel via a central atomic counter.
         while let Some(morsel) = morsel_scheduler.next() {
+            morsel_count += 1;
             match catalog.read_morsel(&morsel).await {
                 Ok(batches) => {
                     for batch in batches {
+                        batch_count += 1;
                         match DataChunk::from_record_batch(&batch) {
                             Ok(chunk) => {
+                                chunk_count += 1;
                                 if tx.send(chunk).is_err() {
+                                    eprintln!(
+                                        "[DEBUG-IO] rx dropped after {} morsels, {} batches, {} chunks",
+                                        morsel_count, batch_count, chunk_count
+                                    );
                                     return;
                                 }
                                 // Data arrived — wake this task precisely.
@@ -157,13 +167,23 @@ impl TableScanSource {
                                     w.wake();
                                 }
                             }
-                            Err(_) => continue,
+                            Err(e) => {
+                                eprintln!("[DEBUG-IO] from_record_batch failed: {:?}", e);
+                                continue;
+                            }
                         }
                     }
                 }
-                Err(_) => break,
+                Err(e) => {
+                    eprintln!("[DEBUG-IO] read_morsel failed: {:?}", e);
+                    break;
+                }
             }
         }
+        eprintln!(
+            "[DEBUG-IO] read_morsels done: {} morsels, {} batches, {} chunks",
+            morsel_count, batch_count, chunk_count
+        );
         // After all data sent, wake this task precisely...
         if let Some(ref w) = waker {
             w.wake();
@@ -186,10 +206,7 @@ impl Source for TableScanSource {
         }
     }
 
-    fn set_scheduler(
-        &mut self,
-        scheduler: std::sync::Arc<crate::scheduler::TaskScheduler>,
-    ) {
+    fn set_scheduler(&mut self, scheduler: std::sync::Arc<crate::scheduler::TaskScheduler>) {
         self.scheduler = Some(scheduler);
     }
 
@@ -210,7 +227,10 @@ pub struct ExchangeSource {
 
 impl ExchangeSource {
     pub fn new(inner: LocalExchangeSource) -> Self {
-        Self { inner, finished: false }
+        Self {
+            inner,
+            finished: false,
+        }
     }
 }
 

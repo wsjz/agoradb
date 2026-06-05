@@ -12,13 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub use agoradb_core::{AggFunction, DataType, JoinType, SortDirection};
 use crate::{BinaryOp, LiteralValue};
+pub use agoradb_core::{AggFunction, DataType, JoinType, SortDirection};
 
 #[derive(Debug, Clone)]
 pub enum LogicalPlan {
     Scan {
         table: String,
+        alias: Option<String>,
         schema: Vec<(String, DataType)>,
     },
     Filter {
@@ -65,4 +66,3 @@ pub enum LogicalExpr {
         args: Vec<LogicalExpr>,
     },
 }
-

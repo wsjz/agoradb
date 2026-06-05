@@ -33,10 +33,7 @@ pub async fn read_morsel(
     })?;
 
     let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| {
-        CatalogError::Iceberg(format!(
-            "Failed to read parquet {}: {e}",
-            morsel.file_path
-        ))
+        CatalogError::Iceberg(format!("Failed to read parquet {}: {e}", morsel.file_path))
     })?;
 
     let mut reader = builder.build().map_err(|e| {
@@ -48,8 +45,7 @@ pub async fn read_morsel(
 
     let mut batches = Vec::new();
     while let Some(batch) = reader.next() {
-        let batch =
-            batch.map_err(|e| CatalogError::Iceberg(format!("Parquet read error: {e}")))?;
+        let batch = batch.map_err(|e| CatalogError::Iceberg(format!("Parquet read error: {e}")))?;
         batches.push(batch);
     }
 
@@ -68,8 +64,9 @@ pub fn parquet_row_count(path: &str) -> std::result::Result<usize, CatalogError>
 
     let file = File::open(path)
         .map_err(|e| CatalogError::Iceberg(format!("Failed to open {path}: {e}")))?;
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
-        .map_err(|e| CatalogError::Iceberg(format!("Failed to read parquet footer for {path}: {e}")))?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| {
+        CatalogError::Iceberg(format!("Failed to read parquet footer for {path}: {e}"))
+    })?;
     let metadata = builder.metadata();
     Ok(metadata.file_metadata().num_rows() as usize)
 }

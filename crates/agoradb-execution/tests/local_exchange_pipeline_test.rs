@@ -245,7 +245,9 @@ fn test_pipeline_builder_connect_local_exchange() {
         Pipeline {
             id: 1,
             stage_id: 0,
-            source_factory: Box::new(|_task_id: usize| Box::new(agoradb_execution::source::EmptySource)),
+            source_factory: Box::new(|_task_id: usize| {
+                Box::new(agoradb_execution::source::EmptySource)
+            }),
             operators: vec![],
             sink: Box::new(CollectSink::new()),
             parallelism: 1,
@@ -254,12 +256,7 @@ fn test_pipeline_builder_connect_local_exchange() {
     ];
 
     // Connect them with LocalExchange
-    PipelineBuilder::connect_local_exchange(
-        &mut pipelines,
-        0,
-        1,
-        ExchangeType::Gather,
-    );
+    PipelineBuilder::connect_local_exchange(&mut pipelines, 0, 1, ExchangeType::Gather);
 
     // Create tasks and run
     let producer_task = pipelines[0].create_task(0);

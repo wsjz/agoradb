@@ -177,7 +177,5 @@ pub enum StagePlan {
         input: Box<StagePlan>,
     },
     /// Emit sorted data.
-    SortEmit {
-        sort_id: usize,
-    },
+    SortEmit { sort_id: usize },
 }

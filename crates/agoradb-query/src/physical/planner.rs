@@ -61,8 +61,22 @@ impl PhysicalPlanner {
                 })
             }
             LogicalPlan::Filter { predicate, input } => {
-                let physical_input = self.plan_inner(input, schema_map)?;
                 let physical_pred = self.expr_to_physical(predicate, schema_map)?;
+                let physical_input = self.plan_inner(input, schema_map)?;
+
+                // Try predicate pushdown: if the resolved input is Scan,
+                // attach the filter to Scan.filter so StageBuilder can
+                // attempt conversion to PredicateDef for storage-level pushdown.
+                let physical_input = if let PhysicalPlan::Scan { space, projection, .. } = &physical_input {
+                    PhysicalPlan::Scan {
+                        space: space.clone(),
+                        projection: projection.clone(),
+                        filter: Some(physical_pred.clone()),
+                    }
+                } else {
+                    physical_input
+                };
+
                 Ok(PhysicalPlan::Filter {
                     predicate: physical_pred,
                     input: Box::new(physical_input),

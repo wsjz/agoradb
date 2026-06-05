@@ -13,10 +13,8 @@
 // limitations under the License.
 
 use agoradb_catalog::AgoraCatalog;
-use agoradb_core::{
-    AggFunction, ExecutionPlan, JoinType, PredicateDef, Stage, StagePlan,
-};
 use agoradb_core::SpaceUri;
+use agoradb_core::{AggFunction, ExecutionPlan, JoinType, PredicateDef, Stage, StagePlan};
 use agoradb_execution::executor::Executor;
 use agoradb_query::{BinaryOp, PhysicalExpr, PhysicalPlan, StageBuilder};
 use agoradb_storage::StorageEngine;
@@ -38,10 +36,7 @@ async fn setup_catalog() -> (Arc<AgoraCatalog>, tempfile::TempDir) {
     let catalog = Arc::new(AgoraCatalog::new(file_io, &root_path));
 
     catalog
-        .create_namespace(
-            &NamespaceIdent::new("default".to_string()),
-            HashMap::new(),
-        )
+        .create_namespace(&NamespaceIdent::new("default".to_string()), HashMap::new())
         .await
         .unwrap();
 
@@ -274,10 +269,7 @@ async fn test_executor_hash_join() {
     let exec_plan = builder.build(&physical_plan).unwrap();
     assert_eq!(exec_plan.stages.len(), 1);
     assert!(
-        matches!(
-            exec_plan.stages[0].plan,
-            StagePlan::HashJoin { .. }
-        ),
+        matches!(exec_plan.stages[0].plan, StagePlan::HashJoin { .. }),
         "Expected HashJoin"
     );
     assert_eq!(exec_plan.stages[0].dependencies.len(), 0);
@@ -405,10 +397,7 @@ async fn test_executor_hash_aggregate() {
     let exec_plan = builder.build(&physical_plan).unwrap();
     assert_eq!(exec_plan.stages.len(), 1);
     assert!(
-        matches!(
-            exec_plan.stages[0].plan,
-            StagePlan::HashAggregate { .. }
-        ),
+        matches!(exec_plan.stages[0].plan, StagePlan::HashAggregate { .. }),
         "Expected HashAggregate"
     );
     assert_eq!(exec_plan.stages[0].dependencies.len(), 0);

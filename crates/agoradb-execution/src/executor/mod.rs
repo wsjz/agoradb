@@ -20,10 +20,10 @@ use std::sync::Arc;
 use agoradb_catalog::AgoraCatalog;
 use agoradb_core::{ExecutionError, ExecutionPlan, Stage};
 
-use crate::chunk::DataChunk;
-use crate::pipeline::PipelineState;
 use crate::adapters::CollectSink;
+use crate::chunk::DataChunk;
 use crate::pipeline::Pipeline;
+use crate::pipeline::PipelineState;
 use crate::pipeline_builder::PipelineBuilder;
 use crate::scheduler::TaskScheduler;
 use crate::worker_pool::{get_or_create_pool, WorkerPool};
@@ -80,7 +80,10 @@ impl Executor {
                 .iter()
                 .enumerate()
                 .filter(|(_, stage)| {
-                    stage.dependencies.iter().all(|dep| completed_stages.contains_key(dep))
+                    stage
+                        .dependencies
+                        .iter()
+                        .all(|dep| completed_stages.contains_key(dep))
                 })
                 .map(|(idx, _)| idx)
                 .collect();
@@ -102,9 +105,7 @@ impl Executor {
             // multiple stages share the same scheduler.
             let mut stage_pipeline_list: Vec<(usize, Vec<Pipeline>)> = Vec::new();
             for stage in ready_stages {
-                let pipeline_offset = self
-                    .next_pipeline_id
-                    .fetch_add(1000, Ordering::SeqCst);
+                let pipeline_offset = self.next_pipeline_id.fetch_add(1000, Ordering::SeqCst);
                 let mut builder = PipelineBuilder::new_with_pipeline_offset(
                     stage.id,
                     catalog.clone(),
@@ -167,8 +168,7 @@ impl Executor {
 
         // Completion channel for event-driven DAG scheduling.
         // Each pipeline sends its ID here when the last task finishes.
-        let (completion_tx, mut completion_rx) =
-            tokio::sync::mpsc::channel(pipelines.len());
+        let (completion_tx, mut completion_rx) = tokio::sync::mpsc::channel(pipelines.len());
 
         let scheduler = TaskScheduler::new(worker_pool, Some(completion_tx));
 
@@ -204,9 +204,10 @@ impl Executor {
                     // Check all pipelines that depend on the completed one
                     for pipeline in &pipelines {
                         if pipeline.dependencies.contains(&completed_id) {
-                            let all_deps_done = pipeline.dependencies.iter().all(|dep| {
-                                scheduler.is_pipeline_completed(*dep)
-                            });
+                            let all_deps_done = pipeline
+                                .dependencies
+                                .iter()
+                                .all(|dep| scheduler.is_pipeline_completed(*dep));
                             if all_deps_done && scheduler.start_pipeline(pipeline.id) {
                                 Self::start_pipeline(pipeline, scheduler.clone());
                             }
@@ -226,10 +227,7 @@ impl Executor {
         }
     }
 
-    fn start_pipeline(
-        pipeline: &crate::pipeline::Pipeline,
-        scheduler: Arc<TaskScheduler>,
-    ) {
+    fn start_pipeline(pipeline: &crate::pipeline::Pipeline, scheduler: Arc<TaskScheduler>) {
         // Ensure pipeline state transitions to RUNNING before submitting tasks.
         // This is required so that complete_pipeline() can later CAS to COMPLETED.
         let _ = scheduler.start_pipeline(pipeline.id);

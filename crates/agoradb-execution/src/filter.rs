@@ -13,46 +13,29 @@
 // limitations under the License.
 
 use crate::chunk::{ColumnVector, DataChunk};
+use crate::pipeline::{CloneOperator, PipelineOperator};
 use crate::predicate_builder::build_predicate_fn;
 use agoradb_core::DataType;
-use crate::operator::Operator;
-use crate::pipeline::{CloneOperator, PipelineOperator};
 use agoradb_core::{ExecutionError, PredicateDef};
 
 pub type PredicateFn = Box<dyn Fn(&DataChunk, usize) -> bool + Send>;
 
-pub struct FilterOperator {
-    predicate: PredicateFn,
-    output: Option<Box<dyn Operator>>,
-}
-
-impl FilterOperator {
-    pub fn new(predicate: PredicateFn) -> Self {
-        Self {
-            predicate,
-            output: None,
-        }
-    }
-}
-
-/// Pipeline-based filter operator (pull-based).
+/// Pipeline filter operator.
 /// Stores the `PredicateDef` (cloneable) and builds the closure on each `execute` call.
-pub struct FilterPipelineOperator {
+pub struct FilterOperator {
     predicate_def: PredicateDef,
 }
 
-impl FilterPipelineOperator {
+impl FilterOperator {
     pub fn new(predicate_def: PredicateDef) -> Self {
         Self { predicate_def }
     }
 }
 
-impl PipelineOperator for FilterPipelineOperator {
+impl PipelineOperator for FilterOperator {
     fn execute(&mut self, input: &DataChunk, output: &mut DataChunk) -> Result<(), ExecutionError> {
         let predicate = build_predicate_fn(&self.predicate_def)?;
-        let selected: Vec<usize> = (0..input.len)
-            .filter(|&i| predicate(input, i))
-            .collect();
+        let selected: Vec<usize> = (0..input.len).filter(|&i| predicate(input, i)).collect();
 
         if selected.is_empty() {
             return Ok(());
@@ -87,58 +70,10 @@ impl PipelineOperator for FilterPipelineOperator {
     }
 }
 
-impl CloneOperator for FilterPipelineOperator {
+impl CloneOperator for FilterOperator {
     fn clone_box(&self) -> Box<dyn PipelineOperator> {
         Box::new(Self {
             predicate_def: self.predicate_def.clone(),
         })
-    }
-}
-
-impl Operator for FilterOperator {
-    fn push(&mut self, chunk: DataChunk) -> Result<(), ExecutionError> {
-        let selected: Vec<usize> = (0..chunk.len)
-            .filter(|&i| (self.predicate)(&chunk, i))
-            .collect();
-
-        if selected.is_empty() {
-            return Ok(());
-        }
-
-        let mut output_columns = Vec::with_capacity(chunk.columns.len());
-        for col in &chunk.columns {
-            let mut new_col = ColumnVector::new(col.data_type.clone(), selected.len());
-            for &idx in &selected {
-                match col.data_type {
-                    DataType::Int64 => new_col.push_i64(col.as_i64_slice()[idx]),
-                    DataType::Float64 => {
-                        let slice = unsafe {
-                            std::slice::from_raw_parts(col.data.as_ptr() as *const f64, col.len)
-                        };
-                        new_col.push_f64(slice[idx]);
-                    }
-                    DataType::Boolean => new_col.push_bool(col.data[idx] != 0),
-                    DataType::Utf8 => new_col.push_utf8(col.as_utf8_slice()[idx]),
-                }
-                new_col.validity[new_col.len - 1] = col.validity[idx];
-            }
-            output_columns.push(new_col);
-        }
-
-        if let Some(ref mut output) = self.output {
-            output.push(DataChunk::new(output_columns))?;
-        }
-        Ok(())
-    }
-
-    fn finalize(&mut self) -> Result<(), ExecutionError> {
-        if let Some(ref mut output) = self.output {
-            output.finalize()?;
-        }
-        Ok(())
-    }
-
-    fn set_output(&mut self, output: Box<dyn Operator>) {
-        self.output = Some(output);
     }
 }

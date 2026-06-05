@@ -12,5 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod plan;
-pub mod planner;
+use crate::{DataType, ExecutionError};
+use std::collections::HashMap;
+
+/// Provides table schema information for the query analyzer.
+///
+/// Implementations can be backed by a catalog, a static map, or any other
+/// schema source. The analyzer uses this trait to validate column references
+/// and populate [`Scan`](crate::StagePlan::Scan) schemas.
+pub trait SchemaProvider {
+    /// Return the schema (column name → [`DataType`]) for a given table.
+    fn get_table_schema(&self, table: &str) -> Result<HashMap<String, DataType>, ExecutionError>;
+}

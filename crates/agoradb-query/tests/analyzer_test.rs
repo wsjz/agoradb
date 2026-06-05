@@ -12,8 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use agoradb_query::logical::analyzer::{Analyzer, SchemaProvider};
-use agoradb_query::logical::plan::{DataType, LogicalExpr, LogicalPlan};
+use agoradb_core::{DataType, ExecutionError, SchemaProvider};
+use agoradb_query::logical::analyzer::Analyzer;
+use agoradb_query::logical::plan::{LogicalExpr, LogicalPlan};
 use std::collections::HashMap;
 
 struct TestSchemaProvider {
@@ -44,6 +45,7 @@ fn test_analyzer_valid_columns() {
 
     let mut plan = LogicalPlan::Scan {
         table: "users".to_string(),
+        alias: None,
         schema: Vec::new(),
     };
 
@@ -76,6 +78,7 @@ fn test_analyzer_invalid_column() {
         )],
         input: Box::new(LogicalPlan::Scan {
             table: "users".to_string(),
+            alias: None,
             schema: Vec::new(),
         }),
     };
@@ -93,6 +96,7 @@ fn test_analyzer_table_not_found() {
 
     let mut plan = LogicalPlan::Scan {
         table: "nonexistent".to_string(),
+        alias: None,
         schema: Vec::new(),
     };
 
