@@ -13,8 +13,10 @@
 // limitations under the License.
 
 pub mod catalog;
+pub mod datafusion_bridge;
 pub mod parquet_util;
 pub mod scan_provider;
 
 pub use catalog::AgoraCatalog;
+pub use datafusion_bridge::{AgoraCatalogProvider, IcebergTableProvider};
 pub use scan_provider::StorageScanProvider;

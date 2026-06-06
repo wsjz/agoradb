@@ -6,7 +6,9 @@ license.workspace = true
 
 [dependencies]
 agoradb-core = { path = "../agoradb-core" }
-sqlparser = "0.54"
+agoradb-catalog = { path = "../agoradb-catalog" }
 thiserror = { workspace = true }
+datafusion = { workspace = true }
+sqlparser = "0.59"
 
 [dev-dependencies]

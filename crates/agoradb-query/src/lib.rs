@@ -18,7 +18,11 @@ pub mod expr;
 pub mod logical;
 pub mod parser;
 pub mod physical;
+pub mod session;
+pub mod sql_parser;
 
 pub use execution_plan::StageBuilder;
+pub use sql_parser::AgoraSQLParser;
 pub use expr::{BinaryOp, LiteralValue};
 pub use physical::plan::{PhysicalExpr, PhysicalPlan};
+pub use session::AgoraSessionContext;

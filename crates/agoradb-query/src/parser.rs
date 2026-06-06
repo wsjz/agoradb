@@ -141,25 +141,35 @@ impl SqlParser {
         // ORDER BY → Sort (before Limit)
         if let Some(order_by) = query.order_by.as_ref() {
             let mut sort_exprs = Vec::new();
-            for ob in &order_by.exprs {
-                let expr = self.expr_to_logical(&ob.expr)?;
-                let direction = match ob.asc {
-                    Some(true) | None => crate::logical::plan::SortDirection::Asc,
-                    Some(false) => crate::logical::plan::SortDirection::Desc,
-                };
-                sort_exprs.push((expr, direction));
+            if let sqlparser::ast::OrderByKind::Expressions(exprs) = &order_by.kind {
+                for ob in exprs {
+                    let expr = self.expr_to_logical(&ob.expr)?;
+                    let direction = match ob.options.asc {
+                        Some(true) | None => crate::logical::plan::SortDirection::Asc,
+                        Some(false) => crate::logical::plan::SortDirection::Desc,
+                    };
+                    sort_exprs.push((expr, direction));
+                }
             }
-            plan = LogicalPlan::Sort {
-                expressions: sort_exprs,
-                input: Box::new(plan),
-            };
+            if !sort_exprs.is_empty() {
+                plan = LogicalPlan::Sort {
+                    expressions: sort_exprs,
+                    input: Box::new(plan),
+                };
+            }
         }
 
         // LIMIT → Limit
-        if let Some(limit) = &query.limit {
-            let fetch = match limit {
-                sqlparser::ast::Expr::Value(sqlparser::ast::Value::Number(n, _)) => {
-                    n.parse().unwrap_or(usize::MAX)
+        if let Some(limit_clause) = &query.limit_clause {
+            let fetch = match limit_clause {
+                sqlparser::ast::LimitClause::LimitOffset { limit, .. } => {
+                    limit.as_ref().map_or(usize::MAX, |expr| match expr {
+                        sqlparser::ast::Expr::Value(vws) => match &vws.value {
+                            sqlparser::ast::Value::Number(n, _) => n.parse().unwrap_or(usize::MAX),
+                            _ => usize::MAX,
+                        },
+                        _ => usize::MAX,
+                    })
                 }
                 _ => usize::MAX,
             };
@@ -337,7 +347,7 @@ impl SqlParser {
                     .join(".");
                 Ok(LogicalExpr::Column(name))
             }
-            sqlparser::ast::Expr::Value(val) => match val {
+            sqlparser::ast::Expr::Value(val) => match &val.value {
                 sqlparser::ast::Value::Number(n, _) => {
                     if n.contains('.') {
                         Ok(LogicalExpr::Literal(LiteralValue::Float64(
