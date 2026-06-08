@@ -13,39 +13,28 @@
 // limitations under the License.
 
 //! Full pipeline runner for integration tests.
+//!
+//! DEPRECATED: The self-built query pipeline has been replaced by Apache DataFusion.
+//! Use `AgoraSessionContext::sql()` instead.
 
 use agoradb_catalog::AgoraCatalog;
 use agoradb_execution::chunk::DataChunk;
-use agoradb_execution::executor::Executor;
 use agoradb_core::SchemaProvider;
-use agoradb_query::logical::analyzer::Analyzer;
-use agoradb_query::parser::SqlParser;
-use agoradb_query::physical::planner::PhysicalPlanner;
-use agoradb_query::StageBuilder;
 use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Run a SQL query through the complete pipeline and return result chunks.
 ///
-/// Pipeline: SQL → Parser → Analyzer → PhysicalPlanner → StageBuilder → Executor
+/// DEPRECATED: This function is a stub. The old pipeline (Parser → Analyzer →
+/// PhysicalPlanner → StageBuilder → Executor) has been removed in favor of
+/// Apache DataFusion. Use `AgoraSessionContext::sql()` instead.
 pub async fn run_sql_pipeline(
-    sql: &str,
-    catalog: &Arc<AgoraCatalog>,
-    schema_provider: &dyn SchemaProvider,
-    schema_map: &HashMap<String, usize>,
+    _sql: &str,
+    _catalog: &Arc<AgoraCatalog>,
+    _schema_provider: &dyn SchemaProvider,
+    _schema_map: &HashMap<String, usize>,
 ) -> Result<Vec<DataChunk>, agoradb_core::ExecutionError> {
-    let parser = SqlParser::new();
-    let mut logical_plan = parser.parse(sql)?;
-
-    let analyzer = Analyzer::new();
-    analyzer.analyze(&mut logical_plan, schema_provider)?;
-
-    let planner = PhysicalPlanner::new();
-    let physical_plan = planner.plan(&logical_plan, schema_map)?;
-
-    let stage_builder = StageBuilder::new();
-    let stage_plan = stage_builder.build(&physical_plan)?;
-
-    let executor = Executor::new();
-    executor.execute(&stage_plan, catalog).await
+    Err(agoradb_core::ExecutionError::OperatorError(
+        "The self-built query pipeline has been removed. Use AgoraSessionContext::sql() with DataFusion instead.".to_string(),
+    ))
 }

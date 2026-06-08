@@ -59,12 +59,6 @@ pub enum SourceResult {
 pub trait Source: Send {
     /// Attempt to get the next chunk without blocking.
     fn try_next(&mut self) -> Result<SourceResult, ExecutionError>;
-    /// Optional: inject scheduler reference for event-driven wake.
-    /// Called once when the PipelineTask is created.
-    fn set_scheduler(&mut self, _scheduler: Arc<crate::scheduler::TaskScheduler>) {}
-    /// Optional: inject a per-task waker for precise wakeups.
-    /// Called once when the PipelineTask is created.
-    fn set_waker(&mut self, _waker: crate::scheduler::TaskWaker) {}
 }
 
 // ------------------------------------------------------------------
@@ -88,10 +82,6 @@ pub struct TableScanSource {
     tx: Option<mpsc::SyncSender<DataChunk>>,
     #[allow(dead_code)]
     total_morsels: usize,
-    /// Scheduler handle set by `create_task_with_scheduler`.
-    scheduler: Option<std::sync::Arc<crate::scheduler::TaskScheduler>>,
-    /// Per-task waker for precise wakeups (StarRocks/Doris style).
-    waker: Option<crate::scheduler::TaskWaker>,
     /// Deferred start state — moved into the background task on first `try_next`.
     catalog: Option<Arc<AgoraCatalog>>,
     /// Central morsel scheduler shared across all tasks of the same scan.
@@ -109,8 +99,6 @@ impl TableScanSource {
             rx,
             tx: Some(tx),
             total_morsels,
-            scheduler: None,
-            waker: None,
             catalog: Some(catalog),
             morsel_scheduler: Some(morsel_scheduler),
         }
@@ -125,12 +113,10 @@ impl TableScanSource {
         let catalog = self.catalog.take().unwrap();
         let morsel_scheduler = self.morsel_scheduler.take().unwrap();
         let tx = self.tx.take().unwrap();
-        let scheduler = self.scheduler.clone();
-        let waker = self.waker.clone();
 
         // All I/O is dispatched to the shared global runtime.
         get_io_runtime().spawn(async move {
-            Self::read_morsels(catalog, morsel_scheduler, tx, scheduler, waker).await;
+            Self::read_morsels(catalog, morsel_scheduler, tx).await;
         });
     }
 
@@ -138,8 +124,6 @@ impl TableScanSource {
         catalog: Arc<AgoraCatalog>,
         morsel_scheduler: Arc<MorselScheduler>,
         tx: mpsc::SyncSender<DataChunk>,
-        scheduler: Option<std::sync::Arc<crate::scheduler::TaskScheduler>>,
-        waker: Option<crate::scheduler::TaskWaker>,
     ) {
         let mut morsel_count = 0;
         let mut batch_count = 0;
@@ -162,10 +146,6 @@ impl TableScanSource {
                                     );
                                     return;
                                 }
-                                // Data arrived — wake this task precisely.
-                                if let Some(ref w) = waker {
-                                    w.wake();
-                                }
                             }
                             Err(e) => {
                                 eprintln!("[DEBUG-IO] from_record_batch failed: {:?}", e);
@@ -184,15 +164,6 @@ impl TableScanSource {
             "[DEBUG-IO] read_morsels done: {} morsels, {} batches, {} chunks",
             morsel_count, batch_count, chunk_count
         );
-        // After all data sent, wake this task precisely...
-        if let Some(ref w) = waker {
-            w.wake();
-        }
-        // ...and broadcast-wake all blocked tasks as a safety net.
-        // This prevents lost tasks when wake() races with register_blocked_task().
-        if let Some(ref sched) = scheduler {
-            sched.wake_all_blocked_tasks();
-        }
     }
 }
 
@@ -204,14 +175,6 @@ impl Source for TableScanSource {
             Err(mpsc::TryRecvError::Empty) => Ok(SourceResult::NotReady),
             Err(mpsc::TryRecvError::Disconnected) => Ok(SourceResult::Done),
         }
-    }
-
-    fn set_scheduler(&mut self, scheduler: std::sync::Arc<crate::scheduler::TaskScheduler>) {
-        self.scheduler = Some(scheduler);
-    }
-
-    fn set_waker(&mut self, waker: crate::scheduler::TaskWaker) {
-        self.waker = Some(waker);
     }
 }
 

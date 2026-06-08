@@ -13,10 +13,9 @@
 // limitations under the License.
 
 use crate::chunk::DataChunk;
-use crate::pipeline::{CloneOperator, PipelineOperator};
 use agoradb_core::ExecutionError;
 
-/// Pipeline limit operator.
+/// Limit operator.
 pub struct LimitOperator {
     skip: usize,
     fetch: usize,
@@ -33,10 +32,8 @@ impl LimitOperator {
             emitted: 0,
         }
     }
-}
 
-impl PipelineOperator for LimitOperator {
-    fn execute(&mut self, input: &DataChunk, output: &mut DataChunk) -> Result<(), ExecutionError> {
+    pub fn execute(&mut self, input: &DataChunk, output: &mut DataChunk) -> Result<(), ExecutionError> {
         if self.emitted >= self.fetch {
             return Ok(());
         }
@@ -53,20 +50,5 @@ impl PipelineOperator for LimitOperator {
 
         self.seen += chunk_len;
         Ok(())
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-}
-
-impl CloneOperator for LimitOperator {
-    fn clone_box(&self) -> Box<dyn PipelineOperator> {
-        Box::new(Self {
-            skip: self.skip,
-            fetch: self.fetch,
-            seen: 0,
-            emitted: 0,
-        })
     }
 }

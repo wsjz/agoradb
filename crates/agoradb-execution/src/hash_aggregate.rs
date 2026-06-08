@@ -13,9 +13,7 @@
 // limitations under the License.
 
 use crate::chunk::{ColumnVector, DataChunk};
-use crate::pipeline::{CloneOperator, CloneSink, PipelineOperator, Sink};
 use agoradb_core::{AggFunction, DataType, ExecutionError};
-use std::any::Any;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -312,6 +310,17 @@ impl HashAggregateAccumulateSink {
         }
     }
 
+    pub fn consume(&mut self, chunk: &DataChunk) {
+        self.accumulate(chunk);
+    }
+
+    pub fn finalize(&mut self) {
+        self.global_state.register_local_groups(
+            std::mem::take(&mut self.groups),
+            std::mem::take(&mut self.agg_input_types),
+        );
+    }
+
     fn accumulate(&mut self, chunk: &DataChunk) {
         if chunk.len == 0 || chunk.columns.is_empty() {
             return;
@@ -359,43 +368,11 @@ impl HashAggregateAccumulateSink {
     }
 }
 
-impl Sink for HashAggregateAccumulateSink {
-    fn consume(&mut self, chunk: DataChunk) -> Result<(), ExecutionError> {
-        self.accumulate(&chunk);
-        Ok(())
-    }
-
-    fn finalize(&mut self) -> Result<(), ExecutionError> {
-        self.global_state.register_local_groups(
-            std::mem::take(&mut self.groups),
-            std::mem::take(&mut self.agg_input_types),
-        );
-        Ok(())
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-}
-
-impl CloneSink for HashAggregateAccumulateSink {
-    fn clone_box(&self) -> Box<dyn Sink> {
-        Box::new(Self {
-            agg_id: self.agg_id,
-            group_indices: self.group_indices.clone(),
-            agg_indices: self.agg_indices.clone(),
-            groups: HashMap::new(),
-            agg_input_types: Vec::new(),
-            global_state: self.global_state.clone(),
-        })
-    }
-}
-
 // ------------------------------------------------------------------
 // HashAggregateEmitOperator
 // ------------------------------------------------------------------
 
-/// PipelineOperator that emits aggregated results from global state.
+/// Operator that emits aggregated results from global state.
 pub struct HashAggregateEmitOperator {
     agg_id: usize,
     group_indices: Vec<usize>,
@@ -418,6 +395,14 @@ impl HashAggregateEmitOperator {
             global_state,
             emitted: false,
         }
+    }
+
+    pub fn execute(&mut self, _input: &DataChunk, output: &mut DataChunk) -> Result<(), ExecutionError> {
+        if !self.emitted {
+            *output = self.emit_results()?;
+            self.emitted = true;
+        }
+        Ok(())
     }
 
     fn emit_results(&self) -> Result<DataChunk, ExecutionError> {
@@ -533,36 +518,6 @@ impl HashAggregateEmitOperator {
             AggValue::Boolean(v) => col.push_bool(*v),
             AggValue::Utf8(v) => col.push_utf8(v),
         }
-    }
-}
-
-impl PipelineOperator for HashAggregateEmitOperator {
-    fn execute(
-        &mut self,
-        _input: &DataChunk,
-        output: &mut DataChunk,
-    ) -> Result<(), ExecutionError> {
-        if !self.emitted {
-            *output = self.emit_results()?;
-            self.emitted = true;
-        }
-        Ok(())
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-}
-
-impl CloneOperator for HashAggregateEmitOperator {
-    fn clone_box(&self) -> Box<dyn PipelineOperator> {
-        Box::new(Self {
-            agg_id: self.agg_id,
-            group_indices: self.group_indices.clone(),
-            agg_indices: self.agg_indices.clone(),
-            global_state: self.global_state.clone(),
-            emitted: false,
-        })
     }
 }
 

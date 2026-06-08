@@ -12,17 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod execution_plan;
-pub mod explain;
 pub mod expr;
-pub mod logical;
-pub mod parser;
-pub mod physical;
 pub mod session;
 pub mod sql_parser;
 
-pub use execution_plan::StageBuilder;
-pub use sql_parser::AgoraSQLParser;
 pub use expr::{BinaryOp, LiteralValue};
-pub use physical::plan::{PhysicalExpr, PhysicalPlan};
 pub use session::AgoraSessionContext;
+pub use sql_parser::AgoraSQLParser;

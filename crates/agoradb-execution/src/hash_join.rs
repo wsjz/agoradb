@@ -13,10 +13,7 @@
 // limitations under the License.
 
 use crate::chunk::{ColumnVector, DataChunk};
-use crate::pipeline::{CloneOperator, CloneSink, PipelineOperator, Sink};
-use agoradb_core::DataType;
-use agoradb_core::{ExecutionError, JoinType};
-use std::any::Any;
+use agoradb_core::{DataType, ExecutionError, JoinType};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -167,6 +164,17 @@ impl HashJoinBuildSink {
         }
     }
 
+    pub fn consume(&mut self, chunk: &DataChunk) {
+        self.build(chunk);
+    }
+
+    pub fn finalize(&mut self) {
+        self.global_state.register_local_table(
+            std::mem::take(&mut self.local_table),
+            std::mem::take(&mut self.local_chunks),
+        );
+    }
+
     fn build(&mut self, chunk: &DataChunk) {
         let key_col = &chunk.columns[self.left_key];
         let base_idx: usize = self.local_chunks.iter().map(|c| c.len).sum();
@@ -213,42 +221,11 @@ impl HashJoinBuildSink {
     }
 }
 
-impl Sink for HashJoinBuildSink {
-    fn consume(&mut self, chunk: DataChunk) -> Result<(), ExecutionError> {
-        self.build(&chunk);
-        Ok(())
-    }
-
-    fn finalize(&mut self) -> Result<(), ExecutionError> {
-        self.global_state.register_local_table(
-            std::mem::take(&mut self.local_table),
-            std::mem::take(&mut self.local_chunks),
-        );
-        Ok(())
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-}
-
-impl CloneSink for HashJoinBuildSink {
-    fn clone_box(&self) -> Box<dyn Sink> {
-        Box::new(Self {
-            join_id: self.join_id,
-            left_key: self.left_key,
-            local_table: HashMap::new(),
-            local_chunks: Vec::new(),
-            global_state: self.global_state.clone(),
-        })
-    }
-}
-
 // ------------------------------------------------------------------
 // HashJoinProbeOperator
 // ------------------------------------------------------------------
 
-/// PipelineOperator that probes the global hash table.
+/// Operator that probes the global hash table.
 pub struct HashJoinProbeOperator {
     left_key: usize,
     right_key: usize,
@@ -272,6 +249,10 @@ impl HashJoinProbeOperator {
             join_id,
             global_state,
         }
+    }
+
+    pub fn execute(&mut self, input: &DataChunk, output: &mut DataChunk) -> Result<(), ExecutionError> {
+        self.probe(input, output)
     }
 
     fn probe(&self, chunk: &DataChunk, output: &mut DataChunk) -> Result<(), ExecutionError> {
@@ -435,28 +416,6 @@ impl HashJoinProbeOperator {
         }
         dst.validity[dst.len - 1] = false; // NULL
         Ok(())
-    }
-}
-
-impl PipelineOperator for HashJoinProbeOperator {
-    fn execute(&mut self, input: &DataChunk, output: &mut DataChunk) -> Result<(), ExecutionError> {
-        self.probe(input, output)
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-}
-
-impl CloneOperator for HashJoinProbeOperator {
-    fn clone_box(&self) -> Box<dyn PipelineOperator> {
-        Box::new(Self {
-            left_key: self.left_key,
-            right_key: self.right_key,
-            join_type: self.join_type.clone(),
-            join_id: self.join_id,
-            global_state: self.global_state.clone(),
-        })
     }
 }
 

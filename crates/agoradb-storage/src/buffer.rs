@@ -93,4 +93,118 @@ mod tests {
 
         assert!(buffer.should_flush()); // 10_001 >= 10_000
     }
+
+    #[test]
+    fn test_buffer_clear_resets_state() {
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+        let mut buffer = AppendBuffer::new(schema.clone());
+
+        let batch =
+            RecordBatch::try_new(schema, vec![Arc::new(Int64Array::from(vec![1, 2, 3]))]).unwrap();
+        buffer.push(batch);
+        assert_eq!(buffer.row_count, 3);
+
+        buffer.clear();
+        assert_eq!(buffer.row_count, 0);
+        assert!(buffer.batches.is_empty());
+        assert!(!buffer.should_flush());
+    }
+
+    #[test]
+    fn test_buffer_multiple_batches_preserves_order() {
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+        let mut buffer = AppendBuffer::new(schema.clone());
+
+        let batch1 = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(Int64Array::from(vec![1, 2]))],
+        )
+        .unwrap();
+        let batch2 = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(Int64Array::from(vec![3, 4, 5]))],
+        )
+        .unwrap();
+
+        buffer.push(batch1);
+        buffer.push(batch2);
+
+        assert_eq!(buffer.row_count, 5);
+        assert_eq!(buffer.batches.len(), 2);
+        assert_eq!(
+            buffer.batches[0]
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .values(),
+            &[1, 2]
+        );
+        assert_eq!(
+            buffer.batches[1]
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .values(),
+            &[3, 4, 5]
+        );
+    }
+
+    #[test]
+    fn test_buffer_flush_boundary_exactly_threshold() {
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+        let mut buffer = AppendBuffer::new(schema.clone());
+
+        // Push exactly 10_000 rows (the threshold)
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(Int64Array::from((0..10_000i64).collect::<Vec<_>>()))],
+        )
+        .unwrap();
+        buffer.push(batch);
+
+        assert_eq!(buffer.row_count, 10_000);
+        assert!(buffer.should_flush(), "Exactly 10_000 rows should trigger flush");
+    }
+
+    #[test]
+    fn test_buffer_large_batch_exceeds_threshold() {
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+        let mut buffer = AppendBuffer::new(schema.clone());
+
+        // Push 15_000 rows in one batch (exceeds 10_000 threshold)
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(Int64Array::from((0..15_000i64).collect::<Vec<_>>()))],
+        )
+        .unwrap();
+        buffer.push(batch);
+
+        assert_eq!(buffer.row_count, 15_000);
+        assert!(buffer.should_flush(), "15_000 rows should trigger flush");
+    }
+
+    #[test]
+    fn test_buffer_multiple_small_batches_sum_to_threshold() {
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+        let mut buffer = AppendBuffer::new(schema.clone());
+
+        // Push 5 batches of 2000 rows each = 10_000 total
+        for chunk in 0..5 {
+            let start = chunk * 2000;
+            let batch = RecordBatch::try_new(
+                schema.clone(),
+                vec![Arc::new(Int64Array::from(
+                    (start..start + 2000).map(|i| i as i64).collect::<Vec<_>>(),
+                ))],
+            )
+            .unwrap();
+            buffer.push(batch);
+        }
+
+        assert_eq!(buffer.row_count, 10_000);
+        assert_eq!(buffer.batches.len(), 5);
+        assert!(buffer.should_flush(), "5 x 2000 = 10_000 rows should trigger flush");
+    }
 }

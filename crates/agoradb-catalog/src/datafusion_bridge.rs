@@ -54,6 +54,11 @@ impl AgoraCatalogProvider {
             schemas: std::sync::RwLock::new(HashMap::new()),
         }
     }
+
+    /// Get a clone of the inner [`AgoraCatalog`] Arc.
+    pub fn inner_catalog(&self) -> Arc<AgoraCatalog> {
+        Arc::clone(&self.inner)
+    }
 }
 
 impl CatalogProvider for AgoraCatalogProvider {
@@ -201,47 +206,92 @@ impl TableProvider for IcebergTableProvider {
             let task = result.map_err(|e| DataFusionError::External(Box::new(e)))?;
             let path = task.data_file_path();
 
-            // 3. Read Parquet file into RecordBatches
-            let file_batches = read_parquet_file(path, projection)
+            // 3. Read Parquet file into RecordBatches (all columns, projection applied later)
+            let file_batches = read_parquet_file(path, None)
                 .await
                 .map_err(|e| DataFusionError::External(Box::new(e)))?;
             batches.extend(file_batches);
         }
 
-        // 4. Apply limit (simple row-based truncation)
-        if let Some(limit_val) = limit {
-            let mut total = 0;
-            batches.retain(|batch| {
-                if total >= limit_val {
-                    return false;
-                }
-                total += batch.num_rows();
-                true
-            });
-        }
-
-        // 5. Determine the schema for the execution plan
+        // 4. Apply projection and reorder columns to match projection order
         let exec_schema = if let Some(proj) = projection {
             let projected_fields: Vec<_> =
                 proj.iter().map(|&i| self.arrow_schema.field(i).clone()).collect();
-            Arc::new(ArrowSchema::new(projected_fields))
+            let schema = Arc::new(ArrowSchema::new(projected_fields));
+            if proj.is_empty() {
+                // COUNT(*) optimization: project zero columns but preserve row count.
+                let empty = batches
+                    .into_iter()
+                    .map(|batch| {
+                        let opts = arrow::record_batch::RecordBatchOptions::new()
+                            .with_row_count(Some(batch.num_rows()));
+                        arrow::record_batch::RecordBatch::try_new_with_options(
+                            Arc::clone(&schema),
+                            vec![],
+                            &opts,
+                        )
+                        .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))
+                    })
+                    .collect::<DFResult<Vec<_>>>()?;
+                batches = empty;
+            } else {
+                let projected: DFResult<Vec<_>> = batches
+                    .into_iter()
+                    .map(|batch| {
+                        let arrays: Vec<arrow::array::ArrayRef> = proj
+                            .iter()
+                            .map(|&idx| batch.column(idx).clone())
+                            .collect();
+                        arrow::record_batch::RecordBatch::try_new(Arc::clone(&schema), arrays)
+                            .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))
+                    })
+                    .collect();
+                batches = projected?;
+            }
+            schema
         } else {
             Arc::clone(&self.arrow_schema)
         };
 
+        // 5. Apply limit (row-based truncation within and across batches)
+        if let Some(limit_val) = limit {
+            let mut total = 0;
+            let mut truncated = Vec::new();
+            for batch in batches {
+                let batch_rows = batch.num_rows();
+                if total >= limit_val {
+                    break;
+                }
+                if total + batch_rows <= limit_val {
+                    total += batch_rows;
+                    truncated.push(batch);
+                } else {
+                    let take = limit_val - total;
+                    total = limit_val;
+                    let arrays: Vec<arrow::array::ArrayRef> = (0..batch.num_columns())
+                        .map(|i| batch.column(i).slice(0, take))
+                        .collect();
+                    let sliced = arrow::record_batch::RecordBatch::try_new(
+                        batch.schema(),
+                        arrays,
+                    )?;
+                    truncated.push(sliced);
+                }
+            }
+            batches = truncated;
+        }
+
         // 6. Return MemorySourceConfig-backed execution plan
-        // For empty tables, return a single empty partition
         let partitions: Vec<Vec<arrow::record_batch::RecordBatch>> = if batches.is_empty() {
             vec![vec![]]
         } else {
             vec![batches]
         };
 
-        let projection_vec = projection.map(|p| p.to_vec());
         Ok(MemorySourceConfig::try_new_exec(
             &partitions,
             exec_schema,
-            projection_vec,
+            None, // projection already applied above
         )?)
     }
 }

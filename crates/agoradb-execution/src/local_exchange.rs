@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use crate::chunk::DataChunk;
-use crate::pipeline::{CloneSink, Sink};
 use agoradb_core::{ExchangeType, ExecutionError};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -152,7 +151,7 @@ fn partition_chunk(
 }
 
 // ------------------------------------------------------------------
-// LocalExchangeSink — Pipeline-architecture Sink trait
+// LocalExchangeSink
 // ------------------------------------------------------------------
 
 /// A Sink that feeds data into a `LocalExchangeBuffer`.
@@ -166,29 +165,14 @@ impl LocalExchangeSink {
     pub fn new(buffer: Arc<LocalExchangeBuffer>, sink_id: usize) -> Self {
         Self { buffer, sink_id }
     }
-}
 
-impl Sink for LocalExchangeSink {
-    fn consume(&mut self, chunk: DataChunk) -> Result<(), ExecutionError> {
+    pub fn consume(&mut self, chunk: DataChunk) -> Result<(), ExecutionError> {
         self.buffer.push(chunk, self.sink_id)
     }
 
-    fn finalize(&mut self) -> Result<(), ExecutionError> {
+    pub fn finalize(&mut self) -> Result<(), ExecutionError> {
         self.buffer.signal_sink_done();
         Ok(())
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-}
-
-impl CloneSink for LocalExchangeSink {
-    fn clone_box(&self) -> Box<dyn Sink> {
-        Box::new(Self {
-            buffer: self.buffer.clone(),
-            sink_id: self.sink_id,
-        })
     }
 }
 

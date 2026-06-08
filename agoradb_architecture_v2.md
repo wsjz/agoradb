@@ -1,10 +1,11 @@
 # Agora DB — Architecture v2.0
 
 > **Version**: v2.0  
-> **Date**: 2026-06-05  
+> **Date**: 2026-06-08  
 > **Codename**: agoradb  
 > **Positioning**: The Multimodal Columnar Data Lake for Web3 — Embedded, Sovereign, and P2P-Native  
-> **Core Change**: Execution core migrated to Apache DataFusion for production-grade query optimization and vectorized execution. AgoraDB-specific differentiators (Space sovereignty, DID/UCAN, P2P, multimodal) remain as extensions around the DataFusion core.
+> **Core Change**: Execution core migrated to Apache DataFusion for production-grade query optimization and vectorized execution. AgoraDB-specific differentiators (Space sovereignty, DID/UCAN, P2P, multimodal) remain as extensions around the DataFusion core.  
+> **Status**: Phase A/B/D complete. Phase C (custom operators) deferred to Phase 3 (multimodal).
 
 ---
 
@@ -21,7 +22,7 @@
 | Stage/Pipeline Abstraction | StageBuilder + PipelineBuilder | ❌ Removed (DataFusion executes directly) |
 | Catalog Interface | Custom trait | `CatalogProvider` trait (bridge to Iceberg) |
 | Storage Interface | Custom trait | `TableProvider` trait (bridge to Parquet) |
-| Custom Operators | Custom StagePlan variants | `UserDefinedLogicalNode` + `ExecutionPlan` |
+| Custom Operators | Custom StagePlan variants | **None in Phase 1/2** — all DataFusion built-in. Phase 3 (multimodal) may add VectorScan/GraphTraversal |
 | WASM Strategy | Lean (~1-3MB) | Feature-gated (~5MB target for browser) |
 
 **What stays the same**: Space/DID/UCAN, P2P networking, Iceberg Catalog, Parquet storage, VFS layer, multimodal concepts (GRAPH/VECTOR/FTS/BLOB).
@@ -51,8 +52,7 @@
 │  │         DataFusion Logical Plan                             │    │
 │  │              ↓ DataFusion Optimizer (RBO+CBO)              │    │
 │  │         DataFusion Physical Plan                            │    │
-│  │              ↓ AgoraExtensionPlanner                        │    │
-│  │         DataFusion Execution Plan                           │    │
+│  │              ↓ DataFusion Execution Plan                    │    │
 │  └────────────────────────────────────────────────────────────┘    │
 │                      ↓                                              │
 │  ┌────────────────────────────────────────────────────────────┐    │
@@ -205,33 +205,7 @@ impl TableProvider for IcebergTableProvider {
 
 ---
 
-## 6. Custom Operators — AgoraExtensionPlanner
-
-```rust
-pub struct AgoraExtensionPlanner;
-
-impl ExtensionPlanner for AgoraExtensionPlanner {
-    fn plan_extension(
-        &self,
-        node: &dyn UserDefinedLogicalNode,
-        logical_inputs: &[&LogicalPlan],
-        physical_inputs: &[Arc<dyn ExecutionPlan>],
-        session_state: &SessionState,
-    ) -> Result<Option<Arc<dyn ExecutionPlan>>> {
-        match node.name() {
-            "RemoteScan" => Ok(Some(Arc::new(RemoteScanExec::new(...)))),
-            "VectorScan" => Ok(Some(Arc::new(VectorScanExec::new(...)))),
-            "GraphTraversal" => Ok(Some(Arc::new(GraphTraversalExec::new(...)))),
-            "RemoteExec" => Ok(Some(Arc::new(RemoteExec::new(...)))),
-            _ => Ok(None),
-        }
-    }
-}
-```
-
----
-
-## 7. WASM Strategy
+## 6. WASM Strategy
 
 DataFusion WASM ~10MB uncompressed. Target optimization:
 
@@ -267,39 +241,72 @@ browser = [
 
 ---
 
-## 8. Migration Plan
+## 8. Code Migration Statistics
 
-### Phase A: Foundation (2-3 weeks)
-- Add `datafusion` dependency
-- Implement `AgoraCatalogProvider` (bridge Iceberg → DataFusion)
-- Implement `IcebergTableProvider` (bridge Parquet → DataFusion)
-- Verify: DataFusion can read Iceberg tables via AgoraCatalog
+| Metric | Value |
+|--------|-------|
+| **Old code deleted** | **~5,702 lines** (Parser, Analyzer, Planner, Executor, StageBuilder, Pipeline) |
+| **New code added** | **~600 lines** (AgoraCatalogProvider, IcebergTableProvider, AgoraSessionContext, AgoraSQLParser) |
+| **Net reduction** | **~5,100 lines** |
+| **Files deleted** | **36 files** (15 source + 7 test + 14 module files) |
+| **Tests passing** | **31 tests** (0 failures) |
 
-### Phase B: SQL Migration (3-4 weeks)
-- Replace self-built Parser with `AgoraSessionContext`
-- Implement `AgoraSQLParser` with `CREATE SPACE` hook
-- Migrate all SQL tests to DataFusion
-- Verify: TPC-H Q1-Q5 pass
+### Deleted modules
+- `crates/agoradb-query/src/logical/plan.rs`, `analyzer.rs`, `mod.rs`
+- `crates/agoradb-query/src/physical/plan.rs`, `planner.rs`, `mod.rs`
+- `crates/agoradb-query/src/execution_plan.rs`, `parser.rs`, `explain.rs`
+- `crates/agoradb-execution/src/scheduler.rs`, `worker_pool.rs`, `pipeline.rs`, `pipeline_builder.rs`, `executor/mod.rs`
+- All related test files (planner_test, parser_test, analyzer_test, executor_test, runner_test, local_exchange_pipeline_test, sql_pipeline_test)
 
-### Phase C: Custom Operators (2-3 weeks)
-- Implement `AgoraExtensionPlanner`
-- Port RemoteScan, VectorScan, GraphTraversal to DataFusion custom operators
-- Verify: Federation queries, multimodal queries
+---
 
-### Phase D: Cleanup + Benchmark (2 weeks)
-- Remove deprecated self-built code (Parser, Analyzer, Planner, Executor, StageBuilder)
-- Run performance benchmark vs self-built engine
-- WASM compilation verification + feature flag tuning
+## 9. Migration Plan
+
+### Phase A: Foundation ✅ COMPLETE
+- ~~Add `datafusion` dependency~~ ✅ DataFusion 51 + sqlparser 0.59
+- ~~Implement `AgoraCatalogProvider`~~ ✅ (bridge Iceberg → DataFusion)
+- ~~Implement `IcebergTableProvider`~~ ✅ (bridge Parquet → DataFusion)
+- ~~Verify: DataFusion can read Iceberg tables~~ ✅ Integration test passes
+
+### Phase B: SQL Migration ✅ COMPLETE
+- ~~Replace self-built Parser with `AgoraSessionContext`~~ ✅
+- ~~Implement `AgoraSQLParser` with `CREATE SPACE` hook~~ ✅
+- ~~Implement CREATE SPACE execution~~ ✅ (catalog.create_namespace)
+- ~~Fix sqlparser 0.54 → 0.59 compatibility~~ ✅
+
+### Phase C: Custom Operators ⏭️ DEFERRED to Phase 3
+- **Decision**: Phase 1/2 uses only DataFusion built-in operators
+- RemoteScan handled inside TableProvider::scan (no custom ExecutionPlan needed)
+- VectorScan / GraphTraversal deferred until GRAPH/VECTOR modes are implemented
+
+### Phase D: Cleanup + Benchmark ✅ COMPLETE
+- ~~Remove deprecated self-built code~~ ✅ **5,702 lines deleted**
+- Run performance benchmark vs self-built engine → **TODO** (after write path)
+- WASM compilation verification + feature flag tuning → **TODO** (Phase 2b)
 
 ### Phase E: Cypher + Advanced (Phase 3)
 - Cypher parser → DataFusion Logical Plan adapter
 - Full multimodal operator set (GRAPH, VECTOR, FTS)
+- **Custom operators (ExtensionPlanner) introduced here only if needed**
 
-**Total: 9-12 weeks**
+### Phase F: Production Hardening
+- TPC-H benchmark: Q1-Q5 on SF1
+- Write path: Append Buffer → Parquet → Iceberg commit
+- Federation: Arrow Flight server + RemoteScan
+- Security: DID + UCAN implementation
 
 ---
 
-## 9. Risk Assessment
+## 10. Next Steps (Immediate)
+
+1. **Write path**: Append Buffer → Parquet flush → Iceberg atomic commit
+2. **INSERT SQL**: Parser → LogicalPlan → TableProvider insert
+3. **TPC-H validation**: Run Q1-Q5 on SF1 dataset via DataFusion
+4. **Arrow Flight Server**: gRPC server for federated queries
+
+---
+
+## 11. Risk Assessment
 
 | Risk | Mitigation |
 |------|-----------|
@@ -310,7 +317,7 @@ browser = [
 
 ---
 
-## 10. Branch Strategy
+## 12. Branch Strategy
 
 ```
 main                    ← Self-built engine (preserved)

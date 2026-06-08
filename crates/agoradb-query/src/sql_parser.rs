@@ -11,6 +11,7 @@ use datafusion::sql::sqlparser::dialect::PostgreSqlDialect;
 use datafusion::sql::sqlparser::parser::Parser;
 
 /// AgoraDB SQL statement.
+#[derive(Debug)]
 pub enum AgoraStatement {
     /// Standard SQL statement (delegated to DataFusion).
     Sql(Vec<datafusion::sql::sqlparser::ast::Statement>),
@@ -47,7 +48,8 @@ impl AgoraSQLParser {
             ExecutionError::OperatorError(format!("SQL parse error: {e}"))
         })?;
 
-        Ok(vec![AgoraStatement::Sql(statements)])
+        // Wrap each statement individually so multi-statement SQL is visible
+        Ok(statements.into_iter().map(|s| AgoraStatement::Sql(vec![s])).collect())
     }
 
     fn parse_create_space(
@@ -168,5 +170,89 @@ mod tests {
         let stmts = parser.parse("SELECT id FROM users").unwrap();
         assert_eq!(stmts.len(), 1);
         assert!(matches!(&stmts[0], AgoraStatement::Sql(_)));
+    }
+
+    #[test]
+    fn test_parse_create_space_missing_name() {
+        let parser = AgoraSQLParser::new();
+        let result = parser.parse("CREATE SPACE");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Expected space name"), "Error should mention missing name: {}", err);
+    }
+
+    #[test]
+    fn test_parse_create_space_invalid_keyword() {
+        let parser = AgoraSQLParser::new();
+        // "CREATE TABLE" should fall through to standard SQL parser, not CREATE SPACE
+        let stmts = parser.parse("CREATE TABLE users (id INT)").unwrap();
+        assert_eq!(stmts.len(), 1);
+        assert!(matches!(&stmts[0], AgoraStatement::Sql(_)));
+    }
+
+    #[test]
+    fn test_parse_create_space_empty_with() {
+        let parser = AgoraSQLParser::new();
+        let stmts = parser.parse("CREATE SPACE blog WITH").unwrap();
+        match &stmts[0] {
+            AgoraStatement::CreateSpace { name, properties } => {
+                assert_eq!(name, "blog");
+                assert!(properties.is_empty(), "Empty WITH should result in no properties");
+            }
+            _ => panic!("Expected CreateSpace"),
+        }
+    }
+
+    #[test]
+    fn test_parse_create_space_quoted_comma() {
+        let parser = AgoraSQLParser::new();
+        // Value contains a comma inside quotes — should be preserved
+        let stmts = parser.parse("CREATE SPACE blog WITH STORAGE = 'disk,s3'").unwrap();
+        match &stmts[0] {
+            AgoraStatement::CreateSpace { name, properties } => {
+                assert_eq!(name, "blog");
+                assert_eq!(
+                    properties.get("STORAGE"),
+                    Some(&"disk,s3".to_string()),
+                    "Comma inside quotes should be preserved"
+                );
+            }
+            _ => panic!("Expected CreateSpace"),
+        }
+    }
+
+    #[test]
+    fn test_parse_create_space_double_quoted_value() {
+        let parser = AgoraSQLParser::new();
+        let stmts = parser.parse("CREATE SPACE blog WITH MODE = \"vector\"").unwrap();
+        match &stmts[0] {
+            AgoraStatement::CreateSpace { name, properties } => {
+                assert_eq!(name, "blog");
+                assert_eq!(
+                    properties.get("MODE"),
+                    Some(&"vector".to_string()),
+                    "Double-quoted value should be unquoted"
+                );
+            }
+            _ => panic!("Expected CreateSpace"),
+        }
+    }
+
+    #[test]
+    fn test_parse_multiple_statements() {
+        let parser = AgoraSQLParser::new();
+        let stmts = parser.parse("SELECT 1; SELECT 2").unwrap();
+        assert_eq!(stmts.len(), 2, "Should return two separate statements");
+        assert!(matches!(&stmts[0], AgoraStatement::Sql(_)));
+        assert!(matches!(&stmts[1], AgoraStatement::Sql(_)));
+    }
+
+    #[test]
+    fn test_parse_invalid_sql() {
+        let parser = AgoraSQLParser::new();
+        let result = parser.parse("SELEC id FROM users");
+        assert!(result.is_err(), "Invalid SQL should be rejected");
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("parse error"), "Error should mention parse error: {}", err);
     }
 }

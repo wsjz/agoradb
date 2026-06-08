@@ -13,12 +13,9 @@
 // limitations under the License.
 
 use crate::chunk::DataChunk;
-use crate::pipeline::{CloneSink, Sink};
-use agoradb_core::ExecutionError;
-use std::any::Any;
 use std::sync::{Arc, Mutex};
 
-/// A collecting sink — stores all consumed chunks in a Vec, implements `Sink`.
+/// A collecting sink — stores all consumed chunks in a Vec.
 pub struct CollectSink {
     results: Arc<Mutex<Vec<DataChunk>>>,
 }
@@ -40,27 +37,8 @@ impl CollectSink {
     pub fn get_results_arc(&self) -> Arc<Mutex<Vec<DataChunk>>> {
         self.results.clone()
     }
-}
 
-impl Sink for CollectSink {
-    fn consume(&mut self, chunk: DataChunk) -> Result<(), ExecutionError> {
+    pub fn consume(&mut self, chunk: DataChunk) {
         self.results.lock().unwrap().push(chunk);
-        Ok(())
-    }
-
-    fn finalize(&mut self) -> Result<(), ExecutionError> {
-        Ok(())
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-}
-
-impl CloneSink for CollectSink {
-    fn clone_box(&self) -> Box<dyn Sink> {
-        Box::new(Self {
-            results: self.results.clone(),
-        })
     }
 }

@@ -10,5 +10,12 @@ agoradb-catalog = { path = "../agoradb-catalog" }
 thiserror = { workspace = true }
 datafusion = { workspace = true }
 sqlparser = "0.59"
+iceberg = "0.9"
 
 [dev-dependencies]
+tokio = { workspace = true }
+tempfile = "3"
+iceberg = "0.9"
+agoradb-storage = { path = "../agoradb-storage" }
+arrow-array = "57"
+arrow-schema = "57"

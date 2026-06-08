@@ -23,3 +23,6 @@ datafusion = { workspace = true }
 [dev-dependencies]
 tempfile = "3"
 tokio-test = "0.4"
+agoradb-storage = { path = "../agoradb-storage" }
+arrow-array = "57"
+arrow-schema = "57"

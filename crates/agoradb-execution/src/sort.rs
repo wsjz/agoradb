@@ -1,7 +1,5 @@
 use crate::chunk::{ColumnVector, DataChunk};
-use crate::pipeline::{CloneOperator, CloneSink, PipelineOperator, Sink};
 use agoradb_core::{DataType, ExecutionError, SortDirection};
-use std::any::Any;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::sync::Arc;
@@ -306,42 +304,23 @@ impl SortCollectSink {
             sort_state,
         }
     }
-}
 
-impl Sink for SortCollectSink {
-    fn consume(&mut self, chunk: DataChunk) -> Result<(), ExecutionError> {
+    pub fn consume(&mut self, chunk: DataChunk) {
         eprintln!(
             "[DEBUG-SORT] SortCollectSink received chunk: {} rows",
             chunk.len
         );
         self.sort_state.push(chunk);
-        Ok(())
     }
 
-    fn finalize(&mut self) -> Result<(), ExecutionError> {
-        // SortState is lazily sorted on emit — nothing to do here
-        Ok(())
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-}
-
-impl CloneSink for SortCollectSink {
-    fn clone_box(&self) -> Box<dyn Sink> {
-        Box::new(Self {
-            sort_id: self.sort_id,
-            sort_state: self.sort_state.clone(),
-        })
-    }
+    pub fn finalize(&mut self) {}
 }
 
 // ------------------------------------------------------------------
 // SortEmitOperator
 // ------------------------------------------------------------------
 
-/// PipelineOperator that emits sorted results from a SortState.
+/// Operator that emits sorted results from a SortState.
 pub struct SortEmitOperator {
     sort_id: usize,
     sort_state: Arc<SortState>,
@@ -356,10 +335,8 @@ impl SortEmitOperator {
             emitted: false,
         }
     }
-}
 
-impl PipelineOperator for SortEmitOperator {
-    fn execute(
+    pub fn execute(
         &mut self,
         _input: &DataChunk,
         output: &mut DataChunk,
@@ -379,20 +356,6 @@ impl PipelineOperator for SortEmitOperator {
             *output = result;
         }
         Ok(())
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-}
-
-impl CloneOperator for SortEmitOperator {
-    fn clone_box(&self) -> Box<dyn PipelineOperator> {
-        Box::new(Self {
-            sort_id: self.sort_id,
-            sort_state: self.sort_state.clone(),
-            emitted: false,
-        })
     }
 }
 

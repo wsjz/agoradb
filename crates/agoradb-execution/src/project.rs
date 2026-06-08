@@ -13,10 +13,9 @@
 // limitations under the License.
 
 use crate::chunk::{ColumnVector, DataChunk};
-use crate::pipeline::{CloneOperator, PipelineOperator};
 use agoradb_core::ExecutionError;
 
-/// Pipeline project operator.
+/// Project operator.
 pub struct ProjectOperator {
     column_indices: Vec<usize>,
 }
@@ -25,10 +24,8 @@ impl ProjectOperator {
     pub fn new(column_indices: Vec<usize>) -> Self {
         Self { column_indices }
     }
-}
 
-impl PipelineOperator for ProjectOperator {
-    fn execute(&mut self, input: &DataChunk, output: &mut DataChunk) -> Result<(), ExecutionError> {
+    pub fn execute(&mut self, input: &DataChunk, output: &mut DataChunk) -> Result<(), ExecutionError> {
         let mut columns = Vec::with_capacity(self.column_indices.len());
         for &idx in &self.column_indices {
             if idx >= input.columns.len() {
@@ -48,17 +45,5 @@ impl PipelineOperator for ProjectOperator {
         }
         *output = DataChunk::new(columns);
         Ok(())
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-}
-
-impl CloneOperator for ProjectOperator {
-    fn clone_box(&self) -> Box<dyn PipelineOperator> {
-        Box::new(Self {
-            column_indices: self.column_indices.clone(),
-        })
     }
 }
