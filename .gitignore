@@ -3,3 +3,4 @@ target/
 .idea
 docs
 Cargo.lock
+.claude
