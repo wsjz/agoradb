@@ -12,11 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use agoradb_catalog::AgoraCatalog;
 use agoradb_core::CompactionError;
 use arrow_array::RecordBatch;
 use bytes::Bytes;
 use futures::StreamExt;
+use iceberg::io::FileIO;
 use iceberg::spec::{DataContentType, DataFileBuilder, DataFileFormat};
 use iceberg::transaction::{ApplyTransactionAction, Transaction};
 use iceberg::{Catalog, TableIdent};
@@ -27,7 +27,9 @@ use std::sync::Arc;
 
 /// Service for compacting small Parquet files into larger ones.
 pub struct CompactionService {
-    catalog: Arc<AgoraCatalog>,
+    catalog: Arc<dyn Catalog>,
+    file_io: FileIO,
+    root_path: String,
     #[allow(dead_code)]
     target_file_size: usize,
     temp_dir: PathBuf,
@@ -38,9 +40,32 @@ impl CompactionService {
     pub const DEFAULT_TARGET_FILE_SIZE: usize = 128 * 1024 * 1024;
 
     /// Create a new [`CompactionService`].
-    pub fn new(catalog: Arc<AgoraCatalog>, temp_dir: PathBuf) -> Self {
+    pub fn new(
+        catalog: Arc<dyn Catalog>,
+        file_io: FileIO,
+        root_path: impl Into<String>,
+        temp_dir: PathBuf,
+    ) -> Self {
         Self {
             catalog,
+            file_io,
+            root_path: root_path.into(),
+            target_file_size: Self::DEFAULT_TARGET_FILE_SIZE,
+            temp_dir,
+        }
+    }
+
+    /// Create a new [`CompactionService`] from a concrete catalog implementation.
+    pub fn new_with_catalog<C: Catalog + 'static>(
+        catalog: Arc<C>,
+        file_io: FileIO,
+        root_path: impl Into<String>,
+        temp_dir: PathBuf,
+    ) -> Self {
+        Self {
+            catalog: catalog as Arc<dyn Catalog>,
+            file_io,
+            root_path: root_path.into(),
             target_file_size: Self::DEFAULT_TARGET_FILE_SIZE,
             temp_dir,
         }
@@ -114,13 +139,12 @@ impl CompactionService {
         let file_size = std::fs::metadata(&temp_path)?.len() as u64;
 
         // 5. Upload via file_io.
-        let space_data_dir = format!("{}/data", self.catalog.root_path());
+        let space_data_dir = format!("{}/data", self.root_path);
         let target_filename = format!("{}.parquet", uuid::Uuid::new_v4());
         let target_path = format!("{}/{}", space_data_dir, target_filename);
 
         let output = self
-            .catalog
-            .file_io()
+            .file_io
             .new_output(&target_path)
             .map_err(|e| CompactionError::CompactionFailed(e.to_string()))?;
         let data = tokio::fs::read(&temp_path).await?;

@@ -8,7 +8,6 @@ authors.workspace = true
 [dependencies]
 agoradb-catalog = { path = "../crates/agoradb-catalog" }
 agoradb-core = { path = "../crates/agoradb-core" }
-agoradb-execution = { path = "../crates/agoradb-execution" }
 agoradb-query = { path = "../crates/agoradb-query" }
 iceberg = "0.9"
 tokio = { workspace = true }

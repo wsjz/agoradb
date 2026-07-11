@@ -25,7 +25,7 @@
 use agoradb_catalog::AgoraCatalog;
 use agoradb_storage::StorageEngine;
 use arrow::array::{Date32Array, Decimal128Array, Int32Array, Int64Array, StringArray};
-use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+use arrow::datatypes::{DataType, Field, Schema};
 use arrow_array::RecordBatch;
 use arrow_schema::SchemaRef;
 use clap::Parser;
@@ -34,7 +34,7 @@ use iceberg::{Catalog, NamespaceIdent, TableCreation};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 const BATCH_SIZE: usize = 1024;
@@ -89,17 +89,23 @@ async fn generate(args: Args) {
     let nation_count = 25usize;
     let customer_count = (sf * 15000.0).round() as usize;
     let orders_count = (sf * 150000.0).round() as usize;
+    let supplier_count = (sf * 10000.0).round() as usize;
+    let part_count = (sf * 200000.0).round() as usize;
+    let partsupp_count = part_count * 4;
 
     eprintln!("Generating TPC-H test data (SF={}):", sf);
     eprintln!("  region:     {}", region_count);
     eprintln!("  nation:     {}", nation_count);
     eprintln!("  customer:   {}", customer_count);
     eprintln!("  orders:     {}", orders_count);
+    eprintln!("  supplier:   {}", supplier_count);
+    eprintln!("  part:       {}", part_count);
+    eprintln!("  partsupp:   {}", partsupp_count);
 
     // Set up catalog
     let root_path = output_dir.to_str().unwrap().to_string();
     let file_io = FileIO::new_with_fs();
-    let catalog = Arc::new(AgoraCatalog::new(file_io, &root_path));
+    let catalog = Arc::new(AgoraCatalog::new(file_io.clone(), &root_path));
 
     catalog
         .create_namespace(&NamespaceIdent::new("default".to_string()), HashMap::new())
@@ -107,11 +113,14 @@ async fn generate(args: Args) {
         .expect("Failed to create namespace");
 
     // Create tables and generate data
-    generate_region(&catalog, &output_dir, region_count).await;
-    generate_nation(&catalog, &output_dir, nation_count).await;
-    generate_customer(&catalog, &output_dir, customer_count).await;
-    generate_orders(&catalog, &output_dir, orders_count, customer_count).await;
-    generate_lineitem(&catalog, &output_dir, orders_count, sf).await;
+    generate_region(&catalog, file_io.clone(), &root_path, &output_dir, region_count).await;
+    generate_nation(&catalog, file_io.clone(), &root_path, &output_dir, nation_count).await;
+    generate_customer(&catalog, file_io.clone(), &root_path, &output_dir, customer_count).await;
+    generate_orders(&catalog, file_io.clone(), &root_path, &output_dir, orders_count, customer_count).await;
+    generate_lineitem(&catalog, file_io.clone(), &root_path, &output_dir, orders_count, sf).await;
+    generate_supplier(&catalog, file_io.clone(), &root_path, &output_dir, supplier_count).await;
+    generate_part(&catalog, file_io.clone(), &root_path, &output_dir, part_count).await;
+    generate_partsupp(&catalog, file_io.clone(), &root_path, &output_dir, part_count, supplier_count).await;
 
     eprintln!("Done. Data written to {}", output_dir.display());
 }
@@ -127,6 +136,9 @@ fn seed_rng(table_name: &str) -> StdRng {
         "customer" => 3u64,
         "orders" => 4u64,
         "lineitem" => 5u64,
+        "supplier" => 6u64,
+        "part" => 7u64,
+        "partsupp" => 8u64,
         _ => 42u64,
     };
     StdRng::seed_from_u64(seed)
@@ -134,7 +146,9 @@ fn seed_rng(table_name: &str) -> StdRng {
 
 async fn create_table(
     catalog: &Arc<AgoraCatalog>,
-    output_dir: &PathBuf,
+    file_io: FileIO,
+    root_path: &str,
+    output_dir: &Path,
     name: &str,
     arrow_schema: SchemaRef,
 ) -> StorageEngine {
@@ -167,12 +181,19 @@ async fn create_table(
     catalog
         .create_table(&NamespaceIdent::new("default".to_string()), table_creation)
         .await
-        .expect(&format!("Failed to create table {}", name));
+        .unwrap_or_else(|_| panic!("Failed to create table {}", name));
 
     let temp_dir = output_dir.join(".tmp");
     let _ = std::fs::create_dir_all(&temp_dir);
 
-    StorageEngine::new(catalog.clone(), arrow_schema, temp_dir, name.to_string())
+    StorageEngine::new_with_catalog(
+        catalog.clone(),
+        file_io,
+        root_path,
+        arrow_schema,
+        temp_dir,
+        name.to_string(),
+    )
 }
 
 fn arrow_to_iceberg_type(dt: &DataType) -> iceberg::spec::PrimitiveType {
@@ -198,14 +219,20 @@ async fn flush_batch(engine: &mut StorageEngine, batch: RecordBatch) {
 // Region
 // ============================================================================
 
-async fn generate_region(catalog: &Arc<AgoraCatalog>, output_dir: &PathBuf, count: usize) {
+async fn generate_region(
+    catalog: &Arc<AgoraCatalog>,
+    file_io: FileIO,
+    root_path: &str,
+    output_dir: &Path,
+    count: usize,
+) {
     let schema = Arc::new(Schema::new(vec![
         Field::new("r_regionkey", DataType::Int64, false),
         Field::new("r_name", DataType::Utf8, false),
         Field::new("r_comment", DataType::Utf8, false),
     ]));
 
-    let mut engine = create_table(catalog, output_dir, "region", schema.clone()).await;
+    let mut engine = create_table(catalog, file_io, root_path, output_dir, "region", schema.clone()).await;
 
     let names = vec!["AFRICA", "AMERICA", "ASIA", "EUROPE", "MIDDLE EAST"];
     let comments = vec![
@@ -237,7 +264,13 @@ async fn generate_region(catalog: &Arc<AgoraCatalog>, output_dir: &PathBuf, coun
 // Nation
 // ============================================================================
 
-async fn generate_nation(catalog: &Arc<AgoraCatalog>, output_dir: &PathBuf, count: usize) {
+async fn generate_nation(
+    catalog: &Arc<AgoraCatalog>,
+    file_io: FileIO,
+    root_path: &str,
+    output_dir: &Path,
+    count: usize,
+) {
     let schema = Arc::new(Schema::new(vec![
         Field::new("n_nationkey", DataType::Int64, false),
         Field::new("n_name", DataType::Utf8, false),
@@ -245,7 +278,7 @@ async fn generate_nation(catalog: &Arc<AgoraCatalog>, output_dir: &PathBuf, coun
         Field::new("n_comment", DataType::Utf8, false),
     ]));
 
-    let mut engine = create_table(catalog, output_dir, "nation", schema.clone()).await;
+    let mut engine = create_table(catalog, file_io, root_path, output_dir, "nation", schema.clone()).await;
 
     let names = vec![
         "ALGERIA",
@@ -300,7 +333,13 @@ async fn generate_nation(catalog: &Arc<AgoraCatalog>, output_dir: &PathBuf, coun
 // Customer
 // ============================================================================
 
-async fn generate_customer(catalog: &Arc<AgoraCatalog>, output_dir: &PathBuf, count: usize) {
+async fn generate_customer(
+    catalog: &Arc<AgoraCatalog>,
+    file_io: FileIO,
+    root_path: &str,
+    output_dir: &Path,
+    count: usize,
+) {
     let schema = Arc::new(Schema::new(vec![
         Field::new("c_custkey", DataType::Int64, false),
         Field::new("c_name", DataType::Utf8, false),
@@ -312,7 +351,7 @@ async fn generate_customer(catalog: &Arc<AgoraCatalog>, output_dir: &PathBuf, co
         Field::new("c_comment", DataType::Utf8, false),
     ]));
 
-    let mut engine = create_table(catalog, output_dir, "customer", schema.clone()).await;
+    let mut engine = create_table(catalog, file_io, root_path, output_dir, "customer", schema.clone()).await;
     let mut rng = seed_rng("customer");
 
     let mkt_segments = [
@@ -384,7 +423,9 @@ async fn generate_customer(catalog: &Arc<AgoraCatalog>, output_dir: &PathBuf, co
 
 async fn generate_orders(
     catalog: &Arc<AgoraCatalog>,
-    output_dir: &PathBuf,
+    file_io: FileIO,
+    root_path: &str,
+    output_dir: &Path,
     count: usize,
     customer_count: usize,
 ) {
@@ -400,11 +441,11 @@ async fn generate_orders(
         Field::new("o_comment", DataType::Utf8, false),
     ]));
 
-    let mut engine = create_table(catalog, output_dir, "orders", schema.clone()).await;
+    let mut engine = create_table(catalog, file_io, root_path, output_dir, "orders", schema.clone()).await;
     let mut rng = seed_rng("orders");
 
     let priorities = ["1-URGENT", "2-HIGH", "3-MEDIUM", "4-NOT SPECIFIED", "5-LOW"];
-    let order_statuses = [('F', 0.45), ('O', 0.45), ('P', 0.10)];
+    let _order_statuses = [('F', 0.45), ('O', 0.45), ('P', 0.10)];
 
     // Pick 375 distinct customers from the available pool
     let mut customer_pool: Vec<i64> = (1..=customer_count as i64).collect();
@@ -493,7 +534,9 @@ async fn generate_orders(
 
 async fn generate_lineitem(
     catalog: &Arc<AgoraCatalog>,
-    output_dir: &PathBuf,
+    file_io: FileIO,
+    root_path: &str,
+    output_dir: &Path,
     orders_count: usize,
     sf: f64,
 ) {
@@ -516,7 +559,7 @@ async fn generate_lineitem(
         Field::new("l_comment", DataType::Utf8, false),
     ]));
 
-    let mut engine = create_table(catalog, output_dir, "lineitem", schema.clone()).await;
+    let mut engine = create_table(catalog, file_io, root_path, output_dir, "lineitem", schema.clone()).await;
     let mut rng = seed_rng("lineitem");
 
     let return_flags = ["N", "R", "A"];
@@ -625,6 +668,350 @@ async fn generate_lineitem(
                 Arc::new(Date32Array::from(receipt_dates[offset..end].to_vec())) as _,
                 Arc::new(StringArray::from(ship_instructs_v[offset..end].to_vec())) as _,
                 Arc::new(StringArray::from(ship_modes_v[offset..end].to_vec())) as _,
+                Arc::new(StringArray::from(comments[offset..end].to_vec())) as _,
+            ],
+        )
+        .unwrap();
+        flush_batch(&mut engine, batch).await;
+        offset = end;
+    }
+}
+
+// ============================================================================
+// Supplier
+// ============================================================================
+
+async fn generate_supplier(
+    catalog: &Arc<AgoraCatalog>,
+    file_io: FileIO,
+    root_path: &str,
+    output_dir: &Path,
+    count: usize,
+) {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("s_suppkey", DataType::Int64, false),
+        Field::new("s_name", DataType::Utf8, false),
+        Field::new("s_address", DataType::Utf8, false),
+        Field::new("s_nationkey", DataType::Int64, false),
+        Field::new("s_phone", DataType::Utf8, false),
+        Field::new("s_acctbal", DataType::Decimal128(15, 2), false),
+        Field::new("s_comment", DataType::Utf8, false),
+    ]));
+
+    let mut engine = create_table(catalog, file_io, root_path, output_dir, "supplier", schema.clone()).await;
+    let mut rng = seed_rng("supplier");
+
+    let mut keys = Vec::with_capacity(count);
+    let mut names = Vec::with_capacity(count);
+    let mut addresses = Vec::with_capacity(count);
+    let mut nation_keys = Vec::with_capacity(count);
+    let mut phones = Vec::with_capacity(count);
+    let mut acctbals = Vec::with_capacity(count);
+    let mut comments = Vec::with_capacity(count);
+
+    for i in 1..=count {
+        keys.push(i as i64);
+        names.push(format!("Supplier#{:09}", i));
+        addresses.push(format!("Supplier Address #{}", i));
+        nation_keys.push(((i - 1) % 25) as i64);
+        phones.push(format!(
+            "{:02}-{:03}-{:03}-{:04}",
+            rng.gen_range(10..100),
+            rng.gen_range(100..1000),
+            rng.gen_range(100..1000),
+            rng.gen_range(1000..10000)
+        ));
+        acctbals.push(
+            (rng.gen_range(-999..10000) as i128) * 100i128 + rng.gen_range(0..100) as i128,
+        );
+        comments.push(format!("Supplier comment {}", i));
+    }
+
+    let mut offset = 0;
+    while offset < count {
+        let end = (offset + BATCH_SIZE).min(count);
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(Int64Array::from(keys[offset..end].to_vec())) as _,
+                Arc::new(StringArray::from(names[offset..end].to_vec())) as _,
+                Arc::new(StringArray::from(addresses[offset..end].to_vec())) as _,
+                Arc::new(Int64Array::from(nation_keys[offset..end].to_vec())) as _,
+                Arc::new(StringArray::from(phones[offset..end].to_vec())) as _,
+                Arc::new(
+                    Decimal128Array::from(acctbals[offset..end].to_vec())
+                        .with_precision_and_scale(15, 2)
+                        .unwrap(),
+                ) as _,
+                Arc::new(StringArray::from(comments[offset..end].to_vec())) as _,
+            ],
+        )
+        .unwrap();
+        flush_batch(&mut engine, batch).await;
+        offset = end;
+    }
+}
+
+// ============================================================================
+// Part
+// ============================================================================
+
+async fn generate_part(
+    catalog: &Arc<AgoraCatalog>,
+    file_io: FileIO,
+    root_path: &str,
+    output_dir: &Path,
+    count: usize,
+) {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("p_partkey", DataType::Int64, false),
+        Field::new("p_name", DataType::Utf8, false),
+        Field::new("p_mfgr", DataType::Utf8, false),
+        Field::new("p_brand", DataType::Utf8, false),
+        Field::new("p_type", DataType::Utf8, false),
+        Field::new("p_size", DataType::Int32, false),
+        Field::new("p_container", DataType::Utf8, false),
+        Field::new("p_retailprice", DataType::Decimal128(15, 2), false),
+        Field::new("p_comment", DataType::Utf8, false),
+    ]));
+
+    let mut engine = create_table(catalog, file_io, root_path, output_dir, "part", schema.clone()).await;
+    let mut rng = seed_rng("part");
+
+    let colors = [
+        "almond", "antique", "aquamarine", "azure", "beige",
+        "bisque", "black", "blanched", "blue", "blush",
+        "brown", "burlywood", "burnished", "chartreuse", "chocolate",
+        "coral", "cornflower", "cornsilk", "cream", "cyan",
+        "dark", "deep", "dim", "dodger", "drab",
+        "firebrick", "floral", "forest", "frosted", "gainsboro",
+        "ghost", "goldenrod", "green", "grey", "honeydew",
+        "hot", "indian", "ivory", "khaki", "lace",
+        "lavender", "lawn", "lemon", "light", "lime",
+        "linen", "magenta", "maroon", "medium", "metallic",
+        "midnight", "mint", "misty", "moccasin", "navajo",
+        "navy", "olive", "orange", "orchid", "pale",
+        "papaya", "peach", "peru", "pink", "plum",
+        "powder", "puff", "purple", "red", "rose",
+        "rosy", "royal", "saddle", "salmon", "sandy",
+        "seashell", "sienna", "sky", "slate", "smoke",
+        "snow", "spring", "steel", "tan", "thistle",
+        "tomato", "turquoise", "violet", "wheat", "white",
+        "yellow", "yellowgreen",
+    ];
+
+    let materials = [
+        "brass", "bronze", "copper", "gold", "lead",
+        "nickel", "plated", "steel", "tin", "titanium",
+    ];
+
+    let types = [
+        "ANODIZED", "BURNISHED", "BRUSHED", "PLATED", "POLISHED",
+    ];
+
+    let containers = [
+        "SM CASE", "SM BOX", "SM BAG", "SM JAR", "SM PKG",
+        "SM PACK", "SM CAN", "SM DRUM", "LG CASE", "LG BOX",
+        "LG BAG", "LG JAR", "LG PKG", "LG PACK", "LG CAN",
+        "LG DRUM", "MED CASE", "MED BOX", "MED BAG", "MED JAR",
+        "MED PKG", "MED PACK", "MED CAN", "MED DRUM", "JUMBO CASE",
+        "JUMBO BOX", "JUMBO BAG", "JUMBO JAR", "JUMBO PKG", "JUMBO PACK",
+        "JUMBO CAN", "JUMBO DRUM", "WRAP CASE", "WRAP BOX", "WRAP BAG",
+        "WRAP JAR", "WRAP PKG", "WRAP PACK", "WRAP CAN", "WRAP DRUM",
+    ];
+
+    let mut keys = Vec::with_capacity(count);
+    let mut names = Vec::with_capacity(count);
+    let mut mfgrs = Vec::with_capacity(count);
+    let mut brands = Vec::with_capacity(count);
+    let mut types_v = Vec::with_capacity(count);
+    let mut sizes = Vec::with_capacity(count);
+    let mut containers_v = Vec::with_capacity(count);
+    let mut retail_prices = Vec::with_capacity(count);
+    let mut comments = Vec::with_capacity(count);
+
+    for i in 1..=count {
+        keys.push(i as i64);
+
+        // Build p_name: color + material + type (e.g., "almond brass ANODIZED")
+        let color = colors[rng.gen_range(0..colors.len())];
+        let material = materials[rng.gen_range(0..materials.len())];
+        let type_name = types[rng.gen_range(0..types.len())];
+        names.push(format!("{} {} {}", color, material, type_name));
+
+        // p_mfgr: Manufacturer#1 to Manufacturer#5
+        mfgrs.push(format!("Manufacturer#{}", ((i - 1) % 5) + 1));
+
+        // p_brand: Brand#11 to Brand#55
+        brands.push(format!("Brand#{}{}", ((i - 1) % 5) + 1, ((i - 1) % 5) + 1));
+
+        // p_type: from fixed list with some having "%BRASS" suffix for Q2
+        // Use a deterministic set of types that includes BRASS variants
+        let type_pool = [
+            "PROMO BRUSHED STEEL",
+            "STANDARD BRUSHED BRASS",
+            "ECONOMY BRUSHED BRASS",
+            "SMALL BRUSHED BRASS",
+            "MEDIUM BRUSHED BRASS",
+            "LARGE BRUSHED BRASS",
+            "PROMO ANODIZED STEEL",
+            "STANDARD POLISHED STEEL",
+            "ECONOMY PLATED STEEL",
+            "SMALL BURNISHED STEEL",
+            "MEDIUM BRUSHED STEEL",
+            "LARGE POLISHED STEEL",
+            "PROMO PLATED BRASS",
+            "STANDARD BURNISHED BRASS",
+            "ECONOMY ANODIZED BRASS",
+            "SMALL POLISHED BRASS",
+            "MEDIUM PLATED BRASS",
+            "LARGE BURNISHED BRASS",
+            "PROMO BURNISHED STEEL",
+            "STANDARD BRUSHED STEEL",
+            "ECONOMY POLISHED STEEL",
+            "SMALL ANODIZED STEEL",
+            "MEDIUM BURNISHED STEEL",
+            "LARGE PLATED STEEL",
+            "PROMO POLISHED BRASS",
+            "STANDARD ANODIZED BRASS",
+            "ECONOMY BRUSHED STEEL",
+            "SMALL BRUSHED STEEL",
+            "MEDIUM ANODIZED BRASS",
+            "LARGE BRUSHED STEEL",
+            "PROMO BRUSHED BRASS",
+            "STANDARD PLATED STEEL",
+            "ECONOMY BURNISHED BRASS",
+            "SMALL PLATED BRASS",
+            "MEDIUM POLISHED STEEL",
+            "LARGE ANODIZED STEEL",
+            "PROMO ANODIZED BRASS",
+            "STANDARD BURNISHED STEEL",
+            "ECONOMY ANODIZED STEEL",
+            "SMALL BURNISHED BRASS",
+            "MEDIUM PLATED STEEL",
+            "LARGE BURNISHED STEEL",
+            "PROMO PLATED STEEL",
+            "STANDARD POLISHED BRASS",
+            "ECONOMY POLISHED BRASS",
+            "SMALL ANODIZED BRASS",
+            "MEDIUM BURNISHED BRASS",
+            "LARGE POLISHED BRASS",
+            "PROMO BURNISHED BRASS",
+            "STANDARD ANODIZED STEEL",
+            "ECONOMY PLATED BRASS",
+            "SMALL POLISHED STEEL",
+            "MEDIUM ANODIZED STEEL",
+            "LARGE PLATED BRASS",
+            "PROMO POLISHED STEEL",
+            "STANDARD BRUSHED BRASS",
+            "ECONOMY BRUSHED BRASS",
+            "SMALL BRUSHED BRASS",
+            "MEDIUM BRUSHED BRASS",
+            "LARGE BRUSHED BRASS",
+        ];
+        types_v.push(type_pool[rng.gen_range(0..type_pool.len())].to_string());
+
+        // p_size: 1 to 50
+        sizes.push(rng.gen_range(1..=50));
+
+        // p_container: from fixed list
+        containers_v.push(containers[rng.gen_range(0..containers.len())].to_string());
+
+        // p_retailprice: 901.00 to 2099.99
+        let dollars = rng.gen_range(901..2100);
+        let cents = rng.gen_range(0..100);
+        retail_prices.push((dollars as i128) * 100i128 + (cents as i128));
+
+        comments.push(format!("Part comment {}", i));
+    }
+
+    let mut offset = 0;
+    while offset < count {
+        let end = (offset + BATCH_SIZE).min(count);
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(Int64Array::from(keys[offset..end].to_vec())) as _,
+                Arc::new(StringArray::from(names[offset..end].to_vec())) as _,
+                Arc::new(StringArray::from(mfgrs[offset..end].to_vec())) as _,
+                Arc::new(StringArray::from(brands[offset..end].to_vec())) as _,
+                Arc::new(StringArray::from(types_v[offset..end].to_vec())) as _,
+                Arc::new(Int32Array::from(sizes[offset..end].to_vec())) as _,
+                Arc::new(StringArray::from(containers_v[offset..end].to_vec())) as _,
+                Arc::new(
+                    Decimal128Array::from(retail_prices[offset..end].to_vec())
+                        .with_precision_and_scale(15, 2)
+                        .unwrap(),
+                ) as _,
+                Arc::new(StringArray::from(comments[offset..end].to_vec())) as _,
+            ],
+        )
+        .unwrap();
+        flush_batch(&mut engine, batch).await;
+        offset = end;
+    }
+}
+
+// ============================================================================
+// Partsupp
+// ============================================================================
+
+async fn generate_partsupp(
+    catalog: &Arc<AgoraCatalog>,
+    file_io: FileIO,
+    root_path: &str,
+    output_dir: &Path,
+    part_count: usize,
+    supplier_count: usize,
+) {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("ps_partkey", DataType::Int64, false),
+        Field::new("ps_suppkey", DataType::Int64, false),
+        Field::new("ps_availqty", DataType::Int32, false),
+        Field::new("ps_supplycost", DataType::Decimal128(15, 2), false),
+        Field::new("ps_comment", DataType::Utf8, false),
+    ]));
+
+    let mut engine = create_table(catalog, file_io, root_path, output_dir, "partsupp", schema.clone()).await;
+    let mut rng = seed_rng("partsupp");
+
+    let total_rows = part_count * 4;
+
+    let mut part_keys = Vec::with_capacity(total_rows);
+    let mut supp_keys = Vec::with_capacity(total_rows);
+    let mut avail_qtys = Vec::with_capacity(total_rows);
+    let mut supply_costs = Vec::with_capacity(total_rows);
+    let mut comments = Vec::with_capacity(total_rows);
+
+    for part_key in 1..=part_count as i64 {
+        for offset in 0..4 {
+            part_keys.push(part_key);
+            let supp_key = ((part_key + offset as i64 - 1) % supplier_count.max(1) as i64) + 1;
+            supp_keys.push(supp_key);
+            avail_qtys.push(rng.gen_range(1..=9999));
+            let dollars = rng.gen_range(1..=1000);
+            let cents = rng.gen_range(0..100);
+            supply_costs.push((dollars as i128) * 100i128 + (cents as i128));
+            comments.push(format!("Partsupp comment {}-{}", part_key, offset));
+        }
+    }
+
+    eprintln!("  partsupp:   {}", total_rows);
+
+    let mut offset = 0;
+    while offset < total_rows {
+        let end = (offset + BATCH_SIZE).min(total_rows);
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(Int64Array::from(part_keys[offset..end].to_vec())) as _,
+                Arc::new(Int64Array::from(supp_keys[offset..end].to_vec())) as _,
+                Arc::new(Int32Array::from(avail_qtys[offset..end].to_vec())) as _,
+                Arc::new(
+                    Decimal128Array::from(supply_costs[offset..end].to_vec())
+                        .with_precision_and_scale(15, 2)
+                        .unwrap(),
+                ) as _,
                 Arc::new(StringArray::from(comments[offset..end].to_vec())) as _,
             ],
         )

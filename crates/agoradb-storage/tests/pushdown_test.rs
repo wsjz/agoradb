@@ -28,7 +28,7 @@ async fn test_scan_with_predicate_pushdown() {
     let temp_dir = tempfile::tempdir().unwrap();
     let root_path = temp_dir.path().to_str().unwrap().to_string();
     let file_io = iceberg::io::FileIO::new_with_fs();
-    let catalog = Arc::new(AgoraCatalog::new(file_io, &root_path));
+    let catalog = Arc::new(AgoraCatalog::new(file_io.clone(), &root_path));
 
     let namespace = NamespaceIdent::new("default".to_string());
     catalog
@@ -59,8 +59,10 @@ async fn test_scan_with_predicate_pushdown() {
         Field::new("value", DataType::Int64, false),
     ]));
 
-    let mut engine = StorageEngine::new(
+    let mut engine = StorageEngine::new_with_catalog(
         catalog.clone(),
+        file_io.clone(),
+        &root_path,
         arrow_schema.clone(),
         temp_dir.path().to_path_buf(),
         "pushdown_test".to_string(),
@@ -146,7 +148,7 @@ async fn test_scan_with_predicate_no_matches() {
     let temp_dir = tempfile::tempdir().unwrap();
     let root_path = temp_dir.path().to_str().unwrap().to_string();
     let file_io = iceberg::io::FileIO::new_with_fs();
-    let catalog = Arc::new(AgoraCatalog::new(file_io, &root_path));
+    let catalog = Arc::new(AgoraCatalog::new(file_io.clone(), &root_path));
 
     let namespace = NamespaceIdent::new("default".to_string());
     catalog
@@ -175,8 +177,10 @@ async fn test_scan_with_predicate_no_matches() {
         .unwrap();
 
     let arrow_schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
-    let mut engine = StorageEngine::new(
+    let mut engine = StorageEngine::new_with_catalog(
         catalog.clone(),
+        file_io.clone(),
+        &root_path,
         arrow_schema.clone(),
         temp_dir.path().to_path_buf(),
         "empty_filter_test".to_string(),

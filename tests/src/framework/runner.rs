@@ -18,12 +18,11 @@
 //! Use `AgoraSessionContext::sql()` instead.
 
 use agoradb_catalog::AgoraCatalog;
-use agoradb_execution::chunk::DataChunk;
 use agoradb_core::SchemaProvider;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-/// Run a SQL query through the complete pipeline and return result chunks.
+/// Run a SQL query through the complete pipeline.
 ///
 /// DEPRECATED: This function is a stub. The old pipeline (Parser → Analyzer →
 /// PhysicalPlanner → StageBuilder → Executor) has been removed in favor of
@@ -33,7 +32,7 @@ pub async fn run_sql_pipeline(
     _catalog: &Arc<AgoraCatalog>,
     _schema_provider: &dyn SchemaProvider,
     _schema_map: &HashMap<String, usize>,
-) -> Result<Vec<DataChunk>, agoradb_core::ExecutionError> {
+) -> Result<(), agoradb_core::ExecutionError> {
     Err(agoradb_core::ExecutionError::OperatorError(
         "The self-built query pipeline has been removed. Use AgoraSessionContext::sql() with DataFusion instead.".to_string(),
     ))

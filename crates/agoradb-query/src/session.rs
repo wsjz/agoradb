@@ -104,7 +104,7 @@ mod tests {
     async fn test_session_standard_sql_delegate() {
         let temp_dir = tempfile::tempdir().unwrap();
         let file_io = FileIO::new_with_fs();
-        let catalog = Arc::new(AgoraCatalog::new(file_io, temp_dir.path().to_str().unwrap()));
+        let catalog = Arc::new(AgoraCatalog::new(file_io.clone(), temp_dir.path().to_str().unwrap()));
 
         // Create namespace and table
         let ns = iceberg::NamespaceIdent::new("default".to_string());
@@ -129,8 +129,10 @@ mod tests {
             arrow_schema::Field::new("id", arrow_schema::DataType::Int64, false),
             arrow_schema::Field::new("name", arrow_schema::DataType::Utf8, false),
         ]));
-        let mut engine = agoradb_storage::StorageEngine::new(
+        let mut engine = agoradb_storage::StorageEngine::new_with_catalog(
             catalog.clone(),
+            file_io.clone(),
+            temp_dir.path().to_str().unwrap(),
             arrow_schema.clone(),
             temp_dir.path().to_path_buf(),
             "users".to_string(),
@@ -168,6 +170,159 @@ mod tests {
             })
             .collect();
         assert_eq!(ids, vec![1, 2, 3]);
+    }
+
+    #[tokio::test]
+    async fn test_session_insert_values() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let file_io = FileIO::new_with_fs();
+        let catalog = Arc::new(AgoraCatalog::new(
+            file_io.clone(),
+            temp_dir.path().to_str().unwrap(),
+        ));
+
+        // Create namespace and table
+        let ns = iceberg::NamespaceIdent::new("default".to_string());
+        catalog.create_namespace(&ns, std::collections::HashMap::new()).await.unwrap();
+
+        let schema = iceberg::spec::Schema::builder()
+            .with_fields(vec![
+                iceberg::spec::NestedField::required(1, "id", iceberg::spec::Type::Primitive(iceberg::spec::PrimitiveType::Long)).into(),
+                iceberg::spec::NestedField::required(2, "name", iceberg::spec::Type::Primitive(iceberg::spec::PrimitiveType::String)).into(),
+            ])
+            .build()
+            .unwrap();
+
+        let creation = iceberg::TableCreation::builder()
+            .name("users".to_string())
+            .schema(schema)
+            .build();
+        catalog.create_table(&ns, creation).await.unwrap();
+
+        let provider = Arc::new(AgoraCatalogProvider::new(catalog));
+        let ctx = AgoraSessionContext::new(provider);
+
+        // Insert data via SQL
+        let result = ctx.sql(
+            "INSERT INTO agora.default.users VALUES (1, 'alice'), (2, 'bob'), (3, 'charlie')"
+        ).await;
+        assert!(result.is_ok(), "INSERT should succeed: {:?}", result.err());
+
+        // DataFusion DML plans are lazy; collect to execute the insert.
+        let insert_df = result.unwrap();
+        let insert_batches = insert_df.collect().await.unwrap();
+        let inserted_rows: usize = insert_batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(inserted_rows, 1, "INSERT should return a single count batch");
+
+        // Query back the inserted data
+        let df = ctx.sql("SELECT id, name FROM agora.default.users ORDER BY id").await;
+        assert!(df.is_ok(), "SELECT after INSERT should succeed: {:?}", df.err());
+
+        let batches = df.unwrap().collect().await.unwrap();
+        let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total_rows, 3, "Should return 3 inserted rows");
+
+        let ids: Vec<i64> = batches
+            .iter()
+            .flat_map(|b| {
+                b.column(0)
+                    .as_any()
+                    .downcast_ref::<arrow_array::Int64Array>()
+                    .unwrap()
+                    .values()
+                    .to_vec()
+            })
+            .collect();
+        assert_eq!(ids, vec![1, 2, 3]);
+
+        let names: Vec<&str> = batches
+            .iter()
+            .flat_map(|b| {
+                b.column(1)
+                    .as_any()
+                    .downcast_ref::<arrow_array::StringArray>()
+                    .unwrap()
+                    .iter()
+                    .map(|opt| opt.unwrap())
+                    .collect::<Vec<&str>>()
+            })
+            .collect();
+        assert_eq!(names, vec!["alice", "bob", "charlie"]);
+    }
+
+    #[tokio::test]
+    async fn test_session_insert_select() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let file_io = FileIO::new_with_fs();
+        let catalog = Arc::new(AgoraCatalog::new(
+            file_io.clone(),
+            temp_dir.path().to_str().unwrap(),
+        ));
+
+        // Create namespace
+        let ns = iceberg::NamespaceIdent::new("default".to_string());
+        catalog.create_namespace(&ns, std::collections::HashMap::new()).await.unwrap();
+
+        // Create source table
+        let source_schema = iceberg::spec::Schema::builder()
+            .with_fields(vec![
+                iceberg::spec::NestedField::required(1, "id", iceberg::spec::Type::Primitive(iceberg::spec::PrimitiveType::Long)).into(),
+                iceberg::spec::NestedField::required(2, "name", iceberg::spec::Type::Primitive(iceberg::spec::PrimitiveType::String)).into(),
+            ])
+            .build()
+            .unwrap();
+        catalog.create_table(
+            &ns,
+            iceberg::TableCreation::builder().name("source".to_string()).schema(source_schema).build(),
+        ).await.unwrap();
+
+        // Create target table
+        let target_schema = iceberg::spec::Schema::builder()
+            .with_fields(vec![
+                iceberg::spec::NestedField::required(1, "id", iceberg::spec::Type::Primitive(iceberg::spec::PrimitiveType::Long)).into(),
+                iceberg::spec::NestedField::required(2, "name", iceberg::spec::Type::Primitive(iceberg::spec::PrimitiveType::String)).into(),
+            ])
+            .build()
+            .unwrap();
+        catalog.create_table(
+            &ns,
+            iceberg::TableCreation::builder().name("target".to_string()).schema(target_schema).build(),
+        ).await.unwrap();
+
+        let provider = Arc::new(AgoraCatalogProvider::new(catalog));
+        let ctx = AgoraSessionContext::new(provider);
+
+        // Insert into source
+        let insert_source = ctx.sql(
+            "INSERT INTO agora.default.source VALUES (1, 'alice'), (2, 'bob'), (3, 'charlie')"
+        ).await.unwrap();
+        insert_source.collect().await.unwrap();
+
+        // Insert into target from source (filter + projection)
+        let insert_select = ctx.sql(
+            "INSERT INTO agora.default.target SELECT id, name FROM agora.default.source WHERE id > 1"
+        ).await;
+        assert!(insert_select.is_ok(), "INSERT INTO SELECT should succeed: {:?}", insert_select.err());
+        insert_select.unwrap().collect().await.unwrap();
+
+        // Verify target has filtered rows
+        let df = ctx.sql("SELECT id, name FROM agora.default.target ORDER BY id").await.unwrap();
+        let batches = df.collect().await.unwrap();
+        let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total_rows, 2, "Should return 2 rows from SELECT");
+
+        let ids: Vec<i64> = batches
+            .iter()
+            .flat_map(|b| {
+                b.column(0)
+                    .as_any()
+                    .downcast_ref::<arrow_array::Int64Array>()
+                    .unwrap()
+                    .values()
+                    .to_vec()
+            })
+            .collect();
+        assert_eq!(ids, vec![2, 3]);
     }
 
     #[tokio::test]

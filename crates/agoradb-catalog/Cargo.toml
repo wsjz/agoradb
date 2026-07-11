@@ -7,7 +7,9 @@ license.workspace = true
 
 [dependencies]
 agoradb-core = { path = "../agoradb-core" }
+agoradb-storage = { path = "../agoradb-storage" }
 iceberg = "0.9"
+tracing = "0.1"
 tokio = { workspace = true }
 async-trait = "0.1"
 dashmap = "6"
@@ -19,6 +21,10 @@ arrow = "57"
 arrow-array = "57"
 parquet = { version = "57", features = ["arrow"] }
 datafusion = { workspace = true }
+datafusion-datasource = "51"
+datafusion-common = "51"
+datafusion-execution = "51"
+datafusion-physical-plan = "51"
 
 [dev-dependencies]
 tempfile = "3"

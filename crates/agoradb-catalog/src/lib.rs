@@ -14,9 +14,11 @@
 
 pub mod catalog;
 pub mod datafusion_bridge;
+pub mod datafusion_sink;
 pub mod parquet_util;
 pub mod scan_provider;
 
 pub use catalog::AgoraCatalog;
 pub use datafusion_bridge::{AgoraCatalogProvider, IcebergTableProvider};
+pub use datafusion_sink::IcebergDataSink;
 pub use scan_provider::StorageScanProvider;

@@ -36,7 +36,7 @@ pub async fn read_morsel(
         CatalogError::Iceberg(format!("Failed to read parquet {}: {e}", morsel.file_path))
     })?;
 
-    let mut reader = builder.build().map_err(|e| {
+    let reader = builder.build().map_err(|e| {
         CatalogError::Iceberg(format!(
             "Failed to build parquet reader for {}: {e}",
             morsel.file_path
@@ -44,7 +44,7 @@ pub async fn read_morsel(
     })?;
 
     let mut batches = Vec::new();
-    while let Some(batch) = reader.next() {
+    for batch in reader {
         let batch = batch.map_err(|e| CatalogError::Iceberg(format!("Parquet read error: {e}")))?;
         batches.push(batch);
     }

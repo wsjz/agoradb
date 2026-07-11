@@ -38,7 +38,7 @@ async fn setup_catalog_with_table(
 ) -> (Arc<AgoraCatalog>, tempfile::TempDir) {
     let temp_dir = tempfile::tempdir().unwrap();
     let file_io = FileIO::new_with_fs();
-    let catalog = Arc::new(AgoraCatalog::new(file_io, temp_dir.path().to_str().unwrap()));
+    let catalog = Arc::new(AgoraCatalog::new(file_io.clone(), temp_dir.path().to_str().unwrap()));
 
     let ns = NamespaceIdent::new("default".to_string());
     catalog.create_namespace(&ns, HashMap::new()).await.unwrap();
@@ -50,8 +50,10 @@ async fn setup_catalog_with_table(
         .build();
     catalog.create_table(&ns, creation).await.unwrap();
 
-    let mut engine = StorageEngine::new(
+    let mut engine = StorageEngine::new_with_catalog(
         catalog.clone(),
+        file_io.clone(),
+        temp_dir.path().to_str().unwrap(),
         arrow_schema,
         temp_dir.path().to_path_buf(),
         table_name.to_string(),
@@ -107,7 +109,7 @@ fn make_test_batch(schema: Arc<Schema>, count: usize) -> RecordBatch {
 async fn test_datafusion_reads_iceberg_table_schema() {
     let temp_dir = tempfile::tempdir().unwrap();
     let file_io = FileIO::new_with_fs();
-    let catalog = Arc::new(AgoraCatalog::new(file_io, temp_dir.path().to_str().unwrap()));
+    let catalog = Arc::new(AgoraCatalog::new(file_io.clone(), temp_dir.path().to_str().unwrap()));
 
     let ns = NamespaceIdent::new("default".to_string());
     catalog
@@ -355,7 +357,7 @@ async fn test_iceberg_table_provider_scan_with_data() {
     // Load the table and create provider
     let table_ident = TableIdent::from_strs(["default", "users"]).unwrap();
     let table = catalog.load_table(&table_ident).await.unwrap();
-    let provider = agoradb_catalog::IcebergTableProvider::new(table).unwrap();
+    let provider = agoradb_catalog::IcebergTableProvider::new(catalog.clone(), table).unwrap();
 
     // Verify schema
     assert_eq!(provider.schema().fields().len(), 3);
@@ -388,7 +390,7 @@ async fn test_iceberg_table_provider_scan_projection() {
 
     let table_ident = TableIdent::from_strs(["default", "users"]).unwrap();
     let table = catalog.load_table(&table_ident).await.unwrap();
-    let provider = agoradb_catalog::IcebergTableProvider::new(table).unwrap();
+    let provider = agoradb_catalog::IcebergTableProvider::new(catalog.clone(), table).unwrap();
 
     let ctx = SessionContext::new();
     let state = ctx.state();
@@ -419,7 +421,7 @@ async fn test_iceberg_table_provider_scan_limit() {
 
     let table_ident = TableIdent::from_strs(["default", "users"]).unwrap();
     let table = catalog.load_table(&table_ident).await.unwrap();
-    let provider = agoradb_catalog::IcebergTableProvider::new(table).unwrap();
+    let provider = agoradb_catalog::IcebergTableProvider::new(catalog.clone(), table).unwrap();
 
     let ctx = SessionContext::new();
     let state = ctx.state();

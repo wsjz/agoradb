@@ -598,9 +598,10 @@ impl Catalog for AgoraCatalog {
                 .delete(&new_metadata_location)
                 .await
                 .map_err(|e| {
-                    eprintln!(
-                        "Warning: failed to delete stale metadata file {}: {}",
-                        new_metadata_location, e
+                    tracing::warn!(
+                        path = %new_metadata_location,
+                        error = %e,
+                        "failed to delete stale metadata file after commit conflict"
                     );
                 });
             return Err(Error::new(

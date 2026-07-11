@@ -1,14 +1,13 @@
 [profile.dev]
 split-debuginfo = "packed"
 
-rustflags = ["-C", "symbol-mangling-version=v0"]
-
 [profile.test]
 split-debuginfo = "packed"
+
+[build]
+rustflags = ["-C", "symbol-mangling-version=v0"]
 
 [alias]
 sweep = "sweep --time 30"
 
 check-tests = "test --no-run"
-
-[build]

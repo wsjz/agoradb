@@ -22,6 +22,7 @@ use arrow_array::{
 use arrow_schema::{DataType, Field, Schema};
 use futures::StreamExt;
 use iceberg::spec::{NestedField, PrimitiveType, Schema as IcebergSchema, Type};
+use iceberg::io::FileIO;
 use iceberg::{Catalog, NamespaceIdent, TableCreation, TableIdent};
 
 fn tpch_region_schema() -> Schema {
@@ -126,6 +127,8 @@ fn arrow_to_iceberg_schema(arrow_schema: &Schema) -> IcebergSchema {
 /// return the row count.
 async fn create_and_load_table(
     catalog: Arc<AgoraCatalog>,
+    file_io: FileIO,
+    root_path: &str,
     namespace: &NamespaceIdent,
     name: &str,
     arrow_schema: Arc<Schema>,
@@ -144,8 +147,10 @@ async fn create_and_load_table(
         .unwrap();
 
     // 2. Write batch via StorageEngine.
-    let mut engine = StorageEngine::new(
+    let mut engine = StorageEngine::new_with_catalog(
         catalog.clone(),
+        file_io.clone(),
+        root_path,
         arrow_schema,
         temp_dir.to_path_buf(),
         name.to_string(),
@@ -173,7 +178,7 @@ async fn test_tpch_region_table() {
     let temp_dir = tempfile::tempdir().unwrap();
     let root_path = temp_dir.path().to_str().unwrap().to_string();
     let file_io = iceberg::io::FileIO::new_with_fs();
-    let catalog = Arc::new(AgoraCatalog::new(file_io, &root_path));
+    let catalog = Arc::new(AgoraCatalog::new(file_io.clone(), &root_path));
 
     let namespace = NamespaceIdent::new("default".to_string());
     catalog
@@ -196,6 +201,8 @@ async fn test_tpch_region_table() {
 
     let rows = create_and_load_table(
         catalog,
+        file_io.clone(),
+        &root_path,
         &namespace,
         "region",
         arrow_schema,
@@ -211,7 +218,7 @@ async fn test_tpch_nation_table() {
     let temp_dir = tempfile::tempdir().unwrap();
     let root_path = temp_dir.path().to_str().unwrap().to_string();
     let file_io = iceberg::io::FileIO::new_with_fs();
-    let catalog = Arc::new(AgoraCatalog::new(file_io, &root_path));
+    let catalog = Arc::new(AgoraCatalog::new(file_io.clone(), &root_path));
 
     let namespace = NamespaceIdent::new("default".to_string());
     catalog
@@ -235,6 +242,8 @@ async fn test_tpch_nation_table() {
 
     let rows = create_and_load_table(
         catalog,
+        file_io.clone(),
+        &root_path,
         &namespace,
         "nation",
         arrow_schema,
@@ -250,7 +259,7 @@ async fn test_tpch_customer_table() {
     let temp_dir = tempfile::tempdir().unwrap();
     let root_path = temp_dir.path().to_str().unwrap().to_string();
     let file_io = iceberg::io::FileIO::new_with_fs();
-    let catalog = Arc::new(AgoraCatalog::new(file_io, &root_path));
+    let catalog = Arc::new(AgoraCatalog::new(file_io.clone(), &root_path));
 
     let namespace = NamespaceIdent::new("default".to_string());
     catalog
@@ -282,6 +291,8 @@ async fn test_tpch_customer_table() {
 
     let rows = create_and_load_table(
         catalog,
+        file_io.clone(),
+        &root_path,
         &namespace,
         "customer",
         arrow_schema,
@@ -297,7 +308,7 @@ async fn test_tpch_orders_table() {
     let temp_dir = tempfile::tempdir().unwrap();
     let root_path = temp_dir.path().to_str().unwrap().to_string();
     let file_io = iceberg::io::FileIO::new_with_fs();
-    let catalog = Arc::new(AgoraCatalog::new(file_io, &root_path));
+    let catalog = Arc::new(AgoraCatalog::new(file_io.clone(), &root_path));
 
     let namespace = NamespaceIdent::new("default".to_string());
     catalog
@@ -332,6 +343,8 @@ async fn test_tpch_orders_table() {
 
     let rows = create_and_load_table(
         catalog,
+        file_io.clone(),
+        &root_path,
         &namespace,
         "orders",
         arrow_schema,
@@ -347,7 +360,7 @@ async fn test_tpch_lineitem_table() {
     let temp_dir = tempfile::tempdir().unwrap();
     let root_path = temp_dir.path().to_str().unwrap().to_string();
     let file_io = iceberg::io::FileIO::new_with_fs();
-    let catalog = Arc::new(AgoraCatalog::new(file_io, &root_path));
+    let catalog = Arc::new(AgoraCatalog::new(file_io.clone(), &root_path));
 
     let namespace = NamespaceIdent::new("default".to_string());
     catalog
@@ -403,6 +416,8 @@ async fn test_tpch_lineitem_table() {
 
     let rows = create_and_load_table(
         catalog,
+        file_io.clone(),
+        &root_path,
         &namespace,
         "lineitem",
         arrow_schema,

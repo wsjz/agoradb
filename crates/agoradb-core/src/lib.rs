@@ -21,7 +21,7 @@ pub mod stage;
 
 pub use constants::*;
 pub use error::{
-    AgoraError, CatalogError, CompactionError, ExecutionError, StorageError, VfsError,
+    AgoraError, CatalogError, CompactionError, ExecutionError, Result, StorageError, VfsError,
 };
 pub use operator::{AggFunction, DataType, JoinType, OperatorSpec, PredicateDef};
 pub use schema_provider::SchemaProvider;

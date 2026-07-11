@@ -8,7 +8,6 @@ license.workspace = true
 [dependencies]
 agoradb-core = { path = "../agoradb-core" }
 agoradb-vfs = { path = "../agoradb-vfs" }
-agoradb-catalog = { path = "../agoradb-catalog" }
 arrow = "57"
 arrow-array = "57"
 arrow-schema = "57"
@@ -25,3 +24,4 @@ tempfile = "3"
 tokio-test = "0.4"
 agoradb-vfs = { path = "../agoradb-vfs" }
 futures = "0.3"
+agoradb-catalog = { path = "../agoradb-catalog" }

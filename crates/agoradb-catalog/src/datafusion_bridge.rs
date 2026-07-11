@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use datafusion::catalog::{CatalogProvider, SchemaProvider, Session, TableProvider};
-use datafusion::common::{DataFusionError, Result as DFResult};
+use datafusion::common::{DataFusionError, Result as DFResult, SchemaExt};
 use datafusion::datasource::memory::MemorySourceConfig;
 use datafusion::logical_expr::TableType;
 use datafusion::physical_plan::ExecutionPlan;
@@ -33,6 +33,7 @@ use iceberg::spec::{PrimitiveType, Type};
 use iceberg::Catalog;
 
 use crate::catalog::AgoraCatalog;
+use crate::datafusion_sink::IcebergDataSink;
 use agoradb_core::CatalogError;
 
 // === AgoraCatalogProvider ===
@@ -104,11 +105,7 @@ impl SchemaProvider for AgoraSchemaProvider {
     }
 
     fn table_names(&self) -> Vec<String> {
-        let handle = match tokio::runtime::Handle::try_current() {
-            Ok(h) => h,
-            Err(_) => return vec![],
-        };
-        handle.block_on(async {
+        futures::executor::block_on(async {
             let ns = iceberg::NamespaceIdent::new("default".to_string());
             match self.catalog.list_tables(&ns).await {
                 Ok(tables) => tables.into_iter().map(|t| t.name().to_string()).collect(),
@@ -122,7 +119,10 @@ impl SchemaProvider for AgoraSchemaProvider {
         let ident = iceberg::TableIdent::new(ns, name.to_string());
         match self.catalog.load_table(&ident).await {
             Ok(table) => {
-                let provider = Arc::new(IcebergTableProvider::new(table)?);
+                let provider = Arc::new(IcebergTableProvider::new(
+                    Arc::clone(&self.catalog),
+                    table,
+                )?);
                 Ok(Some(provider))
             }
             Err(_) => Ok(None),
@@ -141,6 +141,7 @@ impl SchemaProvider for AgoraSchemaProvider {
 /// The [`scan`](Self::scan) method is currently a stub; full implementation
 /// is planned for Task A3.
 pub struct IcebergTableProvider {
+    catalog: Arc<AgoraCatalog>,
     table: iceberg::table::Table,
     arrow_schema: SchemaRef,
 }
@@ -156,10 +157,11 @@ impl Debug for IcebergTableProvider {
 
 impl IcebergTableProvider {
     /// Create a new [`IcebergTableProvider`] from an Iceberg [`Table`].
-    pub fn new(table: iceberg::table::Table) -> DFResult<Self> {
+    pub fn new(catalog: Arc<AgoraCatalog>, table: iceberg::table::Table) -> DFResult<Self> {
         let schema = table.metadata().current_schema();
         let arrow_schema = Arc::new(iceberg_schema_to_arrow(schema.as_ref())?);
         Ok(Self {
+            catalog,
             table,
             arrow_schema,
         })
@@ -294,6 +296,29 @@ impl TableProvider for IcebergTableProvider {
             None, // projection already applied above
         )?)
     }
+
+    async fn insert_into(
+        &self,
+        _state: &dyn Session,
+        input: Arc<dyn ExecutionPlan>,
+        _insert_op: datafusion::logical_expr::dml::InsertOp,
+    ) -> DFResult<Arc<dyn ExecutionPlan>> {
+        // Validate that the input schema matches the table schema.
+        self.arrow_schema
+            .logically_equivalent_names_and_types(&input.schema())?;
+
+        let sink = Arc::new(IcebergDataSink::new(
+            Arc::clone(&self.catalog),
+            self.table.identifier().name().to_string(),
+            Arc::clone(&self.arrow_schema),
+        ));
+
+        Ok(Arc::new(datafusion_datasource::sink::DataSinkExec::new(
+            input,
+            sink,
+            None,
+        )))
+    }
 }
 
 // ------------------------------------------------------------------
@@ -321,17 +346,198 @@ fn iceberg_schema_to_arrow(
 fn iceberg_type_to_arrow(ty: &Type) -> Option<arrow::datatypes::DataType> {
     match ty {
         Type::Primitive(p) => match p {
-            PrimitiveType::Long | PrimitiveType::Int => {
-                Some(arrow::datatypes::DataType::Int64)
-            }
-            PrimitiveType::Double | PrimitiveType::Float => {
-                Some(arrow::datatypes::DataType::Float64)
-            }
+            PrimitiveType::Long => Some(arrow::datatypes::DataType::Int64),
+            PrimitiveType::Int => Some(arrow::datatypes::DataType::Int32),
+            PrimitiveType::Double => Some(arrow::datatypes::DataType::Float64),
+            PrimitiveType::Float => Some(arrow::datatypes::DataType::Float32),
             PrimitiveType::Boolean => Some(arrow::datatypes::DataType::Boolean),
             PrimitiveType::String => Some(arrow::datatypes::DataType::Utf8),
+            PrimitiveType::Date => Some(arrow::datatypes::DataType::Date32),
+            PrimitiveType::Decimal { precision, scale } => {
+                Some(arrow::datatypes::DataType::Decimal128(*precision as u8, *scale as i8))
+            }
             _ => None,
         },
         _ => None,
+    }
+}
+
+// ------------------------------------------------------------------
+// Tests
+// ------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::catalog::AgoraCatalog;
+    use iceberg::io::FileIO;
+    use iceberg::spec::{NestedField, PrimitiveType, Schema, Type};
+    use iceberg::TableCreation;
+    use tempfile::TempDir;
+
+    async fn new_test_catalog() -> (TempDir, Arc<AgoraCatalog>) {
+        let temp_dir = TempDir::new().unwrap();
+        let file_io = FileIO::new_with_fs();
+        let catalog = Arc::new(AgoraCatalog::new(
+            file_io,
+            temp_dir.path().to_str().unwrap(),
+        ));
+        (temp_dir, catalog)
+    }
+
+    #[test]
+    fn test_catalog_provider_schema_names() {
+        let (_, catalog) = futures::executor::block_on(new_test_catalog());
+        let provider = AgoraCatalogProvider::new(catalog);
+        let names = provider.schema_names();
+        assert_eq!(names, vec!["default"]);
+    }
+
+    #[test]
+    fn test_catalog_provider_schema_default() {
+        let (_, catalog) = futures::executor::block_on(new_test_catalog());
+        let provider = AgoraCatalogProvider::new(catalog);
+        let schema = provider.schema("default");
+        assert!(schema.is_some(), "default schema should exist");
+    }
+
+    #[test]
+    fn test_catalog_provider_schema_nonexistent() {
+        let (_, catalog) = futures::executor::block_on(new_test_catalog());
+        let provider = AgoraCatalogProvider::new(catalog);
+        let schema = provider.schema("nonexistent");
+        assert!(schema.is_none(), "nonexistent schema should return None");
+    }
+
+    #[test]
+    fn test_catalog_provider_schema_caching() {
+        let (_, catalog) = futures::executor::block_on(new_test_catalog());
+        let provider = AgoraCatalogProvider::new(catalog);
+
+        // First call creates the provider
+        let schema1 = provider.schema("default").unwrap();
+        // Second call returns cached provider
+        let schema2 = provider.schema("default").unwrap();
+
+        // Both should point to the same Arc instance (cached)
+        assert!(Arc::ptr_eq(
+            &schema1,
+            &schema2
+        ), "schema provider should be cached");
+    }
+
+    #[tokio::test]
+    async fn test_schema_provider_table_names_empty() {
+        let (_, catalog) = new_test_catalog().await;
+        let provider = AgoraCatalogProvider::new(catalog);
+        let schema = provider.schema("default").unwrap();
+
+        let names = schema.table_names();
+        assert!(names.is_empty(), "new catalog should have no tables");
+    }
+
+    #[tokio::test]
+    async fn test_schema_provider_table_exist() {
+        let (_, catalog) = new_test_catalog().await;
+
+        // Create namespace and table
+        let ns = iceberg::NamespaceIdent::new("default".to_string());
+        catalog.create_namespace(&ns, HashMap::new()).await.unwrap();
+
+        let schema = Schema::builder()
+            .with_fields(vec![NestedField::required(
+                1,
+                "id",
+                Type::Primitive(PrimitiveType::Long),
+            )
+            .into()])
+            .build()
+            .unwrap();
+
+        let creation = TableCreation::builder()
+            .name("users".to_string())
+            .schema(schema)
+            .build();
+        catalog.create_table(&ns, creation).await.unwrap();
+
+        let provider = AgoraCatalogProvider::new(catalog);
+        let schema = provider.schema("default").unwrap();
+
+        assert!(schema.table_exist("users"), "users table should exist");
+        assert!(!schema.table_exist("nonexistent"), "nonexistent table should not exist");
+    }
+
+    #[tokio::test]
+    async fn test_schema_provider_table_returns_provider() {
+        let (_, catalog) = new_test_catalog().await;
+
+        // Create namespace and table
+        let ns = iceberg::NamespaceIdent::new("default".to_string());
+        catalog.create_namespace(&ns, HashMap::new()).await.unwrap();
+
+        let schema = Schema::builder()
+            .with_fields(vec![NestedField::required(
+                1,
+                "id",
+                Type::Primitive(PrimitiveType::Long),
+            )
+            .into()])
+            .build()
+            .unwrap();
+
+        let creation = TableCreation::builder()
+            .name("users".to_string())
+            .schema(schema)
+            .build();
+        catalog.create_table(&ns, creation).await.unwrap();
+
+        let provider = AgoraCatalogProvider::new(catalog);
+        let schema = provider.schema("default").unwrap();
+
+        let table = schema.table("users").await.unwrap();
+        assert!(table.is_some(), "table provider should be returned for existing table");
+    }
+
+    #[tokio::test]
+    async fn test_schema_provider_table_nonexistent() {
+        let (_, catalog) = new_test_catalog().await;
+        let provider = AgoraCatalogProvider::new(catalog);
+        let schema = provider.schema("default").unwrap();
+
+        let table = schema.table("nonexistent").await.unwrap();
+        assert!(table.is_none(), "nonexistent table should return None");
+    }
+
+    #[tokio::test]
+    async fn test_iceberg_table_provider_schema() {
+        let (_, catalog) = new_test_catalog().await;
+
+        // Create namespace and table
+        let ns = iceberg::NamespaceIdent::new("default".to_string());
+        catalog.create_namespace(&ns, HashMap::new()).await.unwrap();
+
+        let schema = Schema::builder()
+            .with_fields(vec![
+                NestedField::required(1, "id", Type::Primitive(PrimitiveType::Long)).into(),
+                NestedField::optional(2, "name", Type::Primitive(PrimitiveType::String)).into(),
+            ])
+            .build()
+            .unwrap();
+
+        let creation = TableCreation::builder()
+            .name("users".to_string())
+            .schema(schema)
+            .build();
+        catalog.create_table(&ns, creation).await.unwrap();
+
+        let provider = AgoraCatalogProvider::new(catalog);
+        let schema_provider = provider.schema("default").unwrap();
+        let table = schema_provider.table("users").await.unwrap().unwrap();
+
+        let arrow_schema = table.schema();
+        assert_eq!(arrow_schema.fields().len(), 2, "schema should have 2 columns");
+        assert_eq!(arrow_schema.field(0).name(), "id");
+        assert_eq!(arrow_schema.field(1).name(), "name");
     }
 }
 
@@ -356,7 +562,7 @@ async fn read_parquet_file(
 
     let reader = match projection {
         Some(proj) => {
-            let proj_vec: Vec<usize> = proj.iter().copied().collect();
+            let proj_vec: Vec<usize> = proj.to_vec();
             let parquet_schema = builder.parquet_schema().clone();
             builder
                 .with_projection(parquet::arrow::ProjectionMask::roots(

@@ -25,6 +25,12 @@ pub enum AgoraStatement {
 /// Wraps DataFusion/sqlparser with Agora-specific syntax hooks.
 pub struct AgoraSQLParser;
 
+impl Default for AgoraSQLParser {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AgoraSQLParser {
     pub fn new() -> Self {
         Self

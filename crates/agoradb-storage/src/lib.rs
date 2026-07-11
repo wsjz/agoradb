@@ -12,16 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use agoradb_catalog::AgoraCatalog;
 use agoradb_core::StorageError;
 use arrow_array::RecordBatch;
 use arrow_schema::SchemaRef;
 use bytes::Bytes;
+use iceberg::io::FileIO;
 use iceberg::spec::{DataContentType, DataFileBuilder, DataFileFormat};
 use iceberg::transaction::ApplyTransactionAction;
 use iceberg::transaction::Transaction;
-use iceberg::Catalog;
-use iceberg::TableIdent;
+use iceberg::{Catalog, TableIdent};
 use parquet::arrow::ArrowWriter;
 use parquet::file::properties::WriterProperties;
 use std::path::PathBuf;
@@ -34,22 +33,47 @@ use buffer::AppendBuffer;
 
 /// The main storage engine for AgoraDB.
 pub struct StorageEngine {
-    catalog: Arc<AgoraCatalog>,
+    catalog: Arc<dyn Catalog>,
+    file_io: FileIO,
+    root_path: String,
     buffer: AppendBuffer,
     temp_dir: PathBuf,
     table_name: String,
 }
 
 impl StorageEngine {
-    /// Create a new [`StorageEngine`].
+    /// Create a new [`StorageEngine`] from a concrete catalog implementation.
+    pub fn new_with_catalog<C: Catalog + 'static>(
+        catalog: Arc<C>,
+        file_io: FileIO,
+        root_path: impl Into<String>,
+        schema: SchemaRef,
+        temp_dir: PathBuf,
+        table_name: String,
+    ) -> Self {
+        Self {
+            catalog: catalog as Arc<dyn Catalog>,
+            file_io,
+            root_path: root_path.into(),
+            buffer: AppendBuffer::new(schema),
+            temp_dir,
+            table_name,
+        }
+    }
+
+    /// Create a new [`StorageEngine`] from a dyn catalog trait object.
     pub fn new(
-        catalog: Arc<AgoraCatalog>,
+        catalog: Arc<dyn Catalog>,
+        file_io: FileIO,
+        root_path: impl Into<String>,
         schema: SchemaRef,
         temp_dir: PathBuf,
         table_name: String,
     ) -> Self {
         Self {
             catalog,
+            file_io,
+            root_path: root_path.into(),
             buffer: AppendBuffer::new(schema),
             temp_dir,
             table_name,
@@ -99,13 +123,12 @@ impl StorageEngine {
         let file_size = std::fs::metadata(&temp_file_path)?.len() as u64;
 
         // 3. Upload via catalog's file_io.
-        let space_data_dir = format!("{}/data", self.catalog.root_path());
+        let space_data_dir = format!("{}/data", self.root_path);
         let target_filename = format!("{}.parquet", uuid::Uuid::new_v4());
         let target_path = format!("{}/{}", space_data_dir, target_filename);
 
         let output = self
-            .catalog
-            .file_io()
+            .file_io
             .new_output(&target_path)
             .map_err(|e| StorageError::FlushFailed(e.to_string()))?;
         let data = tokio::fs::read(&temp_file_path).await?;
@@ -151,7 +174,7 @@ impl StorageEngine {
     }
 
     /// Get a reference to the catalog.
-    pub fn catalog(&self) -> &Arc<AgoraCatalog> {
+    pub fn catalog(&self) -> &Arc<dyn Catalog> {
         &self.catalog
     }
 }

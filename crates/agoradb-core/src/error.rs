@@ -14,6 +14,9 @@
 
 use thiserror::Error;
 
+/// Convenience type alias for fallible AgoraDB operations.
+pub type Result<T> = std::result::Result<T, AgoraError>;
+
 /// Top-level error type for AgoraDB operations.
 #[derive(Error, Debug)]
 pub enum AgoraError {
