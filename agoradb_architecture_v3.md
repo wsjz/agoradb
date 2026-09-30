@@ -5,7 +5,7 @@
 > **Codename**: agoradb
 > **Positioning**: A Decentralized Local Federated Query Semantic Layer — Embedded, Sovereign, and P2P-Native
 > **Core Change**: AgoraDB no longer owns query *computation*. Computation is delegated to pluggable embedded engines (DuckDB for analytics, SQLite for transactions; browser-hosted engines in WASM). DataFusion is retained **only** as the federation coordinator that merges results across engines and nodes. AgoraDB's own value concentrates in the semantic layer (naming, policy, views), the federation layer (routing, pushdown, merge), identity/authorization (DID/UCAN) and P2P (discovery, snapshot sync, Arrow Flight).
-> **Status**: 3.0-A (engines) and 3.0-B (local federation) implemented on `feat/v3-engines`. Supersedes v2.0.
+> **Status**: 3.0-A (engines), 3.0-B (local federation) and 3.0-C (semantic layer) implemented on `feat/v3-engines`. Supersedes v2.0.
 
 ---
 
@@ -273,17 +273,39 @@ A federated query pins one Iceberg snapshot ID per analytical Space (local or re
 
 ## 6. Semantic Layer (L4)
 
-This is where AgoraDB's "semantic" claim is cashed out. Everything here is a **SQL → SQL rewrite** over the `sqlparser` AST, before the federation planner sees the query.
+This is where AgoraDB's "semantic" claim is cashed out. Everything here is a **SQL → SQL rewrite** over the `sqlparser` AST (`agoradb-semantic::rewrite`), before an engine or the federation planner sees the query. Both rewrites replace a relation reference `<space>.<rel> [AS a]` with a derived table `(<query>) AS a`, so whatever they add ends up *inside* the SQL an engine executes.
+
+### 6.1 Statements
+
+```sql
+CREATE [OR REPLACE] VIEW blog.recent AS SELECT id, title FROM blog.posts WHERE NOT draft;
+DROP VIEW [IF EXISTS] blog.recent;
+
+GRANT SELECT [(id, title)] ON blog.posts TO alice, "did:key:z6Mk...";
+REVOKE SELECT ON blog.posts FROM alice;
+
+CREATE POLICY own ON orders.orders [FOR SELECT] TO alice, bob USING (customer = current_user);
+DROP POLICY [IF EXISTS] own ON orders.orders;
+```
+
+Views, grants and policies live in the node registry (`.agora/views.json`, `grants.json`, `policies.json`) and are removed with their Space (and grants/policies with their view). Every definition is validated by running it with `LIMIT 0` before it is stored, so a view, a grant's column list or a policy predicate that references something missing is rejected up front; a view that would expand into itself is rejected as recursive.
+
+### 6.2 Principals
+
+`SessionConfig::principal` says who a session acts for. `None` is the node owner: full access, views inlined, no policies. `Some(p)` is a peer (a DID once 3.1 lands): **read-only** (any DDL, DML, TCL, GRANT or Space statement is `PermissionDenied`) and **deny-by-default**.
 
 | Feature | Mechanism |
 |---------|-----------|
-| Unified namespace | `space://did/name.table`, `name.table` (local alias), `table` (current Space via `SET SPACE`). Resolved to `(Space, engine, Location, snapshot)`. |
-| Views | `CREATE VIEW blog.recent AS SELECT ...` stored in the catalog; inlined at rewrite time. Views may span Spaces — they are the primary way users build a "semantic model" over several physical sources. |
-| Column policies | UCAN `att` with column allowlist → projection rewritten; disallowed columns are removed from `*` expansion and referencing them yields "column does not exist". |
-| Row policies | UCAN `att` with a predicate (`WHERE owner = :did`) → predicate injected into every reference to that table, *before* pushdown, so it executes inside the engine. |
-| Enumeration resistance | Table/Space resolution consults the caller's capabilities first; unauthorized names resolve to "does not exist" (never "permission denied"). |
+| Unified namespace | `<space>.<table>`, or bare `<table>` qualified with the session's `SET SPACE`. CTE names are left alone. `space://did/...` addressing arrives with 3.1. |
+| Views | Inlined at rewrite time, nested up to 16 levels. May span Spaces (then federated). They are the way to build a semantic model over several physical sources. |
+| Column grants | Each referenced relation becomes `(SELECT <granted columns> FROM …)`, so `*` expands to granted columns only and any other column simply does not exist. |
+| Row policies | Once a relation has any policy, a principal sees rows matching at least one policy naming it (`OR`, as PostgreSQL permissive policies), none if no policy names it. `current_user` is replaced by the principal. The predicate is inside the derived table, so it runs in the engine; `explain()` shows it in the pushed-down SQL. |
+| View rights | Access control runs first, view inlining second: a principal needs a grant on the view it names, and the view body reads its base tables with the owner's rights (PostgreSQL's default). Granting a view does not expose the tables behind it. |
+| Enumeration resistance | An ungranted relation, a missing relation and a relation in a missing Space all fail with the same `Table not found: <space>.<rel>`; `SET SPACE` fails with `Space not found` for a Space the principal has no grant in. |
 | Dialect normalisation | User SQL is parsed with a generic dialect; each pushed-down subtree is re-emitted in the target engine's dialect by `datafusion-federation`'s unparser. |
-| Statement classification | §4.4 |
+| Statement classification | §4.4, plus `ViewDdl` and `Acl` classes for the statements above. |
+
+Not yet: writes by principals (UCAN write delegation, 3.1), column-level `REVOKE`, `RESTRICTIVE` policies, policies on commands other than `SELECT`, view column lists and materialized views.
 
 ---
 
@@ -368,7 +390,7 @@ crates/
 ├── agoradb-engine          QueryEngine trait, TableSource, Capabilities, BlockingWorker             [done]
 ├── agoradb-engine-duckdb   DuckDbEngine (bundled DuckDB + parquet)                                  [done]
 ├── agoradb-engine-sqlite   SqliteEngine + SQLite rows → Arrow                                       [done]
-├── agoradb-semantic        CREATE/DROP/SET SPACE parser, classification, <space>.<table> qualify    [done; views/policies in 3.0-C]
+├── agoradb-semantic        CREATE/DROP/SET SPACE parser, classification, view + access-control rewrites [done]
 ├── agoradb-federation      EngineSqlExecutor, AgoraRemoteTable, Coordinator                         [done]
 ├── agoradb-node            AgoraSession, EngineRegistry, routing, DDL/DML                           [done]
 ├── agoradb-identity        DID keys, UCAN issue/verify/revoke, peer FSM                             [3.1]
@@ -411,7 +433,7 @@ Roughly 1,100 of the current ~4,300 lines are engine-bridge code that goes away;
 |-------|------|----------------|
 | **3.0-A Engines** ✅ | `agoradb-engine` trait; DuckDB + SQLite engines; Location/Space split in catalog; `CREATE SPACE ... KIND`; single-Space queries pushed entirely to the engine | TPC-H Q1–Q5 on an analytical Space via DuckDB; an OLTP smoke test (BEGIN/INSERT/COMMIT/SELECT) on a transactional Space |
 | **3.0-B Federation** ✅ | DataFusion coordinator over `datafusion-federation` + `EngineSqlExecutor`; cross-Space join (Parquet ⋈ SQLite) locally; snapshot pinning | Two-Space join returns correct results; EXPLAIN shows two pushed-down SQL leaves |
-| **3.0-C Semantic** | Namespace resolution, views, UCAN column/row policy rewrite, enumeration resistance, statement classification | Policy test suite: a restricted DID sees rewritten `*` and injected predicates inside the engine SQL |
+| **3.0-C Semantic** ✅ | Views, column grants and row policies as SQL rewrites; principals read-only and deny-by-default; enumeration resistance | Policy test suite: a restricted DID sees rewritten `*` and injected predicates inside the engine SQL |
 | **3.0-D Publish** | SQLite → Parquet publisher; `orders.published` analytical read-only Space | Publish → query via DuckDB matches SQLite source |
 | **3.1 Network** | DID/UCAN, Arrow Flight `RemoteTableProvider`, libp2p discovery, snapshot subscription | Two Docker nodes: UCAN-gated federated query; revocation cuts access |
 | **3.2 Browser** | WASM core + `HostEngine` bridge to duckdb-wasm / wa-sqlite | Browser node runs a local query and a federated query via a Full Node |
@@ -448,6 +470,7 @@ No phase skipping (AGENT.md §4.1).
 | 2026-09-27 | Multimodal via engine extensions; drop ART/CSR/HNSW/Cypher | Extensions exist and are maintained; custom indexes were the largest remaining scope |
 | 2026-09-27 | Bridge engines with our own `SQLExecutor` instead of `datafusion-table-providers` | One path to each engine (`QueryEngine`), no second connection pool, no pinned old `rusqlite`; the same executor will wrap remote and browser-host engines |
 | 2026-09-29 | Run the federation optimizer rule after `push_down_filter` | With the upstream default position, filters above a join stayed in DataFusion instead of reaching the engine SQL |
+| 2026-09-30 | Grants and policies use PostgreSQL syntax (`GRANT SELECT (cols)`, `CREATE POLICY … USING`); views run with owner rights | Familiar syntax parsed by sqlparser as-is; owner-rights views are what makes a view a publishable semantic interface |
 
 ---
 

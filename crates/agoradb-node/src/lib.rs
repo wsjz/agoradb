@@ -15,10 +15,12 @@
 //! The AgoraDB node runtime.
 //!
 //! [`AgoraSession`] is the entry point: it parses a statement, classifies it
-//! (see `agoradb-semantic`), and routes it to the catalog, to one Space's
+//! (see `agoradb-semantic`), applies views and the session principal's
+//! grants and row policies, and routes it to the catalog, to one Space's
 //! engine, or — for statements spanning several Spaces — to the federation
 //! coordinator. Engines are shared per node through [`EngineRegistry`].
 
+mod acl;
 mod bind;
 mod ddl;
 mod dml;

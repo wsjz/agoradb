@@ -58,4 +58,10 @@ pub enum SessionError {
 
     #[error("unsupported: {0}")]
     Unsupported(String),
+
+    #[error("permission denied: {0}")]
+    PermissionDenied(String),
+
+    #[error("already exists: {0}")]
+    AlreadyExists(String),
 }

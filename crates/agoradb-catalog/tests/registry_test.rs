@@ -208,3 +208,72 @@ async fn resolve_table_follows_snapshots_and_pins() {
         Err(CatalogError::TableNotFound(_))
     ));
 }
+
+#[tokio::test]
+async fn views_grants_and_policies_persist_and_cascade() {
+    use agoradb_catalog::{Grant, RowPolicy, ViewDef};
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_str().unwrap().to_string();
+    let catalog = open(&root);
+    catalog
+        .create_space(CreateSpaceRequest::new("blog"))
+        .await
+        .unwrap();
+
+    catalog
+        .create_view(
+            ViewDef::new("blog", "recent", "SELECT id FROM blog.posts"),
+            false,
+        )
+        .unwrap();
+    assert!(matches!(
+        catalog.create_view(ViewDef::new("blog", "recent", "SELECT 1"), false),
+        Err(CatalogError::ViewExists(_))
+    ));
+    catalog
+        .create_view(ViewDef::new("blog", "recent", "SELECT 2"), true)
+        .unwrap();
+    assert!(matches!(
+        catalog.create_view(ViewDef::new("ghost", "v", "SELECT 1"), false),
+        Err(CatalogError::SpaceNotFound(_))
+    ));
+    catalog
+        .grant_select(Grant {
+            principal: "alice".into(),
+            space: "blog".into(),
+            relation: "recent".into(),
+            columns: Some(vec!["id".into()]),
+        })
+        .unwrap();
+    catalog
+        .create_policy(RowPolicy {
+            name: "p".into(),
+            space: "blog".into(),
+            relation: "recent".into(),
+            principals: vec!["alice".into()],
+            predicate: "id > 1".into(),
+        })
+        .unwrap();
+
+    let reopened = open(&root);
+    assert_eq!(
+        reopened.get_view("blog", "recent").unwrap().query,
+        "SELECT 2"
+    );
+    assert_eq!(
+        reopened
+            .get_grant("alice", "blog", "recent")
+            .unwrap()
+            .columns,
+        Some(vec!["id".to_string()])
+    );
+    assert!(reopened.has_grants_in("alice", "blog"));
+    assert_eq!(reopened.policies_on("blog", "recent").len(), 1);
+
+    // Dropping the view removes its grants and policies.
+    reopened.drop_view("blog", "recent").unwrap();
+    assert!(reopened.get_grant("alice", "blog", "recent").is_none());
+    assert!(reopened.policies_on("blog", "recent").is_empty());
+    assert!(!open(&root).has_grants_in("alice", "blog"));
+}

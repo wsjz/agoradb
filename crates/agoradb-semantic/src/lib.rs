@@ -14,15 +14,21 @@
 
 //! The semantic layer of AgoraDB (architecture v3 §6).
 //!
-//! In 3.0-A/B this crate parses AgoraDB's own statements (`CREATE SPACE`,
+//! This crate parses AgoraDB's own statements (`CREATE SPACE`,
 //! `DROP SPACE`, `SET SPACE`), hands everything else to `sqlparser`, and
-//! classifies statements so the session can route them. Views and UCAN
-//! policy rewriting land here in 3.0-C.
+//! classifies statements so the session can route them. [`rewrite`] adds
+//! views and per-principal column grants and row policies.
 
 pub mod classify;
 pub mod error;
+pub mod rewrite;
 pub mod sql_parser;
 
-pub use classify::{classify, qualify_tables, DmlKind, StatementClass, TclKind};
+pub use classify::{
+    classify, collect_spaces, cte_names, qualify_tables, DmlKind, StatementClass, TclKind,
+};
 pub use error::SemanticError;
+pub use rewrite::{
+    apply_access_control, inline_views, AccessResolver, RelationAccess, ViewResolver,
+};
 pub use sql_parser::{parse, parse_single, AgoraStatement};

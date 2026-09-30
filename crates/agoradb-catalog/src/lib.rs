@@ -16,11 +16,13 @@
 //! directory tree, plus the Space/Location registries that make up the
 //! node-level namespace and the snapshot resolution engines rely on.
 
+pub mod acl;
 pub mod catalog;
 pub mod registry;
 pub mod resolve;
 pub mod space;
 
+pub use acl::{Grant, RowPolicy, ViewDef};
 pub use catalog::AgoraCatalog;
 pub use resolve::ResolvedTable;
 pub use space::{Location, LocationFormat, LocationId, Space};

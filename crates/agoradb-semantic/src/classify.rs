@@ -18,11 +18,12 @@
 //! qualified with the session's default Space; a three-part name is an error
 //! because AgoraDB has no catalog level above the Space.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::ops::ControlFlow;
 
 use sqlparser::ast::{
-    visit_relations_mut, Ident, ObjectName, ObjectNamePart, ObjectType, Statement, TableObject,
+    visit_relations_mut, GrantObjects, Ident, ObjectName, ObjectNamePart, ObjectType, Query,
+    Statement, TableObject, Visit, Visitor,
 };
 
 use crate::error::SemanticError;
@@ -58,6 +59,48 @@ pub enum StatementClass {
     Tcl(TclKind),
     /// A read-only statement touching these Spaces (possibly none, e.g. `SELECT 1`).
     Query { spaces: BTreeSet<String> },
+    /// `CREATE VIEW` / `DROP VIEW`; names are qualified in place.
+    ViewDdl,
+    /// `GRANT` / `REVOKE` / `CREATE POLICY` / `DROP POLICY`; names are qualified in place.
+    Acl,
+}
+
+/// Names of every CTE defined anywhere in `stmt`. References to them are not
+/// tables and must be left unqualified.
+pub fn cte_names(stmt: &Statement) -> HashSet<String> {
+    struct Collector(HashSet<String>);
+    impl Visitor for Collector {
+        type Break = ();
+        fn pre_visit_query(&mut self, query: &Query) -> ControlFlow<()> {
+            if let Some(with) = &query.with {
+                for cte in &with.cte_tables {
+                    self.0.insert(cte.alias.name.value.clone());
+                }
+            }
+            ControlFlow::Continue(())
+        }
+    }
+    let mut collector = Collector(HashSet::new());
+    let _ = stmt.visit(&mut collector);
+    collector.0
+}
+
+/// Whether `name` is a single-part reference to one of `ctes`.
+pub(crate) fn is_cte_ref(name: &ObjectName, ctes: &HashSet<String>) -> bool {
+    name.0.len() == 1 && ctes.contains(&part_value(&name.0[0]))
+}
+
+/// Spaces referenced by the (already qualified) relations of `stmt`.
+pub fn collect_spaces(stmt: &Statement) -> BTreeSet<String> {
+    let ctes = cte_names(stmt);
+    let mut spaces = BTreeSet::new();
+    let _ = sqlparser::ast::visit_relations(stmt, |name: &ObjectName| {
+        if name.0.len() == 2 && !is_cte_ref(name, &ctes) {
+            spaces.insert(part_value(&name.0[0]));
+        }
+        ControlFlow::<()>::Continue(())
+    });
+    spaces
 }
 
 /// Qualify every table reference in `stmt` and collect the Spaces it touches.
@@ -67,9 +110,13 @@ pub fn qualify_tables(
     stmt: &mut Statement,
     default_space: Option<&str>,
 ) -> Result<BTreeSet<String>, SemanticError> {
+    let ctes = cte_names(stmt);
     let mut spaces = BTreeSet::new();
     let mut error: Option<SemanticError> = None;
     let _ = visit_relations_mut(stmt, |name: &mut ObjectName| {
+        if is_cte_ref(name, &ctes) {
+            return ControlFlow::Continue(());
+        }
         match qualify_name(name, default_space) {
             Ok(space) => {
                 spaces.insert(space);
@@ -87,7 +134,7 @@ pub fn qualify_tables(
     }
 }
 
-fn part_value(part: &ObjectNamePart) -> String {
+pub(crate) fn part_value(part: &ObjectNamePart) -> String {
     match part {
         ObjectNamePart::Identifier(ident) => ident.value.clone(),
         other => other.to_string(),
@@ -195,6 +242,39 @@ pub fn classify(
                 space: single_space(&targets, "DROP TABLE")?,
             })
         }
+        Statement::CreateView(create) => {
+            qualify_name(&mut create.name, default_space)?;
+            Ok(StatementClass::ViewDdl)
+        }
+        Statement::Drop {
+            object_type: ObjectType::View,
+            names,
+            ..
+        } => {
+            for name in names.iter_mut() {
+                qualify_name(name, default_space)?;
+            }
+            Ok(StatementClass::ViewDdl)
+        }
+        Statement::Grant(sqlparser::ast::Grant { objects, .. })
+        | Statement::Revoke(sqlparser::ast::Revoke { objects, .. }) => {
+            match objects {
+                Some(GrantObjects::Tables(names)) => {
+                    for name in names.iter_mut() {
+                        qualify_name(name, default_space)?;
+                    }
+                }
+                other => {
+                    return Err(SemanticError::Unsupported(format!(
+                        "GRANT/REVOKE on {}; only ON <space>.<table or view> is supported",
+                        other.as_ref().map(|o| o.to_string()).unwrap_or_default()
+                    )))
+                }
+            }
+            Ok(StatementClass::Acl)
+        }
+        // Policy table names are relations, already qualified above.
+        Statement::CreatePolicy(_) | Statement::DropPolicy(_) => Ok(StatementClass::Acl),
         other => Err(SemanticError::Unsupported(statement_kind(other))),
     }
 }

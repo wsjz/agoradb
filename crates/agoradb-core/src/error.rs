@@ -66,6 +66,18 @@ pub enum CatalogError {
     #[error("Space kind {kind} is incompatible with a {format} location")]
     KindFormatMismatch { kind: String, format: String },
 
+    #[error("View already exists: {0}")]
+    ViewExists(String),
+
+    #[error("View not found: {0}")]
+    ViewNotFound(String),
+
+    #[error("Policy already exists: {0}")]
+    PolicyExists(String),
+
+    #[error("Policy not found: {0}")]
+    PolicyNotFound(String),
+
     #[error("Invalid property: {0}")]
     InvalidProperty(String),
 

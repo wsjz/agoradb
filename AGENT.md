@@ -131,7 +131,7 @@ v3 路线图（详见 `agoradb_architecture_v3.md` §12）：
 |-------|------|----------|
 | 3.0-A 引擎 | `QueryEngine` 抽象、DuckDB/SQLite 引擎、Space/Location 目录、单 Space 查询整条下推 | ✅ |
 | 3.0-B 联邦 | DataFusion 协调器 + `datafusion-federation`、跨 Space join、快照 pinning | ✅ |
-| 3.0-C 语义层 | 视图、UCAN 列/行策略重写、枚举抵抗 | 待开始 |
+| 3.0-C 语义层 | 视图、列授权与行策略（SQL 改写）、principal 只读 + 默认拒绝、枚举抵抗 | ✅ |
 | 3.0-D 发布 | SQLite → Parquet 快照发布器 | 待开始 |
 | 3.1 网络 | DID/UCAN、Arrow Flight 远端表、libp2p 发现、快照订阅 | 待开始 |
 | 3.2 浏览器 | WASM 核心 + 宿主引擎桥 (duckdb-wasm / wa-sqlite) | 待开始 |
@@ -222,7 +222,7 @@ agoradb/
 │   ├── agoradb-engine/         # QueryEngine trait、TableSource、BlockingWorker
 │   ├── agoradb-engine-duckdb/  # 分析型引擎（bundled DuckDB）
 │   ├── agoradb-engine-sqlite/  # 事务型引擎（SQLite 行 → Arrow）
-│   ├── agoradb-semantic/       # CREATE/DROP/SET SPACE、语句分类、<space>.<table> 补全
+│   ├── agoradb-semantic/       # Agora 语句解析、语句分类、视图展开与权限改写
 │   ├── agoradb-federation/     # DataFusion 协调器、EngineSqlExecutor
 │   └── agoradb-node/           # AgoraSession、EngineRegistry、路由
 ├── tests/                      # agoradb-tests（TPC-H Q1–Q5）+ tools/data-gen

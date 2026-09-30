@@ -21,11 +21,15 @@ use agoradb_catalog::{AgoraCatalog, Space};
 use agoradb_core::SpaceKind;
 use agoradb_engine::{QualifiedName, QueryEngine, RecordBatchStream, TxHandle};
 use agoradb_federation::{BoundSpace, BoundTable, Coordinator};
-use agoradb_semantic::{classify, parse_single, AgoraStatement, DmlKind, StatementClass, TclKind};
+use agoradb_semantic::{
+    apply_access_control, classify, collect_spaces, inline_views, parse_single, AgoraStatement,
+    DmlKind, StatementClass, TclKind,
+};
 use arrow_schema::SchemaRef;
 use futures::TryStreamExt;
 use sqlparser::ast::{ObjectType, Statement};
 
+use crate::acl::{CatalogAccess, CatalogViews};
 use crate::bind::bind_space;
 use crate::error::SessionError;
 use crate::registry::EngineRegistry;
@@ -37,6 +41,10 @@ use crate::{ddl, dml};
 pub struct SessionConfig {
     /// Space used to qualify bare table names.
     pub default_space: Option<String>,
+    /// Who the session acts for. `None` is the node owner (full access);
+    /// `Some` is a peer principal (a DID in 3.1): read-only, and it only sees
+    /// what `GRANT` / `CREATE POLICY` give it.
+    pub principal: Option<String>,
 }
 
 struct OpenTx {
@@ -46,8 +54,9 @@ struct OpenTx {
 
 /// A client session on a node.
 pub struct AgoraSession {
-    catalog: Arc<AgoraCatalog>,
+    pub(crate) catalog: Arc<AgoraCatalog>,
     engines: Arc<EngineRegistry>,
+    principal: Option<String>,
     default_space: RwLock<Option<String>>,
     tx: Mutex<Option<OpenTx>>,
 }
@@ -55,15 +64,16 @@ pub struct AgoraSession {
 impl std::fmt::Debug for AgoraSession {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AgoraSession")
+            .field("principal", &self.principal)
             .field("default_space", &self.default_space())
             .finish()
     }
 }
 
 /// What a classified statement should be sent to an engine as.
-struct Routed {
-    class: StatementClass,
-    stmt: Statement,
+pub(crate) struct Routed {
+    pub(crate) class: StatementClass,
+    pub(crate) stmt: Statement,
     /// The SQL text to hand to an engine: the user's text when qualification
     /// changed nothing, otherwise the re-rendered, fully qualified statement.
     text: String,
@@ -79,8 +89,23 @@ impl AgoraSession {
         Self {
             catalog,
             engines,
+            principal: config.principal,
             default_space: RwLock::new(config.default_space),
             tx: Mutex::new(None),
+        }
+    }
+
+    /// The principal this session acts for; `None` is the node owner.
+    pub fn principal(&self) -> Option<&str> {
+        self.principal.as_deref()
+    }
+
+    fn deny_principal(&self, what: &str) -> Result<(), SessionError> {
+        match &self.principal {
+            Some(p) => Err(SessionError::PermissionDenied(format!(
+                "principal '{p}' is read-only and cannot run {what}"
+            ))),
+            None => Ok(()),
         }
     }
 
@@ -104,10 +129,12 @@ impl AgoraSession {
     pub async fn sql(&self, sql: &str) -> Result<QueryResult, SessionError> {
         match parse_single(sql)? {
             AgoraStatement::CreateSpace(request) => {
+                self.deny_principal("CREATE SPACE")?;
                 self.catalog.create_space(request).await?;
                 Ok(QueryResult::Empty)
             }
             AgoraStatement::DropSpace(name) => {
+                self.deny_principal("DROP SPACE")?;
                 self.catalog.drop_space(&name)?;
                 if self.default_space().as_deref() == Some(name.as_str()) {
                     self.set_default_space(None);
@@ -115,6 +142,13 @@ impl AgoraSession {
                 Ok(QueryResult::Empty)
             }
             AgoraStatement::SetSpace(name) => {
+                // A principal cannot tell a Space it has no grant in from one
+                // that does not exist.
+                if let Some(p) = &self.principal {
+                    if !self.catalog.has_grants_in(p, &name) {
+                        return Err(agoradb_core::CatalogError::SpaceNotFound(name).into());
+                    }
+                }
                 self.catalog.get_space(&name)?;
                 self.set_default_space(Some(name));
                 Ok(QueryResult::Empty)
@@ -134,6 +168,8 @@ impl AgoraSession {
                         let batches = stream.try_collect().await?;
                         Ok(QueryResult::Batches { schema, batches })
                     }
+                    StatementClass::ViewDdl => self.run_view_ddl(routed).await,
+                    StatementClass::Acl => self.run_acl(routed).await,
                 }
             }
         }
@@ -160,10 +196,31 @@ impl AgoraSession {
         }
     }
 
+    /// Classify, then apply the semantic layer: access control for a
+    /// principal, then view inlining. `spaces` is recomputed afterwards so it
+    /// names the Spaces of the base tables actually read.
     fn route(&self, mut stmt: Statement, original: &str) -> Result<Routed, SessionError> {
         let before = stmt.to_string();
         let default = self.default_space();
-        let class = classify(&mut stmt, default.as_deref())?;
+        let mut class = classify(&mut stmt, default.as_deref())?;
+        if let Some(principal) = &self.principal {
+            if !matches!(class, StatementClass::Query { .. }) {
+                return Err(SessionError::PermissionDenied(format!(
+                    "principal '{principal}' is read-only"
+                )));
+            }
+            apply_access_control(&mut stmt, principal, &CatalogAccess(&self.catalog))?;
+        }
+        if let StatementClass::Query { spaces }
+        | StatementClass::Dml {
+            kind: DmlKind::Insert,
+            spaces,
+            ..
+        } = &mut class
+        {
+            inline_views(&mut stmt, &CatalogViews(&self.catalog))?;
+            *spaces = collect_spaces(&stmt);
+        }
         let after = stmt.to_string();
         let text = if before == after {
             original.trim().trim_end_matches(';').to_string()
@@ -173,15 +230,15 @@ impl AgoraSession {
         Ok(Routed { class, stmt, text })
     }
 
-    fn space(&self, name: &str) -> Result<Space, SessionError> {
+    pub(crate) fn space(&self, name: &str) -> Result<Space, SessionError> {
         Ok(self.catalog.get_space(name)?)
     }
 
-    async fn bind(&self, space: &Space) -> Result<Arc<dyn QueryEngine>, SessionError> {
+    pub(crate) async fn bind(&self, space: &Space) -> Result<Arc<dyn QueryEngine>, SessionError> {
         bind_space(&self.catalog, &self.engines, space, None).await
     }
 
-    async fn run_query(
+    pub(crate) async fn run_query(
         &self,
         spaces: &BTreeSet<String>,
         text: &str,
@@ -268,6 +325,12 @@ impl AgoraSession {
             }
             SpaceKind::Analytical => match &routed.stmt {
                 Statement::CreateTable(create) => {
+                    let name = ddl::table_name(&create.name);
+                    if self.catalog.get_view(space_name, &name).is_some() {
+                        return Err(SessionError::AlreadyExists(format!(
+                            "a view named {space_name}.{name} already exists"
+                        )));
+                    }
                     ddl::create_analytical_table(&self.catalog, &space, create).await?
                 }
                 Statement::Drop {

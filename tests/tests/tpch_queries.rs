@@ -32,6 +32,7 @@ async fn session() -> AgoraSession {
         engines,
         SessionConfig {
             default_space: Some(TPCH_SPACE.to_string()),
+            ..Default::default()
         },
     )
 }

@@ -34,4 +34,12 @@ pub enum SemanticError {
 
     #[error("unsupported statement: {0}")]
     Unsupported(String),
+
+    /// Deliberately identical for missing and for unauthorized relations
+    /// (enumeration resistance).
+    #[error("Table not found: {0}")]
+    TableNotFound(String),
+
+    #[error("view expansion exceeded {0} levels (recursive view?): {1}")]
+    ViewRecursion(usize, String),
 }

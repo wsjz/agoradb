@@ -24,6 +24,7 @@ use agoradb_core::{CatalogError, CreateSpaceRequest, SpaceKind};
 use iceberg::{Catalog, NamespaceIdent};
 use serde::{Deserialize, Serialize};
 
+use crate::acl::{Grant, RowPolicy, ViewDef};
 use crate::catalog::AgoraCatalog;
 use crate::space::{validate_binding, Location, LocationFormat, LocationId, Space};
 
@@ -31,6 +32,9 @@ use crate::space::{validate_binding, Location, LocationFormat, LocationId, Space
 pub const AGORA_DIR: &str = ".agora";
 const SPACES_FILE: &str = "spaces.json";
 const LOCATIONS_FILE: &str = "locations.json";
+const VIEWS_FILE: &str = "views.json";
+const GRANTS_FILE: &str = "grants.json";
+const POLICIES_FILE: &str = "policies.json";
 const REGISTRY_VERSION: u32 = 1;
 
 /// Namespace property marking a namespace as backing an analytical Space.
@@ -42,11 +46,17 @@ struct RegistryFile<T> {
     items: Vec<T>,
 }
 
-/// In-memory copy of both registries.
+/// In-memory copy of all node-level registries.
 #[derive(Debug, Default, Clone)]
 pub(crate) struct Registry {
     pub(crate) spaces: BTreeMap<String, Space>,
     pub(crate) locations: BTreeMap<LocationId, Location>,
+    /// Keyed by `(space, view)`.
+    pub(crate) views: BTreeMap<(String, String), ViewDef>,
+    /// Keyed by `(principal, space, relation)`.
+    pub(crate) grants: BTreeMap<(String, String, String), Grant>,
+    /// Keyed by `(space, relation, policy name)`.
+    pub(crate) policies: BTreeMap<(String, String, String), RowPolicy>,
 }
 
 fn registry_err(context: &str, e: impl std::fmt::Display) -> CatalogError {
@@ -91,9 +101,15 @@ impl Registry {
         let dir = root.join(AGORA_DIR);
         let spaces: Vec<Space> = read_items(&dir.join(SPACES_FILE))?;
         let locations: Vec<Location> = read_items(&dir.join(LOCATIONS_FILE))?;
+        let views: Vec<ViewDef> = read_items(&dir.join(VIEWS_FILE))?;
+        let grants: Vec<Grant> = read_items(&dir.join(GRANTS_FILE))?;
+        let policies: Vec<RowPolicy> = read_items(&dir.join(POLICIES_FILE))?;
         Ok(Self {
             spaces: spaces.into_iter().map(|s| (s.name.clone(), s)).collect(),
             locations: locations.into_iter().map(|l| (l.id.clone(), l)).collect(),
+            views: views.into_iter().map(|v| (v.key(), v)).collect(),
+            grants: grants.into_iter().map(|g| (g.key(), g)).collect(),
+            policies: policies.into_iter().map(|p| (p.key(), p)).collect(),
         })
     }
 
@@ -108,11 +124,23 @@ impl Registry {
             &dir.join(LOCATIONS_FILE),
             self.locations.values().cloned().collect(),
         )?;
+        write_items(
+            &dir.join(VIEWS_FILE),
+            self.views.values().cloned().collect(),
+        )?;
+        write_items(
+            &dir.join(GRANTS_FILE),
+            self.grants.values().cloned().collect(),
+        )?;
+        write_items(
+            &dir.join(POLICIES_FILE),
+            self.policies.values().cloned().collect(),
+        )?;
         Ok(())
     }
 }
 
-fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
@@ -125,9 +153,22 @@ impl AgoraCatalog {
         Path::new(self.root_path()).join(AGORA_DIR)
     }
 
-    fn with_registry<T>(&self, f: impl FnOnce(&Registry) -> T) -> T {
+    pub(crate) fn with_registry<T>(&self, f: impl FnOnce(&Registry) -> T) -> T {
         let guard = self.registry.read().unwrap_or_else(|p| p.into_inner());
         f(&guard)
+    }
+
+    /// Apply `f` to the registry and persist it if `f` succeeds.
+    pub(crate) fn mutate_registry<T>(
+        &self,
+        f: impl FnOnce(&mut Registry) -> Result<T, CatalogError>,
+    ) -> Result<T, CatalogError> {
+        let mut guard = self.registry.write().unwrap_or_else(|p| p.into_inner());
+        let mut next = guard.clone();
+        let out = f(&mut next)?;
+        next.save(Path::new(self.root_path()))?;
+        *guard = next;
+        Ok(out)
     }
 
     /// Create a Space (and, unless `LOCATION` names an existing one, its Location).
@@ -175,10 +216,11 @@ impl AgoraCatalog {
             }
         }
 
-        let mut guard = self.registry.write().unwrap_or_else(|p| p.into_inner());
-        guard.spaces.insert(space.name.clone(), space.clone());
-        guard.locations.insert(location.id.clone(), location);
-        guard.save(Path::new(self.root_path()))?;
+        self.mutate_registry(|reg| {
+            reg.spaces.insert(space.name.clone(), space.clone());
+            reg.locations.insert(location.id.clone(), location);
+            Ok(())
+        })?;
         Ok(space)
     }
 
@@ -197,23 +239,28 @@ impl AgoraCatalog {
         self.with_registry(|reg| reg.spaces.values().cloned().collect())
     }
 
-    /// Remove a Space from the registry.
+    /// Remove a Space from the registry, together with its views, grants and
+    /// row policies.
     ///
     /// Data is left in place: the Iceberg namespace or SQLite file stays on
     /// disk and the Location remains registered (with its writer cleared if
     /// this Space owned it) so it can be re-bound later.
     pub fn drop_space(&self, name: &str) -> Result<(), CatalogError> {
-        let mut guard = self.registry.write().unwrap_or_else(|p| p.into_inner());
-        let space = guard
-            .spaces
-            .remove(name)
-            .ok_or_else(|| CatalogError::SpaceNotFound(name.to_string()))?;
-        if let Some(location) = guard.locations.get_mut(&space.location) {
-            if location.writer.as_deref() == Some(name) {
-                location.writer = None;
+        self.mutate_registry(|reg| {
+            let space = reg
+                .spaces
+                .remove(name)
+                .ok_or_else(|| CatalogError::SpaceNotFound(name.to_string()))?;
+            if let Some(location) = reg.locations.get_mut(&space.location) {
+                if location.writer.as_deref() == Some(name) {
+                    location.writer = None;
+                }
             }
-        }
-        guard.save(Path::new(self.root_path()))
+            reg.views.retain(|(s, _), _| s != name);
+            reg.grants.retain(|(_, s, _), _| s != name);
+            reg.policies.retain(|(s, _, _), _| s != name);
+            Ok(())
+        })
     }
 
     /// Look up a Location by id.
