@@ -31,4 +31,4 @@ pub use error::SemanticError;
 pub use rewrite::{
     apply_access_control, inline_views, AccessResolver, RelationAccess, ViewResolver,
 };
-pub use sql_parser::{parse, parse_single, AgoraStatement};
+pub use sql_parser::{parse, parse_single, AgoraStatement, PublishRequest};

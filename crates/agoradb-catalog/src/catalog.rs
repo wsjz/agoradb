@@ -188,6 +188,62 @@ impl AgoraCatalog {
             )
         })
     }
+
+    /// Write `metadata` as the version after `current_location` and verify
+    /// it became the latest one (optimistic concurrency).
+    ///
+    /// If another commit raced ahead, our file is deleted and a retryable
+    /// [`ErrorKind::CatalogCommitConflicts`] error is returned.
+    pub(crate) async fn write_next_metadata(
+        &self,
+        table_ident: &TableIdent,
+        current_location: &str,
+        metadata: iceberg::spec::TableMetadata,
+    ) -> Result<Table> {
+        let next_metadata_location =
+            MetadataLocation::from_str(current_location)?.with_next_version();
+        let new_metadata_location = next_metadata_location.to_string();
+
+        metadata
+            .write_to(&self.file_io, &next_metadata_location)
+            .await?;
+
+        let latest_table = self.load_table(table_ident).await?;
+        let latest_location = latest_table
+            .metadata_location()
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+
+        if latest_location != new_metadata_location {
+            let _ = self
+                .file_io
+                .delete(&new_metadata_location)
+                .await
+                .map_err(|e| {
+                    tracing::warn!(
+                        path = %new_metadata_location,
+                        error = %e,
+                        "failed to delete stale metadata file after commit conflict"
+                    );
+                });
+            return Err(Error::new(
+                ErrorKind::CatalogCommitConflicts,
+                format!(
+                    "Concurrent modification detected on table {}: expected latest metadata to be {}, but found {}",
+                    table_ident, new_metadata_location, latest_location
+                ),
+            )
+            .with_retryable(true));
+        }
+
+        Table::builder()
+            .runtime(Runtime::try_current()?)
+            .file_io(self.file_io.clone())
+            .metadata(metadata)
+            .identifier(table_ident.clone())
+            .metadata_location(new_metadata_location)
+            .build()
+    }
 }
 
 #[async_trait]
@@ -608,57 +664,14 @@ impl Catalog for AgoraCatalog {
         // 2. Apply commit (validates requirements, e.g. snapshot-id match).
         let staged_table = commit.apply(current_table)?;
 
-        // 3. Build the new metadata file path.
-        let metadata_location = staged_table.metadata_location_result()?;
-        let next_metadata_location =
-            MetadataLocation::from_str(metadata_location)?.with_next_version();
-        let new_metadata_location = next_metadata_location.to_string();
-
-        // 4. Write the new metadata file.
-        staged_table
-            .metadata()
-            .write_to(staged_table.file_io(), &next_metadata_location)
-            .await?;
-
-        // 5. Verify: did our write win the race?
-        let latest_table = self.load_table(&table_ident).await?;
-        let latest_location = latest_table
-            .metadata_location()
-            .map(|s| s.to_string())
-            .unwrap_or_default();
-
-        if latest_location != new_metadata_location {
-            // We lost the race — another commit wrote a newer metadata file.
-            // Clean up our stale file and signal the caller to retry.
-            let _ = self
-                .file_io
-                .delete(&new_metadata_location)
-                .await
-                .map_err(|e| {
-                    tracing::warn!(
-                        path = %new_metadata_location,
-                        error = %e,
-                        "failed to delete stale metadata file after commit conflict"
-                    );
-                });
-            return Err(Error::new(
-                ErrorKind::CatalogCommitConflicts,
-                format!(
-                    "Concurrent modification detected on table {}: expected latest metadata to be {}, but found {}",
-                    table_ident, new_metadata_location, latest_location
-                ),
-            )
-            .with_retryable(true));
-        }
-
-        // 6. Our write won — return the updated table.
-        Table::builder()
-            .runtime(Runtime::try_current()?)
-            .file_io(self.file_io.clone())
-            .metadata(staged_table.metadata().clone())
-            .identifier(table_ident)
-            .metadata_location(new_metadata_location)
-            .build()
+        // 3-6. Write the next metadata version and verify it won the race.
+        let current_location = staged_table.metadata_location_result()?.to_string();
+        self.write_next_metadata(
+            &table_ident,
+            &current_location,
+            staged_table.metadata().clone(),
+        )
+        .await
     }
 }
 

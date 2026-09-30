@@ -64,4 +64,7 @@ pub enum SessionError {
 
     #[error("already exists: {0}")]
     AlreadyExists(String),
+
+    #[error("space '{space}' is published from '{origin}'; change '{origin}' and run PUBLISH SPACE {origin}")]
+    PublishedSpace { space: String, origin: String },
 }

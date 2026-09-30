@@ -45,7 +45,7 @@ use crate::error::SemanticError;
 pub const MAX_VIEW_DEPTH: usize = 16;
 
 /// Looks up view bodies.
-pub trait ViewResolver {
+pub trait ViewResolver: Send + Sync {
     /// The fully qualified body of view `space.name`, if it is a view.
     fn view_query(&self, space: &str, name: &str) -> Option<String>;
 }
@@ -60,7 +60,7 @@ pub struct RelationAccess {
 }
 
 /// Decides what a principal may read.
-pub trait AccessResolver {
+pub trait AccessResolver: Send + Sync {
     /// `None` when `principal` may not read `space.relation` (or it does not exist).
     fn access(&self, principal: &str, space: &str, relation: &str) -> Option<RelationAccess>;
 }

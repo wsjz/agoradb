@@ -41,6 +41,9 @@ pub struct Space {
     pub access: AccessMode,
     /// Creation time, milliseconds since the Unix epoch.
     pub created_at_ms: u64,
+    /// Set on an analytical Space written only by `PUBLISH SPACE <source>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub published_from: Option<String>,
 }
 
 /// The on-disk format of a Location.
@@ -191,6 +194,7 @@ pub fn validate_binding(
         location: location.id.clone(),
         access,
         created_at_ms: now_ms,
+        published_from: None,
     };
     Ok((space, location))
 }

@@ -24,6 +24,7 @@
 //!                           STORAGE = 'disk']
 //! DROP SPACE <name>
 //! SET SPACE [=] <name>
+//! PUBLISH SPACE <name> [TABLES (<table>, ...)] [TO <target space>]
 //! ```
 //!
 //! Everything else is parsed by `sqlparser` with the generic dialect and
@@ -45,8 +46,21 @@ pub enum AgoraStatement {
     DropSpace(String),
     /// `SET SPACE <name>`: the default Space for unqualified table names.
     SetSpace(String),
+    /// `PUBLISH SPACE ...`: snapshot a transactional Space into an analytical one.
+    PublishSpace(PublishRequest),
     /// Any standard SQL statement.
     Sql(Box<Statement>),
+}
+
+/// What `PUBLISH SPACE` asks for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublishRequest {
+    /// The transactional Space to publish.
+    pub space: String,
+    /// Tables to publish; `None` publishes all of them.
+    pub tables: Option<Vec<String>>,
+    /// Target analytical Space; `None` means `<space>_published`.
+    pub target: Option<String>,
 }
 
 /// Parse `sql` into one or more statements.
@@ -82,6 +96,7 @@ fn parse_one(stmt: &str) -> Result<AgoraStatement, SemanticError> {
             }
             Ok(AgoraStatement::DropSpace(validate_name(name)?))
         }
+        (Some("PUBLISH"), Some("SPACE")) => parse_publish(stmt),
         (Some("SET"), Some("SPACE")) => {
             let rest: Vec<&str> = words[2..].iter().copied().filter(|w| *w != "=").collect();
             let raw = match rest.as_slice() {
@@ -165,6 +180,51 @@ fn parse_create_space(stmt: &str) -> Result<AgoraStatement, SemanticError> {
         }
     }
     Ok(AgoraStatement::CreateSpace(request))
+}
+
+fn parse_publish(stmt: &str) -> Result<AgoraStatement, SemanticError> {
+    let err = |msg: &str| SemanticError::Parse(format!("PUBLISH SPACE: {msg}"));
+    let mut rest = stmt.trim();
+    for keyword in ["PUBLISH", "SPACE"] {
+        rest = rest[keyword.len()..].trim_start();
+    }
+    let name_end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+    let space = validate_name(&rest[..name_end])?;
+    rest = rest[name_end..].trim();
+
+    let mut tables = None;
+    let mut target = None;
+    while !rest.is_empty() {
+        let upper = rest.to_ascii_uppercase();
+        if upper.starts_with("TABLES") && tables.is_none() {
+            rest = rest["TABLES".len()..].trim_start();
+            let list = rest
+                .strip_prefix('(')
+                .ok_or_else(|| err("expected ( after TABLES"))?;
+            let close = list.find(')').ok_or_else(|| err("missing )"))?;
+            let names = list[..close]
+                .split(',')
+                .map(|t| validate_name(t.trim()))
+                .collect::<Result<Vec<_>, _>>()?;
+            if names.is_empty() {
+                return Err(err("TABLES needs at least one table"));
+            }
+            tables = Some(names);
+            rest = list[close + 1..].trim();
+        } else if upper.starts_with("TO ") && target.is_none() {
+            rest = rest[2..].trim_start();
+            let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+            target = Some(validate_name(&rest[..end])?);
+            rest = rest[end..].trim();
+        } else {
+            return Err(err(&format!("unexpected input '{rest}'")));
+        }
+    }
+    Ok(AgoraStatement::PublishSpace(PublishRequest {
+        space,
+        tables,
+        target,
+    }))
 }
 
 fn validate_name(raw: &str) -> Result<String, SemanticError> {
@@ -325,6 +385,43 @@ mod tests {
             parse_single("DROP SPACE a b"),
             Err(SemanticError::Parse(_))
         ));
+    }
+
+    #[test]
+    fn test_parse_publish_space() {
+        assert_eq!(
+            parse_single("PUBLISH SPACE orders").unwrap(),
+            AgoraStatement::PublishSpace(PublishRequest {
+                space: "orders".into(),
+                tables: None,
+                target: None
+            })
+        );
+        assert_eq!(
+            parse_single("publish space orders tables (orders, items) to snap;").unwrap(),
+            AgoraStatement::PublishSpace(PublishRequest {
+                space: "orders".into(),
+                tables: Some(vec!["orders".into(), "items".into()]),
+                target: Some("snap".into())
+            })
+        );
+        assert_eq!(
+            parse_single("PUBLISH SPACE orders TO snap TABLES (orders)").unwrap(),
+            AgoraStatement::PublishSpace(PublishRequest {
+                space: "orders".into(),
+                tables: Some(vec!["orders".into()]),
+                target: Some("snap".into())
+            })
+        );
+        for bad in [
+            "PUBLISH SPACE",
+            "PUBLISH SPACE orders TABLES orders",
+            "PUBLISH SPACE orders TABLES (a",
+            "PUBLISH SPACE orders WITH x",
+            "PUBLISH SPACE orders TO",
+        ] {
+            assert!(parse_single(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

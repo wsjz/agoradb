@@ -263,6 +263,19 @@ impl AgoraCatalog {
         })
     }
 
+    /// Mark `target` as the publication Space of `source`: from now on it is
+    /// only written by `PUBLISH SPACE source`.
+    pub fn mark_published(&self, target: &str, source: &str) -> Result<Space, CatalogError> {
+        self.mutate_registry(|reg| {
+            let space = reg
+                .spaces
+                .get_mut(target)
+                .ok_or_else(|| CatalogError::SpaceNotFound(target.to_string()))?;
+            space.published_from = Some(source.to_string());
+            Ok(space.clone())
+        })
+    }
+
     /// Look up a Location by id.
     pub fn get_location(&self, id: &str) -> Result<Location, CatalogError> {
         self.with_registry(|reg| {

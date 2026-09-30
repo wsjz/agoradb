@@ -19,6 +19,7 @@
 pub mod acl;
 pub mod catalog;
 pub mod registry;
+pub mod replace;
 pub mod resolve;
 pub mod space;
 

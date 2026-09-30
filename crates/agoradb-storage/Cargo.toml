@@ -6,6 +6,7 @@ authors.workspace = true
 license.workspace = true
 
 [dependencies]
+agoradb-catalog = { path = "../agoradb-catalog" }
 agoradb-core = { path = "../agoradb-core" }
 arrow-array = { workspace = true }
 arrow-schema = { workspace = true }
@@ -20,4 +21,3 @@ uuid = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 tokio-test = { workspace = true }
-agoradb-catalog = { path = "../agoradb-catalog" }

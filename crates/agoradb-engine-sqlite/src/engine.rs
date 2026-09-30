@@ -29,6 +29,9 @@ use rusqlite::{Connection, OpenFlags, ToSql};
 
 use crate::convert::{affinity_type, infer_from_value, ColumnType, RowBatcher};
 
+/// How long a statement waits for another connection's write lock.
+pub const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// SQLite engine serving exactly one transactional Space.
 ///
 /// The connection's `main` database is an empty in-memory database; the
@@ -97,6 +100,9 @@ impl SqliteEngine {
             quote_ident(space)
         ))
         .map_err(sql_err)?;
+        // Several connections may write the same file (one per open
+        // transaction); wait for the write lock instead of failing at once.
+        conn.busy_timeout(BUSY_TIMEOUT).map_err(sql_err)?;
 
         Ok(Self {
             space: space.to_string(),

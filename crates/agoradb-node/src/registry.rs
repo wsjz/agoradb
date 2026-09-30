@@ -121,6 +121,28 @@ impl EngineRegistry {
         Err(SessionError::EngineNotRegistered(EngineKind::Sqlite))
     }
 
+    /// A new, private SQLite connection to `space`'s database.
+    ///
+    /// Anything that needs a transaction of its own uses one: a session's
+    /// `BEGIN … COMMIT`, or a publish snapshot. The shared connection from
+    /// [`Self::sqlite_for`] must never hold a transaction, or statements of
+    /// other sessions would run inside it. WAL mode lets private readers see
+    /// the last committed state while writers keep going.
+    #[cfg(feature = "engine-sqlite")]
+    pub fn sqlite_private_for(&self, space: &Space) -> Result<Arc<dyn QueryEngine>, SessionError> {
+        let location = self.catalog.get_location(&space.location)?;
+        let path = self.catalog.sqlite_path(&location)?;
+        Ok(Arc::new(agoradb_engine_sqlite::SqliteEngine::open(
+            &space.name,
+            &path,
+        )?))
+    }
+
+    #[cfg(not(feature = "engine-sqlite"))]
+    pub fn sqlite_private_for(&self, _space: &Space) -> Result<Arc<dyn QueryEngine>, SessionError> {
+        Err(SessionError::EngineNotRegistered(EngineKind::Sqlite))
+    }
+
     /// The engine a Space is declared to use.
     pub fn engine_for(&self, space: &Space) -> Result<Arc<dyn QueryEngine>, SessionError> {
         match space.engine {

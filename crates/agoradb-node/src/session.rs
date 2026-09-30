@@ -47,9 +47,11 @@ pub struct SessionConfig {
     pub principal: Option<String>,
 }
 
+/// A session's open transaction, on a private connection to its Space.
 struct OpenTx {
     space: String,
     handle: TxHandle,
+    engine: Arc<dyn QueryEngine>,
 }
 
 /// A client session on a node.
@@ -141,6 +143,7 @@ impl AgoraSession {
                 }
                 Ok(QueryResult::Empty)
             }
+            AgoraStatement::PublishSpace(request) => self.publish(&request).await?.into_result(),
             AgoraStatement::SetSpace(name) => {
                 // A principal cannot tell a Space it has no grant in from one
                 // that does not exist.
@@ -234,8 +237,43 @@ impl AgoraSession {
         Ok(self.catalog.get_space(name)?)
     }
 
+    /// Local directory for staging Parquet files.
+    pub(crate) fn temp_dir(&self) -> &std::path::Path {
+        self.engines.temp_dir()
+    }
+
+    /// The node's engines.
+    pub(crate) fn engines(&self) -> &EngineRegistry {
+        &self.engines
+    }
+
+    /// Published Spaces are written only by `PUBLISH SPACE <source>`.
+    fn require_writable(&self, space: &Space) -> Result<(), SessionError> {
+        match &space.published_from {
+            Some(origin) => Err(SessionError::PublishedSpace {
+                space: space.name.clone(),
+                origin: origin.clone(),
+            }),
+            None => Ok(()),
+        }
+    }
+
+    /// The engine for `space`: this session's transaction connection while a
+    /// transaction is open on it, the node's shared engine otherwise.
     pub(crate) async fn bind(&self, space: &Space) -> Result<Arc<dyn QueryEngine>, SessionError> {
+        if let Some(engine) = self.tx_engine(&space.name) {
+            return Ok(engine);
+        }
         bind_space(&self.catalog, &self.engines, space, None).await
+    }
+
+    fn tx_engine(&self, space: &str) -> Option<Arc<dyn QueryEngine>> {
+        self.tx
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+            .filter(|open| open.space == space)
+            .map(|open| open.engine.clone())
     }
 
     pub(crate) async fn run_query(
@@ -318,6 +356,7 @@ impl AgoraSession {
         routed: Routed,
     ) -> Result<QueryResult, SessionError> {
         let space = self.space(space_name)?;
+        self.require_writable(&space)?;
         match space.kind {
             SpaceKind::Transactional => {
                 let engine = self.bind(&space).await?;
@@ -363,6 +402,7 @@ impl AgoraSession {
         routed: Routed,
     ) -> Result<QueryResult, SessionError> {
         let space = self.space(space_name)?;
+        self.require_writable(&space)?;
         match space.kind {
             SpaceKind::Transactional => {
                 if spaces.iter().any(|s| s != space_name) {
@@ -424,11 +464,12 @@ impl AgoraSession {
                         return Err(SessionError::TransactionOpen(open.space.clone()));
                     }
                 }
-                let engine = self.bind(&space).await?;
+                let engine = self.engines.sqlite_private_for(&space)?;
                 let handle = engine.begin().await?;
                 *self.tx.lock().unwrap_or_else(|p| p.into_inner()) = Some(OpenTx {
                     space: name,
                     handle,
+                    engine,
                 });
             }
             TclKind::Commit | TclKind::Rollback => {
@@ -438,12 +479,10 @@ impl AgoraSession {
                     .unwrap_or_else(|p| p.into_inner())
                     .take()
                     .ok_or(SessionError::NoTransaction)?;
-                let space = self.space(&open.space)?;
-                let engine = self.bind(&space).await?;
                 if kind == TclKind::Commit {
-                    engine.commit(open.handle).await?;
+                    open.engine.commit(open.handle).await?;
                 } else {
-                    engine.rollback(open.handle).await?;
+                    open.engine.rollback(open.handle).await?;
                 }
             }
         }

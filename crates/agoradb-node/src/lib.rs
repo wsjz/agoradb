@@ -25,11 +25,13 @@ mod bind;
 mod ddl;
 mod dml;
 pub mod error;
+pub mod publish;
 pub mod registry;
 pub mod result;
 pub mod session;
 
 pub use error::SessionError;
+pub use publish::{spawn_publisher, PublishReport, PublishedTable};
 pub use registry::{EngineRegistry, NodeConfig};
 pub use result::QueryResult;
 pub use session::{AgoraSession, SessionConfig};

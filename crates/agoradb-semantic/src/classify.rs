@@ -242,6 +242,10 @@ pub fn classify(
                 space: single_space(&targets, "DROP TABLE")?,
             })
         }
+        // The altered table's name is a relation, already qualified above.
+        Statement::AlterTable(alter) => Ok(StatementClass::TableDdl {
+            space: object_space(&alter.name)?,
+        }),
         Statement::CreateView(create) => {
             qualify_name(&mut create.name, default_space)?;
             Ok(StatementClass::ViewDdl)
@@ -423,6 +427,17 @@ mod tests {
             classify(&mut stmt, None),
             Err(SemanticError::UnqualifiedTable(_))
         ));
+        let mut stmt = sql("ALTER TABLE items ADD COLUMN note TEXT");
+        assert_eq!(
+            classify(&mut stmt, Some("inv")).unwrap(),
+            StatementClass::TableDdl {
+                space: "inv".into()
+            }
+        );
+        assert_eq!(
+            stmt.to_string(),
+            "ALTER TABLE inv.items ADD COLUMN note TEXT"
+        );
     }
 
     #[test]

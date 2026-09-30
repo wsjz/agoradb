@@ -88,26 +88,44 @@ async fn test_compaction_merges_multiple_files() {
     }
     assert_eq!(total_before, 9);
 
+    let before_snapshot = table.metadata().current_snapshot_id().unwrap();
+
     // Compact
-    let compaction = CompactionService::new(
-        catalog.clone(),
-        file_io.clone(),
-        temp_dir.path().to_path_buf(),
-    );
+    let compaction = CompactionService::new(catalog.clone(), temp_dir.path().to_path_buf());
     compaction.compact_table(&table_ident).await.unwrap();
 
-    // After compaction: 18 rows total.
-    // The CompactionService uses fast_append which adds the merged file
-    // without removing the original files (overwrite is not wired up yet).
-    // This is expected Phase 0 behavior.
+    // The merged file replaces the three originals: same rows, one file.
     let table = catalog.load_table(&table_ident).await.unwrap();
+    let data_files = |snapshot: i64| {
+        let table = table.clone();
+        async move {
+            let mut files = table
+                .scan()
+                .snapshot_id(snapshot)
+                .build()
+                .unwrap()
+                .plan_files()
+                .await
+                .unwrap();
+            let mut n = 0;
+            while let Some(f) = files.next().await {
+                f.unwrap();
+                n += 1;
+            }
+            n
+        }
+    };
+    let after_snapshot = table.metadata().current_snapshot_id().unwrap();
+    assert_ne!(after_snapshot, before_snapshot);
+    assert_eq!(data_files(after_snapshot).await, 1);
+    // The pre-compaction snapshot is untouched (time travel / pinned readers).
+    assert_eq!(data_files(before_snapshot).await, 3);
+
     let scan = table.scan().build().unwrap();
     let mut stream = scan.to_arrow().await.unwrap();
-    let mut total_after = 0;
     let mut all_ids: Vec<i64> = Vec::new();
     while let Some(r) = stream.next().await {
         let batch = r.unwrap();
-        total_after += batch.num_rows();
         all_ids.extend(
             batch
                 .column(0)
@@ -117,11 +135,6 @@ async fn test_compaction_merges_multiple_files() {
                 .values(),
         );
     }
-    assert_eq!(total_after, 18);
     all_ids.sort();
-    // Each id appears twice: once from original files, once from compacted file
-    assert_eq!(
-        all_ids,
-        vec![1, 1, 2, 2, 3, 3, 11, 11, 12, 12, 13, 13, 21, 21, 22, 22, 23, 23]
-    );
+    assert_eq!(all_ids, vec![1, 2, 3, 11, 12, 13, 21, 22, 23]);
 }

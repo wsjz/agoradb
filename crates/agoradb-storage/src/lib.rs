@@ -15,21 +15,19 @@
 use agoradb_core::StorageError;
 use arrow_array::RecordBatch;
 use arrow_schema::SchemaRef;
-use bytes::Bytes;
 use iceberg::io::FileIO;
-use iceberg::spec::{DataContentType, DataFileBuilder, DataFileFormat};
 use iceberg::transaction::ApplyTransactionAction;
 use iceberg::transaction::Transaction;
 use iceberg::{Catalog, TableIdent};
-use parquet::arrow::ArrowWriter;
-use parquet::file::properties::WriterProperties;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 pub mod buffer;
 pub mod compaction;
+pub mod datafile;
 
 use buffer::AppendBuffer;
+pub use datafile::write_data_file;
 
 /// Append-only Parquet writer for one Iceberg table.
 ///
@@ -107,59 +105,22 @@ impl StorageEngine {
             arrow_select::concat::concat_batches(&self.buffer.schema, &self.buffer.batches)
                 .map_err(|e| StorageError::FlushFailed(e.to_string()))?;
 
-        // 2. Write to a local temporary Parquet file.
-        let temp_file_path = self
-            .temp_dir
-            .join(format!("{}.parquet", uuid::Uuid::new_v4()));
-        let temp_file = std::fs::File::create(&temp_file_path)?;
-
-        let props = WriterProperties::builder()
-            .set_compression(parquet::basic::Compression::ZSTD(
-                parquet::basic::ZstdLevel::try_new(3).unwrap_or_default(),
-            ))
-            .build();
-
-        let mut writer = ArrowWriter::try_new(temp_file, self.buffer.schema.clone(), Some(props))
-            .map_err(|e| StorageError::FlushFailed(e.to_string()))?;
-        writer
-            .write(&merged)
-            .map_err(|e| StorageError::FlushFailed(e.to_string()))?;
-        let _file_metadata = writer
-            .close()
-            .map_err(|e| StorageError::FlushFailed(e.to_string()))?;
-        let file_size = std::fs::metadata(&temp_file_path)?.len() as u64;
-
-        // 3. Load the table so the data file lands under its own location.
+        // 2. Write the Parquet file under the table's own data directory.
         let table = self
             .catalog
             .load_table(&self.table)
             .await
             .map_err(|e| StorageError::FlushFailed(e.to_string()))?;
-        let data_dir = format!("{}/data", table.metadata().location());
-        let target_path = format!("{}/{}.parquet", data_dir, uuid::Uuid::new_v4());
+        let data_file = write_data_file(
+            &self.file_io,
+            table.metadata().location(),
+            &self.buffer.schema,
+            &merged,
+            &self.temp_dir,
+        )
+        .await?;
 
-        let output = self
-            .file_io
-            .new_output(&target_path)
-            .map_err(|e| StorageError::FlushFailed(e.to_string()))?;
-        let data = tokio::fs::read(&temp_file_path).await?;
-        output
-            .write(Bytes::from(data))
-            .await
-            .map_err(|e| StorageError::FlushFailed(e.to_string()))?;
-        tokio::fs::remove_file(&temp_file_path).await?;
-
-        // 4. Build DataFile.
-        let data_file = DataFileBuilder::default()
-            .content(DataContentType::Data)
-            .file_path(target_path)
-            .file_format(DataFileFormat::Parquet)
-            .record_count(merged.num_rows() as u64)
-            .file_size_in_bytes(file_size)
-            .build()
-            .map_err(|e| StorageError::FlushFailed(e.to_string()))?;
-
-        // 5. Iceberg Transaction Commit.
+        // 3. Iceberg Transaction Commit.
         let tx = Transaction::new(&table);
         let action = tx
             .fast_append()
@@ -171,7 +132,7 @@ impl StorageEngine {
             .await
             .map_err(|e| StorageError::FlushFailed(e.to_string()))?;
 
-        // 6. Clear the buffer.
+        // 4. Clear the buffer.
         self.buffer.clear();
 
         Ok(())

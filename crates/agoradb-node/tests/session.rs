@@ -156,6 +156,12 @@ async fn create_table_analytical_commits_iceberg_schema() {
         &DataType::Int64
     );
 
+    assert!(matches!(
+        n.session
+            .sql("ALTER TABLE blog.posts ADD COLUMN extra BIGINT")
+            .await,
+        Err(SessionError::Unsupported(_))
+    ));
     n.session.sql("DROP TABLE blog.posts").await.unwrap();
     assert!(matches!(
         n.session.sql("DROP TABLE blog.posts").await,
@@ -417,4 +423,60 @@ async fn readonly_analytical_over_sqlite_location() {
         .await
         .unwrap();
     assert_eq!(int_column(&result, 0), vec![2]);
+}
+
+/// Regression: a session's transaction must not capture other sessions'
+/// statements (they used to share one SQLite connection).
+#[tokio::test]
+async fn transactions_are_isolated_between_sessions() {
+    let n = node();
+    let engines = Arc::new(EngineRegistry::new(n.catalog.clone(), NodeConfig::default()).unwrap());
+    let a = AgoraSession::new(n.catalog.clone(), engines.clone(), SessionConfig::default());
+    let b = Arc::new(AgoraSession::new(
+        n.catalog.clone(),
+        engines.clone(),
+        SessionConfig::default(),
+    ));
+    a.sql("CREATE SPACE o WITH KIND = 'transactional'")
+        .await
+        .unwrap();
+    a.sql("CREATE TABLE o.t (id INTEGER)").await.unwrap();
+    a.sql("SET SPACE o").await.unwrap();
+
+    // B's autocommit write survives A's rollback.
+    a.sql("BEGIN").await.unwrap();
+    b.sql("INSERT INTO o.t VALUES (1)").await.unwrap();
+    a.sql("ROLLBACK").await.unwrap();
+    assert_eq!(
+        int_column(&b.sql("SELECT count(*) FROM o.t").await.unwrap(), 0),
+        vec![1]
+    );
+
+    // A's uncommitted write is invisible to B; B's write waits for A's lock.
+    a.sql("BEGIN").await.unwrap();
+    a.sql("INSERT INTO o.t VALUES (2)").await.unwrap();
+    assert_eq!(
+        int_column(&b.sql("SELECT count(*) FROM o.t").await.unwrap(), 0),
+        vec![1]
+    );
+    let b2 = b.clone();
+    let waiting = tokio::spawn(async move { b2.sql("INSERT INTO o.t VALUES (3)").await });
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert!(!waiting.is_finished(), "B must wait for A's write lock");
+    a.sql("COMMIT").await.unwrap();
+    waiting.await.unwrap().unwrap();
+    let ids = b.sql("SELECT id FROM o.t ORDER BY id").await.unwrap();
+    assert_eq!(int_column(&ids, 0).len(), 3);
+    assert_eq!(int_column(&ids, 0), vec![1, 2, 3]);
+
+    // Dropping a session with an open transaction rolls it back.
+    let c = AgoraSession::new(n.catalog.clone(), engines.clone(), SessionConfig::default());
+    c.sql("SET SPACE o").await.unwrap();
+    c.sql("BEGIN").await.unwrap();
+    c.sql("INSERT INTO o.t VALUES (4)").await.unwrap();
+    drop(c);
+    assert_eq!(
+        int_column(&b.sql("SELECT count(*) FROM o.t").await.unwrap(), 0),
+        vec![3]
+    );
 }

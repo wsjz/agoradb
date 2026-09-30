@@ -5,7 +5,7 @@
 > **Codename**: agoradb
 > **Positioning**: A Decentralized Local Federated Query Semantic Layer — Embedded, Sovereign, and P2P-Native
 > **Core Change**: AgoraDB no longer owns query *computation*. Computation is delegated to pluggable embedded engines (DuckDB for analytics, SQLite for transactions; browser-hosted engines in WASM). DataFusion is retained **only** as the federation coordinator that merges results across engines and nodes. AgoraDB's own value concentrates in the semantic layer (naming, policy, views), the federation layer (routing, pushdown, merge), identity/authorization (DID/UCAN) and P2P (discovery, snapshot sync, Arrow Flight).
-> **Status**: 3.0-A (engines), 3.0-B (local federation) and 3.0-C (semantic layer) implemented on `feat/v3-engines`. Supersedes v2.0.
+> **Status**: 3.0-A (engines), 3.0-B (local federation), 3.0-C (semantic layer) and 3.0-D (publishing) implemented on `feat/v3-engines`. Supersedes v2.0.
 
 ---
 
@@ -217,7 +217,7 @@ Every statement is classified before planning:
 | Query (`SELECT`) touching **one** local Space | any | **Pushed entirely** to that Space's engine; DataFusion is a pass-through |
 | Query touching **N** Spaces / remote Spaces | any | Federation Layer (§5) |
 
-A query inside an open SQLite transaction that references only that Space executes on the same connection, so it sees uncommitted rows. Cross-Space queries inside a transaction see the last committed state (WAL snapshot isolation) — documented as a known semantic.
+Each transactional Space has one shared SQLite connection for autocommit statements. `BEGIN` gives the session a **private connection** to the Space's file, and until `COMMIT`/`ROLLBACK` every statement of that session on that Space, including federated queries, runs on it, so the session sees its own uncommitted rows and nobody else does. A writer on another connection waits up to 5 s for the write lock (`busy_timeout`); dropping a session with an open transaction rolls it back.
 
 ---
 
@@ -313,27 +313,27 @@ Not yet: writes by principals (UCAN write delegation, 3.1), column-level `REVOKE
 
 ### 7.1 Analytical Spaces (unchanged core)
 
-Iceberg metadata + Parquet data files via VFS. Write path: `AppendBuffer → Parquet flush → Iceberg atomic commit` (existing `agoradb-storage`). Compaction service unchanged. **Read path changes**: the snapshot's data-file list is handed to DuckDB, not read by DataFusion `ParquetExec`.
+Iceberg metadata + Parquet data files via VFS. Write path: `AppendBuffer → Parquet flush → Iceberg fast-append commit` (`agoradb-storage`). iceberg-rust 0.10 has no public overwrite action, so `AgoraCatalog::replace_data_files` produces `overwrite` snapshots itself (manifest + manifest list + optimistic metadata commit, retried on conflict); compaction and publishing both use it, so compaction no longer duplicates rows. **Read path**: the snapshot's data-file list is handed to DuckDB, not read by DataFusion `ParquetExec`.
 
 ### 7.2 Transactional Spaces (new)
 
 - One SQLite database file per Space, WAL mode, at `Location.path`.
 - Writes go straight to SQLite; AgoraDB does not intercept or log them.
-- Catalog mirrors the SQLite schema (`sqlite_master`) so table names resolve without opening the engine.
+- Table names come from the engine (`sqlite_master`). `CREATE/ALTER/DROP TABLE` pass through to SQLite.
 
 ### 7.3 Publishing: SQLite → Parquet snapshots
 
 Transactional Spaces become visible to peers only through **published snapshots**:
 
-```rust
-pub struct PublishPolicy {
-    pub trigger: PublishTrigger,   // Manual | Interval(Duration) | OnCommitCount(u64)
-    pub tables: Vec<String>,       // subset of tables to publish
-    pub target: LocationId,        // an IcebergParquet Location (auto-created: <space>.published)
-}
+```sql
+PUBLISH SPACE orders [TABLES (orders, items)] [TO orders_published]
 ```
 
-The publisher runs `SELECT * FROM <table>` through the SQLite engine, writes Parquet via the existing write path, and commits a new Iceberg snapshot into the target Location. The result is an ordinary **analytical, read-only** Space (`orders.published`) that participates in P2P sync and federation exactly like any other. WAL-level replication (Litestream-style) is explicitly **out of scope for v3.0**.
+- The target defaults to `<space>_published`. It is created on first publish as an ordinary analytical Space marked `published_from = <space>`; only `PUBLISH SPACE` writes it (DML/DDL on it fail with `PublishedSpace`), while views, grants and policies on it work as on any Space. It participates in federation (and later P2P sync) like any other analytical Space.
+- Every selected table is read inside **one read transaction on a private connection**: the publication is a consistent committed state of all tables, never includes uncommitted writes, and does not block or disturb open transactions.
+- Each table gets **one new Iceberg `overwrite` snapshot** replacing its data (`AgoraCatalog::replace_data_files`), so the published table is an exact copy as of the publish, and every earlier publication remains readable at its snapshot. Commits are atomic per table, not across tables.
+- A full publish (no `TABLES`) mirrors the source: tables dropped in SQLite are dropped from the target. A table whose SQLite schema changed is recreated with the new schema (its earlier snapshots are lost with it).
+- `spawn_publisher(session, request, every)` republishes on an interval; failures are logged and retried at the next tick. Commit-count triggers and WAL-level replication (Litestream-style) are **out of scope for v3.0**.
 
 ### 7.4 VFS
 
@@ -434,7 +434,7 @@ Roughly 1,100 of the current ~4,300 lines are engine-bridge code that goes away;
 | **3.0-A Engines** ✅ | `agoradb-engine` trait; DuckDB + SQLite engines; Location/Space split in catalog; `CREATE SPACE ... KIND`; single-Space queries pushed entirely to the engine | TPC-H Q1–Q5 on an analytical Space via DuckDB; an OLTP smoke test (BEGIN/INSERT/COMMIT/SELECT) on a transactional Space |
 | **3.0-B Federation** ✅ | DataFusion coordinator over `datafusion-federation` + `EngineSqlExecutor`; cross-Space join (Parquet ⋈ SQLite) locally; snapshot pinning | Two-Space join returns correct results; EXPLAIN shows two pushed-down SQL leaves |
 | **3.0-C Semantic** ✅ | Views, column grants and row policies as SQL rewrites; principals read-only and deny-by-default; enumeration resistance | Policy test suite: a restricted DID sees rewritten `*` and injected predicates inside the engine SQL |
-| **3.0-D Publish** | SQLite → Parquet publisher; `orders.published` analytical read-only Space | Publish → query via DuckDB matches SQLite source |
+| **3.0-D Publish** ✅ | `PUBLISH SPACE` → `orders_published` analytical read-only Space; scheduled publisher | Publish → query via DuckDB matches SQLite source |
 | **3.1 Network** | DID/UCAN, Arrow Flight `RemoteTableProvider`, libp2p discovery, snapshot subscription | Two Docker nodes: UCAN-gated federated query; revocation cuts access |
 | **3.2 Browser** | WASM core + `HostEngine` bridge to duckdb-wasm / wa-sqlite | Browser node runs a local query and a federated query via a Full Node |
 | **3.3 Multimodal** | Load `vss`/`fts`/DuckPGQ, FTS5/`sqlite-vec`; `Mode` capability checks | Vector + FTS query on each engine kind |
@@ -470,6 +470,8 @@ No phase skipping (AGENT.md §4.1).
 | 2026-09-27 | Multimodal via engine extensions; drop ART/CSR/HNSW/Cypher | Extensions exist and are maintained; custom indexes were the largest remaining scope |
 | 2026-09-27 | Bridge engines with our own `SQLExecutor` instead of `datafusion-table-providers` | One path to each engine (`QueryEngine`), no second connection pool, no pinned old `rusqlite`; the same executor will wrap remote and browser-host engines |
 | 2026-09-29 | Run the federation optimizer rule after `push_down_filter` | With the upstream default position, filters above a join stayed in DataFusion instead of reaching the engine SQL |
+| 2026-09-30 | Overwrite snapshots produced by `AgoraCatalog` itself (`replace_data_files`) | iceberg-rust 0.10 only exposes fast-append; publishing needs replace semantics and compaction was duplicating rows |
+| 2026-09-30 | One private SQLite connection per open transaction | A shared connection let one session's `ROLLBACK` discard other sessions' autocommit writes |
 | 2026-09-30 | Grants and policies use PostgreSQL syntax (`GRANT SELECT (cols)`, `CREATE POLICY … USING`); views run with owner rights | Familiar syntax parsed by sqlparser as-is; owner-rights views are what makes a view a publishable semantic interface |
 
 ---

@@ -132,7 +132,7 @@ v3 路线图（详见 `agoradb_architecture_v3.md` §12）：
 | 3.0-A 引擎 | `QueryEngine` 抽象、DuckDB/SQLite 引擎、Space/Location 目录、单 Space 查询整条下推 | ✅ |
 | 3.0-B 联邦 | DataFusion 协调器 + `datafusion-federation`、跨 Space join、快照 pinning | ✅ |
 | 3.0-C 语义层 | 视图、列授权与行策略（SQL 改写）、principal 只读 + 默认拒绝、枚举抵抗 | ✅ |
-| 3.0-D 发布 | SQLite → Parquet 快照发布器 | 待开始 |
+| 3.0-D 发布 | `PUBLISH SPACE`：SQLite → Iceberg 快照（覆盖式）、定时发布 | ✅ |
 | 3.1 网络 | DID/UCAN、Arrow Flight 远端表、libp2p 发现、快照订阅 | 待开始 |
 | 3.2 浏览器 | WASM 核心 + 宿主引擎桥 (duckdb-wasm / wa-sqlite) | 待开始 |
 | 3.3 多模态 | 引擎扩展：DuckDB vss/fts/DuckPGQ、SQLite FTS5/sqlite-vec | 待开始 |

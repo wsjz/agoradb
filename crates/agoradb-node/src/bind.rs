@@ -47,7 +47,17 @@ pub async fn bind_space(
     let location = catalog.get_location(&space.location)?;
     match &location.format {
         LocationFormat::IcebergParquet { .. } => {
-            for table in catalog.space_tables(space).await? {
+            let tables = catalog.space_tables(space).await?;
+            // Forget tables dropped since the last bind, so a stale view can
+            // never read deleted files.
+            for attached in engine.table_names(&space.name).await? {
+                if !tables.contains(&attached) {
+                    engine
+                        .detach(&QualifiedName::new(&space.name, &attached))
+                        .await?;
+                }
+            }
+            for table in tables {
                 let pin = pins.and_then(|p| p.get(&table).copied().flatten());
                 let resolved = catalog.resolve_table(space, &table, pin).await?;
                 engine

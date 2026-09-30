@@ -12,23 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use agoradb_core::CompactionError;
-use arrow_array::RecordBatch;
-use bytes::Bytes;
-use futures::StreamExt;
-use iceberg::io::FileIO;
-use iceberg::spec::{DataContentType, DataFileBuilder, DataFileFormat};
-use iceberg::transaction::{ApplyTransactionAction, Transaction};
-use iceberg::{Catalog, TableIdent};
-use parquet::arrow::ArrowWriter;
-use parquet::file::properties::WriterProperties;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-/// Service for compacting small Parquet files into larger ones.
+use agoradb_catalog::AgoraCatalog;
+use agoradb_core::CompactionError;
+use arrow_array::RecordBatch;
+use futures::TryStreamExt;
+use iceberg::{Catalog, TableIdent};
+
+use crate::datafile::write_data_file;
+
+/// Rewrites a table's data files into one file.
 pub struct CompactionService {
-    catalog: Arc<dyn Catalog>,
-    file_io: FileIO,
+    catalog: Arc<AgoraCatalog>,
     #[allow(dead_code)]
     target_file_size: usize,
     temp_dir: PathBuf,
@@ -41,128 +38,62 @@ impl CompactionService {
     /// Create a new [`CompactionService`].
     ///
     /// `temp_dir` must be a local directory used to stage merged Parquet files.
-    pub fn new(catalog: Arc<dyn Catalog>, file_io: FileIO, temp_dir: PathBuf) -> Self {
+    pub fn new(catalog: Arc<AgoraCatalog>, temp_dir: PathBuf) -> Self {
         Self {
             catalog,
-            file_io,
             target_file_size: Self::DEFAULT_TARGET_FILE_SIZE,
             temp_dir,
         }
     }
 
-    /// Create a new [`CompactionService`] from a concrete catalog implementation.
-    pub fn new_with_catalog<C: Catalog + 'static>(
-        catalog: Arc<C>,
-        file_io: FileIO,
-        temp_dir: PathBuf,
-    ) -> Self {
-        Self::new(catalog as Arc<dyn Catalog>, file_io, temp_dir)
-    }
-
-    /// Compact all data files in a table into a single Parquet file.
+    /// Merge every data file of the current snapshot into one file and commit
+    /// it as a replacement, so the row count is unchanged. Older snapshots
+    /// still reference the original files.
     pub async fn compact_table(&self, table_ident: &TableIdent) -> Result<(), CompactionError> {
-        // 1. Load table.
+        let failed = |e: &dyn std::fmt::Display| CompactionError::CompactionFailed(e.to_string());
+
         let table = self
             .catalog
             .load_table(table_ident)
             .await
-            .map_err(|e| CompactionError::CompactionFailed(e.to_string()))?;
-
-        let snapshot = table
+            .map_err(|e| failed(&e))?;
+        let snapshot_id = table
             .metadata()
-            .current_snapshot()
+            .current_snapshot_id()
             .ok_or_else(|| CompactionError::CompactionFailed("No snapshots".to_string()))?;
-        let snapshot_id = snapshot.snapshot_id();
 
-        // 2. Scan all data files via TableScan.
-        let scan = table
+        let batches: Vec<RecordBatch> = table
             .scan()
             .snapshot_id(snapshot_id)
             .with_row_selection_enabled(true)
             .build()
-            .map_err(|e| CompactionError::CompactionFailed(e.to_string()))?;
-
-        let mut stream = scan
+            .map_err(|e| failed(&e))?
             .to_arrow()
             .await
-            .map_err(|e| CompactionError::CompactionFailed(e.to_string()))?;
-
-        let mut batches: Vec<RecordBatch> = Vec::new();
-        while let Some(result) = stream.next().await {
-            let batch = result.map_err(|e| CompactionError::CompactionFailed(e.to_string()))?;
-            batches.push(batch);
-        }
-
-        if batches.is_empty() {
+            .map_err(|e| failed(&e))?
+            .try_collect()
+            .await
+            .map_err(|e| failed(&e))?;
+        if batches.iter().all(|b| b.num_rows() == 0) {
             return Err(CompactionError::NoDataFiles);
         }
 
-        if batches.len() == 1 && batches[0].num_rows() == 0 {
-            return Err(CompactionError::NoDataFiles);
-        }
-
-        // 3. Concatenate all batches.
         let schema = batches[0].schema();
-        let merged = arrow_select::concat::concat_batches(&schema, &batches)
-            .map_err(|e| CompactionError::CompactionFailed(e.to_string()))?;
+        let merged =
+            arrow_select::concat::concat_batches(&schema, &batches).map_err(|e| failed(&e))?;
+        let data_file = write_data_file(
+            self.catalog.file_io(),
+            table.metadata().location(),
+            &schema,
+            &merged,
+            &self.temp_dir,
+        )
+        .await
+        .map_err(|e| failed(&e))?;
 
-        // 4. Write temp Parquet.
-        let temp_path = self
-            .temp_dir
-            .join(format!("compact_{}.parquet", uuid::Uuid::new_v4()));
-        let temp_file = std::fs::File::create(&temp_path)?;
-        let props = WriterProperties::builder()
-            .set_compression(parquet::basic::Compression::ZSTD(
-                parquet::basic::ZstdLevel::try_new(3).unwrap_or_default(),
-            ))
-            .build();
-        let mut writer = ArrowWriter::try_new(temp_file, schema.clone(), Some(props))
-            .map_err(|e| CompactionError::CompactionFailed(e.to_string()))?;
-        writer
-            .write(&merged)
-            .map_err(|e| CompactionError::CompactionFailed(e.to_string()))?;
-        let _ = writer
-            .close()
-            .map_err(|e| CompactionError::CompactionFailed(e.to_string()))?;
-        let file_size = std::fs::metadata(&temp_path)?.len() as u64;
-
-        // 5. Upload via file_io into the table's own data directory.
-        let data_dir = format!("{}/data", table.metadata().location());
-        let target_path = format!("{}/{}.parquet", data_dir, uuid::Uuid::new_v4());
-
-        let output = self
-            .file_io
-            .new_output(&target_path)
-            .map_err(|e| CompactionError::CompactionFailed(e.to_string()))?;
-        let data = tokio::fs::read(&temp_path).await?;
-        output
-            .write(Bytes::from(data))
-            .await
-            .map_err(|e| CompactionError::CompactionFailed(e.to_string()))?;
-        tokio::fs::remove_file(&temp_path).await?;
-
-        // 6. Build DataFile.
-        let data_file = DataFileBuilder::default()
-            .content(DataContentType::Data)
-            .file_path(target_path)
-            .file_format(DataFileFormat::Parquet)
-            .record_count(merged.num_rows() as u64)
-            .file_size_in_bytes(file_size)
-            .build()
-            .map_err(|e| CompactionError::CompactionFailed(e.to_string()))?;
-
-        // 7. Iceberg Transaction.
-        let tx = Transaction::new(&table);
-        let action = tx
-            .fast_append()
-            .add_data_files(vec![data_file])
-            .apply(tx)
-            .map_err(|e| CompactionError::CompactionFailed(e.to_string()))?;
-        action
-            .commit(self.catalog.as_ref())
-            .await
-            .map_err(|e| CompactionError::CompactionFailed(e.to_string()))?;
-
+        self.catalog
+            .replace_data_files(table_ident, vec![data_file])
+            .await?;
         Ok(())
     }
 }
