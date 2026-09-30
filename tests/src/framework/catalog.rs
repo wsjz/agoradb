@@ -19,6 +19,13 @@ use iceberg::io::FileIO;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+/// Name of the Space the generated TPC-H tables live in.
+pub const TPCH_SPACE: &str = "tpch";
+
+/// Command that (re)generates the test data.
+pub const GENERATE_CMD: &str =
+    "cargo run -p test-data-gen --bin generate-test-data -- --scale-factor 0.001 --force";
+
 /// Path to the pre-generated test data directory.
 pub fn test_data_dir() -> PathBuf {
     // tests/ is a workspace member, so CARGO_MANIFEST_DIR points to tests/
@@ -32,12 +39,17 @@ pub async fn setup_catalog() -> Arc<AgoraCatalog> {
     let root = test_data_dir();
     assert!(
         root.exists(),
-        "Test data not found at {}.\n\
-         Run: cargo run -p test-data-gen --bin generate-test-data -- --force",
+        "Test data not found at {}.\nRun: {GENERATE_CMD}",
         root.display()
     );
 
     let root_path = root.to_str().unwrap().to_string();
-    let file_io = FileIO::new_with_fs();
-    Arc::new(AgoraCatalog::new(file_io, &root_path))
+    let catalog = AgoraCatalog::open(FileIO::new_with_fs(), &root_path)
+        .unwrap_or_else(|e| panic!("cannot open test catalog: {e}"));
+    assert!(
+        catalog.get_space(TPCH_SPACE).is_ok(),
+        "Space '{TPCH_SPACE}' missing from {}; regenerate with: {GENERATE_CMD}",
+        root.display()
+    );
+    Arc::new(catalog)
 }

@@ -23,18 +23,19 @@
 //! ```
 
 use agoradb_catalog::AgoraCatalog;
+use agoradb_core::CreateSpaceRequest;
 use agoradb_storage::StorageEngine;
 use arrow::array::{Date32Array, Decimal128Array, Int32Array, Int64Array, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow_array::RecordBatch;
 use arrow_schema::SchemaRef;
 use clap::Parser;
+use iceberg::arrow::arrow_schema_to_schema_auto_assign_ids;
 use iceberg::io::FileIO;
-use iceberg::{Catalog, NamespaceIdent, TableCreation};
+use iceberg::{Catalog, NamespaceIdent, TableCreation, TableIdent};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 const BATCH_SIZE: usize = 1024;
@@ -54,6 +55,18 @@ struct Args {
     /// Force regeneration even if output directory exists
     #[arg(long)]
     force: bool,
+
+    /// Space (Iceberg namespace) the TPC-H tables are written into
+    #[arg(long, default_value = "tpch")]
+    space: String,
+}
+
+/// Everything a table generator needs to create and fill one table.
+struct GenContext {
+    catalog: Arc<AgoraCatalog>,
+    file_io: FileIO,
+    namespace: NamespaceIdent,
+    temp_dir: PathBuf,
 }
 
 fn main() {
@@ -70,18 +83,24 @@ async fn generate(args: Args) {
         cwd.join(&args.output_dir)
     };
 
-    let default_ns_dir = output_dir.join("default");
-    if default_ns_dir.exists() {
-        if args.force {
-            eprintln!("Removing existing data at {}", default_ns_dir.display());
-            let _ = std::fs::remove_dir_all(&default_ns_dir);
-        } else {
-            eprintln!(
-                "Output directory already exists: {}. Use --force to overwrite.",
-                default_ns_dir.display()
-            );
-            std::process::exit(1);
+    // The output directory is dedicated to test data, so --force resets both
+    // the Space's data and the Space registry (.agora) so the Space can be
+    // re-registered from scratch.
+    let space_dir = output_dir.join(&args.space);
+    let registry_dir = output_dir.join(".agora");
+    if args.force {
+        for dir in [&space_dir, &registry_dir] {
+            if dir.exists() {
+                eprintln!("Removing existing data at {}", dir.display());
+                let _ = std::fs::remove_dir_all(dir);
+            }
         }
+    } else if space_dir.exists() || registry_dir.exists() {
+        eprintln!(
+            "Output directory already contains data: {}. Use --force to overwrite.",
+            output_dir.display()
+        );
+        std::process::exit(1);
     }
 
     let sf = args.scale_factor;
@@ -107,20 +126,34 @@ async fn generate(args: Args) {
     let file_io = FileIO::new_with_fs();
     let catalog = Arc::new(AgoraCatalog::new(file_io.clone(), &root_path));
 
-    catalog
-        .create_namespace(&NamespaceIdent::new("default".to_string()), HashMap::new())
+    // Register the analytical Space; this also creates its Iceberg namespace.
+    let space = catalog
+        .create_space(CreateSpaceRequest::new(args.space.clone()))
         .await
-        .expect("Failed to create namespace");
+        .expect("Failed to create space");
+    let namespace = catalog
+        .space_namespace(&space)
+        .expect("Analytical space must have a namespace");
+
+    let temp_dir = output_dir.join(".tmp");
+    std::fs::create_dir_all(&temp_dir).expect("Failed to create temp dir");
+
+    let ctx = GenContext {
+        catalog,
+        file_io,
+        namespace,
+        temp_dir,
+    };
 
     // Create tables and generate data
-    generate_region(&catalog, file_io.clone(), &root_path, &output_dir, region_count).await;
-    generate_nation(&catalog, file_io.clone(), &root_path, &output_dir, nation_count).await;
-    generate_customer(&catalog, file_io.clone(), &root_path, &output_dir, customer_count).await;
-    generate_orders(&catalog, file_io.clone(), &root_path, &output_dir, orders_count, customer_count).await;
-    generate_lineitem(&catalog, file_io.clone(), &root_path, &output_dir, orders_count, sf).await;
-    generate_supplier(&catalog, file_io.clone(), &root_path, &output_dir, supplier_count).await;
-    generate_part(&catalog, file_io.clone(), &root_path, &output_dir, part_count).await;
-    generate_partsupp(&catalog, file_io.clone(), &root_path, &output_dir, part_count, supplier_count).await;
+    generate_region(&ctx, region_count).await;
+    generate_nation(&ctx, nation_count).await;
+    generate_customer(&ctx, customer_count).await;
+    generate_orders(&ctx, orders_count, customer_count).await;
+    generate_lineitem(&ctx, orders_count, sf).await;
+    generate_supplier(&ctx, supplier_count).await;
+    generate_part(&ctx, part_count).await;
+    generate_partsupp(&ctx, part_count, supplier_count).await;
 
     eprintln!("Done. Data written to {}", output_dir.display());
 }
@@ -144,70 +177,28 @@ fn seed_rng(table_name: &str) -> StdRng {
     StdRng::seed_from_u64(seed)
 }
 
-async fn create_table(
-    catalog: &Arc<AgoraCatalog>,
-    file_io: FileIO,
-    root_path: &str,
-    output_dir: &Path,
-    name: &str,
-    arrow_schema: SchemaRef,
-) -> StorageEngine {
-    // Build Iceberg schema from Arrow schema
-    let fields: Vec<iceberg::spec::NestedFieldRef> = arrow_schema
-        .fields()
-        .iter()
-        .enumerate()
-        .map(|(idx, field)| {
-            let primitive = arrow_to_iceberg_type(field.data_type());
-            iceberg::spec::NestedField::required(
-                (idx + 1) as i32,
-                field.name(),
-                iceberg::spec::Type::Primitive(primitive),
-            )
-            .into()
-        })
-        .collect();
-
-    let iceberg_schema = iceberg::spec::Schema::builder()
-        .with_fields(fields)
-        .build()
-        .unwrap();
+async fn create_table(ctx: &GenContext, name: &str, arrow_schema: SchemaRef) -> StorageEngine {
+    // Build Iceberg schema from Arrow schema (field ids assigned in order).
+    let iceberg_schema = arrow_schema_to_schema_auto_assign_ids(&arrow_schema)
+        .unwrap_or_else(|e| panic!("Failed to convert schema for {}: {}", name, e));
 
     let table_creation = TableCreation::builder()
         .name(name.to_string())
         .schema(iceberg_schema)
         .build();
 
-    catalog
-        .create_table(&NamespaceIdent::new("default".to_string()), table_creation)
+    ctx.catalog
+        .create_table(&ctx.namespace, table_creation)
         .await
         .unwrap_or_else(|_| panic!("Failed to create table {}", name));
 
-    let temp_dir = output_dir.join(".tmp");
-    let _ = std::fs::create_dir_all(&temp_dir);
-
     StorageEngine::new_with_catalog(
-        catalog.clone(),
-        file_io,
-        root_path,
+        ctx.catalog.clone(),
+        ctx.file_io.clone(),
+        TableIdent::new(ctx.namespace.clone(), name.to_string()),
         arrow_schema,
-        temp_dir,
-        name.to_string(),
+        ctx.temp_dir.clone(),
     )
-}
-
-fn arrow_to_iceberg_type(dt: &DataType) -> iceberg::spec::PrimitiveType {
-    match dt {
-        DataType::Int64 => iceberg::spec::PrimitiveType::Long,
-        DataType::Int32 => iceberg::spec::PrimitiveType::Int,
-        DataType::Utf8 => iceberg::spec::PrimitiveType::String,
-        DataType::Decimal128(p, s) => iceberg::spec::PrimitiveType::Decimal {
-            precision: *p as u32,
-            scale: *s as u32,
-        },
-        DataType::Date32 => iceberg::spec::PrimitiveType::Date,
-        _ => panic!("Unsupported Arrow type: {:?}", dt),
-    }
 }
 
 async fn flush_batch(engine: &mut StorageEngine, batch: RecordBatch) {
@@ -219,20 +210,14 @@ async fn flush_batch(engine: &mut StorageEngine, batch: RecordBatch) {
 // Region
 // ============================================================================
 
-async fn generate_region(
-    catalog: &Arc<AgoraCatalog>,
-    file_io: FileIO,
-    root_path: &str,
-    output_dir: &Path,
-    count: usize,
-) {
+async fn generate_region(ctx: &GenContext, count: usize) {
     let schema = Arc::new(Schema::new(vec![
         Field::new("r_regionkey", DataType::Int64, false),
         Field::new("r_name", DataType::Utf8, false),
         Field::new("r_comment", DataType::Utf8, false),
     ]));
 
-    let mut engine = create_table(catalog, file_io, root_path, output_dir, "region", schema.clone()).await;
+    let mut engine = create_table(ctx, "region", schema.clone()).await;
 
     let names = vec!["AFRICA", "AMERICA", "ASIA", "EUROPE", "MIDDLE EAST"];
     let comments = vec![
@@ -264,13 +249,7 @@ async fn generate_region(
 // Nation
 // ============================================================================
 
-async fn generate_nation(
-    catalog: &Arc<AgoraCatalog>,
-    file_io: FileIO,
-    root_path: &str,
-    output_dir: &Path,
-    count: usize,
-) {
+async fn generate_nation(ctx: &GenContext, count: usize) {
     let schema = Arc::new(Schema::new(vec![
         Field::new("n_nationkey", DataType::Int64, false),
         Field::new("n_name", DataType::Utf8, false),
@@ -278,7 +257,7 @@ async fn generate_nation(
         Field::new("n_comment", DataType::Utf8, false),
     ]));
 
-    let mut engine = create_table(catalog, file_io, root_path, output_dir, "nation", schema.clone()).await;
+    let mut engine = create_table(ctx, "nation", schema.clone()).await;
 
     let names = vec![
         "ALGERIA",
@@ -333,13 +312,7 @@ async fn generate_nation(
 // Customer
 // ============================================================================
 
-async fn generate_customer(
-    catalog: &Arc<AgoraCatalog>,
-    file_io: FileIO,
-    root_path: &str,
-    output_dir: &Path,
-    count: usize,
-) {
+async fn generate_customer(ctx: &GenContext, count: usize) {
     let schema = Arc::new(Schema::new(vec![
         Field::new("c_custkey", DataType::Int64, false),
         Field::new("c_name", DataType::Utf8, false),
@@ -351,7 +324,7 @@ async fn generate_customer(
         Field::new("c_comment", DataType::Utf8, false),
     ]));
 
-    let mut engine = create_table(catalog, file_io, root_path, output_dir, "customer", schema.clone()).await;
+    let mut engine = create_table(ctx, "customer", schema.clone()).await;
     let mut rng = seed_rng("customer");
 
     let mkt_segments = [
@@ -421,14 +394,7 @@ async fn generate_customer(
 // Orders
 // ============================================================================
 
-async fn generate_orders(
-    catalog: &Arc<AgoraCatalog>,
-    file_io: FileIO,
-    root_path: &str,
-    output_dir: &Path,
-    count: usize,
-    customer_count: usize,
-) {
+async fn generate_orders(ctx: &GenContext, count: usize, customer_count: usize) {
     let schema = Arc::new(Schema::new(vec![
         Field::new("o_orderkey", DataType::Int64, false),
         Field::new("o_custkey", DataType::Int64, false),
@@ -441,7 +407,7 @@ async fn generate_orders(
         Field::new("o_comment", DataType::Utf8, false),
     ]));
 
-    let mut engine = create_table(catalog, file_io, root_path, output_dir, "orders", schema.clone()).await;
+    let mut engine = create_table(ctx, "orders", schema.clone()).await;
     let mut rng = seed_rng("orders");
 
     let priorities = ["1-URGENT", "2-HIGH", "3-MEDIUM", "4-NOT SPECIFIED", "5-LOW"];
@@ -532,14 +498,7 @@ async fn generate_orders(
 // Lineitem
 // ============================================================================
 
-async fn generate_lineitem(
-    catalog: &Arc<AgoraCatalog>,
-    file_io: FileIO,
-    root_path: &str,
-    output_dir: &Path,
-    orders_count: usize,
-    sf: f64,
-) {
+async fn generate_lineitem(ctx: &GenContext, orders_count: usize, sf: f64) {
     let schema = Arc::new(Schema::new(vec![
         Field::new("l_orderkey", DataType::Int64, false),
         Field::new("l_partkey", DataType::Int64, false),
@@ -559,7 +518,7 @@ async fn generate_lineitem(
         Field::new("l_comment", DataType::Utf8, false),
     ]));
 
-    let mut engine = create_table(catalog, file_io, root_path, output_dir, "lineitem", schema.clone()).await;
+    let mut engine = create_table(ctx, "lineitem", schema.clone()).await;
     let mut rng = seed_rng("lineitem");
 
     let return_flags = ["N", "R", "A"];
@@ -681,13 +640,7 @@ async fn generate_lineitem(
 // Supplier
 // ============================================================================
 
-async fn generate_supplier(
-    catalog: &Arc<AgoraCatalog>,
-    file_io: FileIO,
-    root_path: &str,
-    output_dir: &Path,
-    count: usize,
-) {
+async fn generate_supplier(ctx: &GenContext, count: usize) {
     let schema = Arc::new(Schema::new(vec![
         Field::new("s_suppkey", DataType::Int64, false),
         Field::new("s_name", DataType::Utf8, false),
@@ -698,7 +651,7 @@ async fn generate_supplier(
         Field::new("s_comment", DataType::Utf8, false),
     ]));
 
-    let mut engine = create_table(catalog, file_io, root_path, output_dir, "supplier", schema.clone()).await;
+    let mut engine = create_table(ctx, "supplier", schema.clone()).await;
     let mut rng = seed_rng("supplier");
 
     let mut keys = Vec::with_capacity(count);
@@ -721,9 +674,8 @@ async fn generate_supplier(
             rng.gen_range(100..1000),
             rng.gen_range(1000..10000)
         ));
-        acctbals.push(
-            (rng.gen_range(-999..10000) as i128) * 100i128 + rng.gen_range(0..100) as i128,
-        );
+        acctbals
+            .push((rng.gen_range(-999..10000) as i128) * 100i128 + rng.gen_range(0..100) as i128);
         comments.push(format!("Supplier comment {}", i));
     }
 
@@ -756,13 +708,7 @@ async fn generate_supplier(
 // Part
 // ============================================================================
 
-async fn generate_part(
-    catalog: &Arc<AgoraCatalog>,
-    file_io: FileIO,
-    root_path: &str,
-    output_dir: &Path,
-    count: usize,
-) {
+async fn generate_part(ctx: &GenContext, count: usize) {
     let schema = Arc::new(Schema::new(vec![
         Field::new("p_partkey", DataType::Int64, false),
         Field::new("p_name", DataType::Utf8, false),
@@ -775,49 +721,151 @@ async fn generate_part(
         Field::new("p_comment", DataType::Utf8, false),
     ]));
 
-    let mut engine = create_table(catalog, file_io, root_path, output_dir, "part", schema.clone()).await;
+    let mut engine = create_table(ctx, "part", schema.clone()).await;
     let mut rng = seed_rng("part");
 
     let colors = [
-        "almond", "antique", "aquamarine", "azure", "beige",
-        "bisque", "black", "blanched", "blue", "blush",
-        "brown", "burlywood", "burnished", "chartreuse", "chocolate",
-        "coral", "cornflower", "cornsilk", "cream", "cyan",
-        "dark", "deep", "dim", "dodger", "drab",
-        "firebrick", "floral", "forest", "frosted", "gainsboro",
-        "ghost", "goldenrod", "green", "grey", "honeydew",
-        "hot", "indian", "ivory", "khaki", "lace",
-        "lavender", "lawn", "lemon", "light", "lime",
-        "linen", "magenta", "maroon", "medium", "metallic",
-        "midnight", "mint", "misty", "moccasin", "navajo",
-        "navy", "olive", "orange", "orchid", "pale",
-        "papaya", "peach", "peru", "pink", "plum",
-        "powder", "puff", "purple", "red", "rose",
-        "rosy", "royal", "saddle", "salmon", "sandy",
-        "seashell", "sienna", "sky", "slate", "smoke",
-        "snow", "spring", "steel", "tan", "thistle",
-        "tomato", "turquoise", "violet", "wheat", "white",
-        "yellow", "yellowgreen",
+        "almond",
+        "antique",
+        "aquamarine",
+        "azure",
+        "beige",
+        "bisque",
+        "black",
+        "blanched",
+        "blue",
+        "blush",
+        "brown",
+        "burlywood",
+        "burnished",
+        "chartreuse",
+        "chocolate",
+        "coral",
+        "cornflower",
+        "cornsilk",
+        "cream",
+        "cyan",
+        "dark",
+        "deep",
+        "dim",
+        "dodger",
+        "drab",
+        "firebrick",
+        "floral",
+        "forest",
+        "frosted",
+        "gainsboro",
+        "ghost",
+        "goldenrod",
+        "green",
+        "grey",
+        "honeydew",
+        "hot",
+        "indian",
+        "ivory",
+        "khaki",
+        "lace",
+        "lavender",
+        "lawn",
+        "lemon",
+        "light",
+        "lime",
+        "linen",
+        "magenta",
+        "maroon",
+        "medium",
+        "metallic",
+        "midnight",
+        "mint",
+        "misty",
+        "moccasin",
+        "navajo",
+        "navy",
+        "olive",
+        "orange",
+        "orchid",
+        "pale",
+        "papaya",
+        "peach",
+        "peru",
+        "pink",
+        "plum",
+        "powder",
+        "puff",
+        "purple",
+        "red",
+        "rose",
+        "rosy",
+        "royal",
+        "saddle",
+        "salmon",
+        "sandy",
+        "seashell",
+        "sienna",
+        "sky",
+        "slate",
+        "smoke",
+        "snow",
+        "spring",
+        "steel",
+        "tan",
+        "thistle",
+        "tomato",
+        "turquoise",
+        "violet",
+        "wheat",
+        "white",
+        "yellow",
+        "yellowgreen",
     ];
 
     let materials = [
-        "brass", "bronze", "copper", "gold", "lead",
-        "nickel", "plated", "steel", "tin", "titanium",
+        "brass", "bronze", "copper", "gold", "lead", "nickel", "plated", "steel", "tin", "titanium",
     ];
 
-    let types = [
-        "ANODIZED", "BURNISHED", "BRUSHED", "PLATED", "POLISHED",
-    ];
+    let types = ["ANODIZED", "BURNISHED", "BRUSHED", "PLATED", "POLISHED"];
 
     let containers = [
-        "SM CASE", "SM BOX", "SM BAG", "SM JAR", "SM PKG",
-        "SM PACK", "SM CAN", "SM DRUM", "LG CASE", "LG BOX",
-        "LG BAG", "LG JAR", "LG PKG", "LG PACK", "LG CAN",
-        "LG DRUM", "MED CASE", "MED BOX", "MED BAG", "MED JAR",
-        "MED PKG", "MED PACK", "MED CAN", "MED DRUM", "JUMBO CASE",
-        "JUMBO BOX", "JUMBO BAG", "JUMBO JAR", "JUMBO PKG", "JUMBO PACK",
-        "JUMBO CAN", "JUMBO DRUM", "WRAP CASE", "WRAP BOX", "WRAP BAG",
-        "WRAP JAR", "WRAP PKG", "WRAP PACK", "WRAP CAN", "WRAP DRUM",
+        "SM CASE",
+        "SM BOX",
+        "SM BAG",
+        "SM JAR",
+        "SM PKG",
+        "SM PACK",
+        "SM CAN",
+        "SM DRUM",
+        "LG CASE",
+        "LG BOX",
+        "LG BAG",
+        "LG JAR",
+        "LG PKG",
+        "LG PACK",
+        "LG CAN",
+        "LG DRUM",
+        "MED CASE",
+        "MED BOX",
+        "MED BAG",
+        "MED JAR",
+        "MED PKG",
+        "MED PACK",
+        "MED CAN",
+        "MED DRUM",
+        "JUMBO CASE",
+        "JUMBO BOX",
+        "JUMBO BAG",
+        "JUMBO JAR",
+        "JUMBO PKG",
+        "JUMBO PACK",
+        "JUMBO CAN",
+        "JUMBO DRUM",
+        "WRAP CASE",
+        "WRAP BOX",
+        "WRAP BAG",
+        "WRAP JAR",
+        "WRAP PKG",
+        "WRAP PACK",
+        "WRAP CAN",
+        "WRAP DRUM",
     ];
 
     let mut keys = Vec::with_capacity(count);
@@ -956,14 +1004,7 @@ async fn generate_part(
 // Partsupp
 // ============================================================================
 
-async fn generate_partsupp(
-    catalog: &Arc<AgoraCatalog>,
-    file_io: FileIO,
-    root_path: &str,
-    output_dir: &Path,
-    part_count: usize,
-    supplier_count: usize,
-) {
+async fn generate_partsupp(ctx: &GenContext, part_count: usize, supplier_count: usize) {
     let schema = Arc::new(Schema::new(vec![
         Field::new("ps_partkey", DataType::Int64, false),
         Field::new("ps_suppkey", DataType::Int64, false),
@@ -972,7 +1013,7 @@ async fn generate_partsupp(
         Field::new("ps_comment", DataType::Utf8, false),
     ]));
 
-    let mut engine = create_table(catalog, file_io, root_path, output_dir, "partsupp", schema.clone()).await;
+    let mut engine = create_table(ctx, "partsupp", schema.clone()).await;
     let mut rng = seed_rng("partsupp");
 
     let total_rows = part_count * 4;

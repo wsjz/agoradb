@@ -9,26 +9,38 @@
 
 ## 1. 项目概览
 
-Agora DB 是一个**面向 Web3 的多模态列式数据湖** —— 嵌入式、主权化、原生 P2P。
+Agora DB 是一个**去中心化的本地联邦查询语义层** —— 嵌入式、主权化、原生 P2P。
 
-- **核心引擎**: Rust（高性能 + WASM 编译 + 内存安全）
-- **目录系统**: Apache Iceberg（规范实现）
-- **存储格式**: Apache Parquet
+AgoraDB 负责"谁能看什么、数据在哪、查询发到哪"，**不负责"怎么算"**：计算交给可插拔的嵌入式引擎（分析型 DuckDB、事务型 SQLite，浏览器端由 JS 宿主提供），DataFusion 只作为联邦协调器合并多个引擎的 Arrow 结果。规范见 `agoradb_architecture_v3.md`。
+
+- **核心语言**: Rust（WASM 可编译、内存安全）
+- **计算引擎**: DuckDB（分析型 Space）、SQLite（事务型 Space）
+- **联邦协调**: Apache DataFusion + `datafusion-federation`（仅合并，不读文件）
+- **目录系统**: Apache Iceberg（分析型 Space）+ `.agora/` 下的 Space/Location 注册表
+- **存储格式**: Apache Parquet（分析型、P2P 同步单元）、SQLite 文件（事务型）
 - **内存格式**: Apache Arrow
-- **网络传输**: Arrow Flight (gRPC) + libp2p
-- **密码学**: ed25519-dalek + Blake3
-- **浏览器端**: wasm-bindgen + OPFS/IndexedDB
+- **网络传输**: Arrow Flight (gRPC) + libp2p（3.1）
+- **密码学**: ed25519-dalek + Blake3（3.1）
+- **浏览器端**: wasm-bindgen + duckdb-wasm / wa-sqlite（3.2）
 
 ### 架构分层（自底向上）
 
 ```
-Layer 0: 安全与 P2P 网络层 (DID, UCAN, libp2p, Arrow Flight RPC)
-Layer 1: 平台适配层 (统一 VFS: LocalDisk, S3, OPFS, IDB)
-Layer 2: 存储引擎层 (Iceberg 目录 + Parquet + 辅助索引)
-Layer 3: 执行引擎层 (向量化，1024 行 Arrow 批次)
-Layer 4: 查询层 (SQL/Cypher 解析 → 分析器 → 规划器 → 优化器 → 联邦查询)
-Layer 5: 接口层 (SQL API, Cypher API, MCP API, HTTP, WASM, CLI)
+L0: 身份与网络层 (DID, UCAN, libp2p, Arrow Flight, 快照同步)
+L1: 目录与存储层 (Space/Location 注册表, Iceberg 元数据, Parquet 写路径, VFS)
+L2: 引擎抽象层 (QueryEngine trait: DuckDB | SQLite | 宿主引擎)
+L3: 联邦层 (DataFusion 协调器: 按引擎下推 SQL, 合并 Arrow 流)
+L4: 语义层 (<space>.<table> 命名, 语句分类路由, 视图 / UCAN 策略重写)
+L5: 接口层 (SQL API, HTTP, WASM, CLI)
 ```
+
+### 设计原则（不可违背）
+
+1. **计算外包**：不实现扫描、Join、聚合或索引算法；引擎做不到就换引擎或配置引擎，不写算子。
+2. **每个 Space 单写主**；写权限通过 UCAN 显式委托。
+3. **Space（逻辑）与 Location（物理）分离**：多个 Space 可绑定同一 Location，至多一个可写。
+4. **只有不可变文件跨网络**：P2P 只同步 Iceberg 快照；事务型 Space 通过发布 Parquet 快照对外共享。
+5. **默认拒绝**：无对等关系 = 无目录可见性 = 无查询权限。
 
 ---
 
@@ -42,7 +54,7 @@ Layer 5: 接口层 (SQL API, Cypher API, MCP API, HTTP, WASM, CLI)
 | 开发计划 / 路线图 | 中文 |
 | 代码注释 | 英文 |
 | 源代码标识符 | 英文 |
-| 提交信息 (Commit messages) | 英文（祈使语气，例如 "Add Iceberg schema registry"） |
+| 提交信息 (Commit messages) | 英文，**只写一行**（如 `feat(semantic): add views and row/column policies`），不写正文、不加任何尾注 |
 | Issue / PR 描述 | 英文 |
 | API 文档 (docstrings) | 英文 |
 | 面向用户的文档 | 英文 |
@@ -52,9 +64,11 @@ Layer 5: 接口层 (SQL API, Cypher API, MCP API, HTTP, WASM, CLI)
 每次开发会话开始前，Agent **必须**：
 
 1. 读取 `AGENT.md`（本文件）。
-2. 读取 `agoradb_architecture_v1.md` 获取架构上下文。
+2. 读取 `agoradb_architecture_v3.md` 获取架构上下文（v1/v2 仅作历史参考，冲突时以 v3 为准）。
 3. 检查当前 git 分支和状态。
 4. 审阅本次会话的任何待办任务/计划。
+
+**本地工具链**：`rust-toolchain.toml` 固定 stable；首次构建 `agoradb-engine-duckdb` 会从源码编译 DuckDB（约 7 分钟），之后走增量缓存。
 
 ---
 
@@ -88,10 +102,11 @@ Layer 5: 接口层 (SQL API, Cypher API, MCP API, HTTP, WASM, CLI)
 - **禁止**: GPL, LGPL, AGPL, SSPL, 专有软件, "非商业" 许可证
 - **优先选择**: 同等功能下优先 Apache-2.0 而非 MIT
 - **文档化**: 在 `NOTICE` 文件中记录所有依赖及其归属信息
+- **自动检查**: `cargo deny check licenses`（规则见 `deny.toml`）；新增依赖后必须通过
 
 ### 3.3 治理规范
 
-- 所有提交必须带有 DCO 签名 (`git commit -s`)
+- 提交要少：按路线图阶段或完整功能合并提交，不按子步骤拆分
 - 不接受匿名贡献；所有作者身份必须可识别
 - 禁止从 Stack Overflow 或其他来源复制代码而不验证许可证
 - 仓库中禁止包含二进制 blob
@@ -110,13 +125,17 @@ Layer 5: 接口层 (SQL API, Cypher API, MCP API, HTTP, WASM, CLI)
 
 项目遵循严格的分阶段路线图：
 
-| 阶段 | 目标 | 时间 |
+v3 路线图（详见 `agoradb_architecture_v3.md` §12）：
+
+| 阶段 | 目标 | 状态 |
 |-------|------|----------|
-| Phase 0 | 单机存储内核 (Iceberg + Parquet + 基础 SQL) | 第 1-10 周 |
-| Phase 1 | 查询引擎 + 联邦查询框架 | 第 11-20 周 |
-| Phase 2 | 安全 + P2P + 浏览器节点 (WASM) | 第 21-34 周 |
-| Phase 3 | 多模态扩展 (图、向量、全文、BLOB) | 第 35-50 周 |
-| Phase 4 | 生产化加固 | 第 51-60 周 |
+| 3.0-A 引擎 | `QueryEngine` 抽象、DuckDB/SQLite 引擎、Space/Location 目录、单 Space 查询整条下推 | ✅ |
+| 3.0-B 联邦 | DataFusion 协调器 + `datafusion-federation`、跨 Space join、快照 pinning | ✅ |
+| 3.0-C 语义层 | 视图、UCAN 列/行策略重写、枚举抵抗 | 待开始 |
+| 3.0-D 发布 | SQLite → Parquet 快照发布器 | 待开始 |
+| 3.1 网络 | DID/UCAN、Arrow Flight 远端表、libp2p 发现、快照订阅 | 待开始 |
+| 3.2 浏览器 | WASM 核心 + 宿主引擎桥 (duckdb-wasm / wa-sqlite) | 待开始 |
+| 3.3 多模态 | 引擎扩展：DuckDB vss/fts/DuckPGQ、SQLite FTS5/sqlite-vec | 待开始 |
 
 **规则**: 禁止跳阶段。每个阶段的退出标准必须达成后才能进入下一阶段。
 
@@ -125,7 +144,7 @@ Layer 5: 接口层 (SQL API, Cypher API, MCP API, HTTP, WASM, CLI)
 每个任务的执行流程：
 
 1. **读取 AGENT.md**（本文件）。
-2. **读取相关架构章节** 于 `agoradb_architecture_v1.md`。
+2. **读取相关架构章节** 于 `agoradb_architecture_v3.md`。
 3. **沟通与设计** —— **开发代码前必须与用户充分沟通设计方案，经用户确认后方可进入实现阶段。禁止未经确认直接编码。**
 4. **制定计划** —— 如果任务跨多个文件或较为复杂，使用 Plan Mode 制定详细实现计划并获得用户批准。
 5. **先写测试** —— TDD 优先，尤其针对存储和查询引擎。
@@ -188,26 +207,29 @@ Claude Code 提供多种 skills 用于规范开发流程。以下规范按强制
 
 ```
 agoradb/
-├── Cargo.toml              # 工作区根
-├── LICENSE                 # Apache-2.0
-├── NOTICE                  # 依赖归属
-├── AGENT.md                # 本文件（英文版）
-├── AGENT.zh.md             # 本文件（中文版）
-├── agoradb_architecture_v1.md
+├── Cargo.toml                  # 工作区根；所有共享依赖版本在 [workspace.dependencies] 统一锁定
+├── Cargo.lock                  # 已提交（duckdb 精确锁版）
+├── rust-toolchain.toml         # stable + rustfmt + clippy
+├── deny.toml                   # cargo-deny 许可证白名单
+├── LICENSE / NOTICE            # Apache-2.0 / 依赖归属
+├── AGENT.md                    # 本文件
+├── agoradb_architecture_v3.md  # 规范架构（v1/v2 为历史）
 ├── crates/
-│   ├── agoradb-core/       # 核心类型、错误定义
-│   ├── agoradb-catalog/    # Iceberg 目录实现
-│   ├── agoradb-storage/    # Parquet I/O、VFS、索引
-│   ├── agoradb-query/      # 解析器、分析器、规划器、优化器
-│   ├── agoradb-execution/  # 向量化执行引擎
-│   ├── agoradb-network/    # Arrow Flight、P2P、libp2p
-│   ├── agoradb-security/   # DID、UCAN、密码学
-│   ├── agoradb-wasm/       # 浏览器 WASM 构建
-│   └── agoradb-cli/        # 命令行界面
-├── tests/                  # 集成测试
-├── benches/                # 性能基准测试
-└── docs/                   # 用户和开发者文档
+│   ├── agoradb-core/           # 错误、SpaceUri、SpaceKind/EngineKind/AccessMode
+│   ├── agoradb-vfs/            # OpenDAL VFS（3.1 接入）
+│   ├── agoradb-catalog/        # Iceberg Catalog + Space/Location 注册表 + 快照解析
+│   ├── agoradb-storage/        # Parquet 写路径、Compaction
+│   ├── agoradb-engine/         # QueryEngine trait、TableSource、BlockingWorker
+│   ├── agoradb-engine-duckdb/  # 分析型引擎（bundled DuckDB）
+│   ├── agoradb-engine-sqlite/  # 事务型引擎（SQLite 行 → Arrow）
+│   ├── agoradb-semantic/       # CREATE/DROP/SET SPACE、语句分类、<space>.<table> 补全
+│   ├── agoradb-federation/     # DataFusion 协调器、EngineSqlExecutor
+│   └── agoradb-node/           # AgoraSession、EngineRegistry、路由
+├── tests/                      # agoradb-tests（TPC-H Q1–Q5）+ tools/data-gen
+└── docs/                       # 用户和开发者文档（gitignored）
 ```
+
+计划中：`agoradb-identity`、`agoradb-network`（3.1），`agoradb-wasm`（3.2），`agoradb-cli`。
 
 ---
 
@@ -232,21 +254,20 @@ agoradb/
 
 | 概念 | 代码标识符 | 说明 |
 |---------|-----------------|---------|
-| Space | `Space` | 主权单元 |
+| Space | `Space` | 主权单元（逻辑），SQL 限定名 `<space>.<table>` |
+| Location | `Location` | 物理存放位置（Iceberg namespace 或 SQLite 文件），可被多个 Space 绑定 |
+| SpaceKind | `SpaceKind` | `Analytical`（Iceberg + Parquet）/ `Transactional`（SQLite） |
+| Engine | `QueryEngine` / `EngineKind` | 计算引擎（DuckDB / SQLite / 宿主） |
 | Node | `Node` | 对等实体 |
 | Catalog | `Catalog` | 本地元数据注册表 |
 | Snapshot | `Snapshot` | 不可变的 Iceberg 快照 |
 | Manifest | `Manifest` | 文件清单 |
-| Mode | `Mode` | 数据模态 (TABLE/GRAPH/VECTOR/FTS/BLOB) |
 | UCAN | `Ucan` / `UCAN` | 能力令牌 |
 | DID | `Did` / `DID` | 去中心化身份 |
 | VFS | `Vfs` / `VFS` | 虚拟文件系统 |
 | OPFS | `Opfs` / `OPFS` | 源私有文件系统 |
 | CID | `Cid` / `CID` | 内容标识符 |
-| CSR | `Csr` / `CSR` | 压缩稀疏行（图索引） |
-| HNSW | `Hnsw` / `HNSW` | 分层可导航小世界 |
 | FTS | `Fts` / `FTS` | 全文搜索 |
-| ART | `Art` / `ART` | 自适应基数树 |
 
 ---
 
@@ -265,17 +286,18 @@ agoradb/
 ### 6.2 测试数据
 
 - 单元测试使用确定性合成数据。
-- 集成基准使用 TPC-H SF1 (1GB)。
+- TPC-H 集成测试使用 SF 0.001，数据由 `cargo run -p test-data-gen -- --scale-factor 0.001 --force` 生成到 `tests/agora-local`（gitignored，不提交）。
+- 需要网络的测试（如 DuckDB `sqlite` 扩展）标记 `#[ignore]`，用 `--features sqlite-scanner-tests -- --ignored` 单独运行。
 - 测试中禁止使用真实用户数据。
 
 ### 6.3 CI 要求
 
 - `cargo fmt --check`
 - `cargo clippy --all-targets --all-features -- -D warnings`
-- `cargo test --all`
+- `cargo test --workspace`
 - `cargo doc --no-deps`（确保无断链）
 - 许可证头检查（通过 `apache-skywalking-eyes` 或类似工具）
-- 依赖许可证审计 (`cargo-deny`)
+- 依赖许可证审计 (`cargo deny check licenses`)
 
 ---
 
@@ -313,7 +335,7 @@ agoradb/
 
 ### 8.2 架构文档
 
-- `agoradb_architecture_v1.md` 是规范原文。
+- `agoradb_architecture_v3.md` 是规范原文；v1、v2 仅作历史参考。
 - 任何架构偏离必须记录并获得批准。
 - 开发实践变更时更新 `AGENT.md`。
 
@@ -348,6 +370,8 @@ agoradb/
 | 日期 | 决策 | 理由 |
 |------|----------|-----------|
 | 2025-05-30 | 初始 AGENT.md 创建 | 为分阶段实现建立开发协议 |
+| 2026-06-08 | 执行内核迁移到 DataFusion（v2） | 放弃自研优化器/执行器 |
+| 2026-09-27 | 转型为去中心化本地联邦查询语义层（v3）：计算交给 DuckDB/SQLite，DataFusion 只做联邦合并 | 自研 OLAP 超出团队范围；差异化在主权、联邦与 P2P，而非算子 |
 
 ---
 

@@ -1,112 +1,81 @@
-# AgoraDB Integration Test Data
+# AgoraDB Integration Tests
 
-This directory contains fixed test datasets used by integration tests.
-All data is generated deterministically so every test run uses the exact
-same Parquet files and Iceberg catalog metadata.
+This crate (`agoradb-tests`) runs system-level tests against a fixed,
+deterministically generated TPC-H dataset. Queries go through
+`AgoraSession`, which pushes them down to DuckDB.
 
 ## Directory Layout
 
 ```
 tests/
-├── Cargo.toml                          # agoradb-tests crate (integration test framework)
+├── Cargo.toml                  # agoradb-tests crate
 ├── src/
 │   ├── lib.rs
-│   └── framework/                      # Shared test utilities
-│       ├── catalog.rs                  # Catalog setup helpers
-│       ├── schema.rs                   # TPC-H schema definitions
-│       └── runner.rs                   # Full pipeline runner
+│   └── framework/
+│       └── catalog.rs          # setup_catalog(), TPCH_SPACE, GENERATE_CMD
 ├── tests/
-│   └── sql_pipeline_test.rs            # End-to-end SQL integration tests
-├── sql-tests/                          # Reserved for convention-based SQL tests
-│   └── README.md
+│   └── tpch_queries.rs         # TPC-H Q1–Q5 via AgoraSession (DuckDB)
+├── sql-tests/                  # Reserved for convention-based SQL tests
 ├── tools/
-│   └── data-gen/                       # Test data generator
-│       ├── Cargo.toml
-│       └── src/main.rs
-└── agora-local/                        # Generated test data (gitignored)
-    └── default/
+│   └── data-gen/               # Test data generator (test-data-gen crate)
+└── agora-local/                # Generated test data (gitignored)
+    ├── .agora/
+    │   ├── spaces.json         # Space registry: analytical Space "tpch"
+    │   └── locations.json
+    └── tpch/                   # Iceberg namespace of Space "tpch"
         ├── .namespace.properties
-        ├── region/
-        │   ├── data/
-        │   └── metadata/
-        ├── nation/
-        │   ├── data/
-        │   └── metadata/
-        ├── customer/
-        │   ├── data/
-        │   └── metadata/
-        ├── orders/
-        │   ├── data/
-        │   └── metadata/
-        └── lineitem/
-            ├── data/
-            └── metadata/
+        ├── region/{data,metadata}/
+        ├── nation/…  customer/…  orders/…  lineitem/…
+        └── supplier/…  part/…  partsupp/…
 ```
 
 ## Generating Test Data
 
+Run from the workspace root:
+
 ```bash
-# Default: SF=0.1 (~76K rows, fast)
-cargo run -p test-data-gen --bin generate-test-data
+# What the TPC-H tests expect (SF 0.001, a few thousand rows)
+cargo run -p test-data-gen --bin generate-test-data -- --scale-factor 0.001 --force
 
-# Force regeneration (overwrite existing data)
-cargo run -p test-data-gen --bin generate-test-data -- --force
-
-# Larger dataset: SF=0.1 (~760K rows)
+# Larger dataset
 cargo run -p test-data-gen --bin generate-test-data -- --scale-factor 0.1 --force
 
-# Custom output directory
-cargo run -p test-data-gen --bin generate-test-data -- --scale-factor 0.1 --output-dir /tmp/agora-test
+# Custom output directory / Space name
+cargo run -p test-data-gen --bin generate-test-data -- --output-dir /tmp/agora-test --space tpch
 ```
+
+`--force` deletes both the Space's data and the `.agora/` registry in the
+output directory; without it the generator refuses to overwrite existing data.
 
 ## Scale Factor Reference
 
-| SF     | region | nation | customer | orders  | lineitem | Total     |
-|--------|--------|--------|----------|---------|----------|-----------|
-| 0.001  | 5      | 25     | 15       | 150     | ~600     | ~795      |
-| 0.01   | 5      | 25     | 150      | 1,500   | ~6,000   | ~7,680    |
-| 0.1    | 5      | 25     | 1,500    | 15,000  | ~60,000  | ~76,530   |
-| 1.0    | 5      | 25     | 15,000   | 150,000 | ~600,000 | ~765,030  |
+| SF    | region | nation | customer | orders  | lineitem  | supplier | part    | partsupp |
+|-------|--------|--------|----------|---------|-----------|----------|---------|----------|
+| 0.001 | 5      | 25     | 15       | 150     | ~600      | 10       | 200     | 800      |
+| 0.01  | 5      | 25     | 150      | 1,500   | ~6,000    | 100      | 2,000   | 8,000    |
+| 0.1   | 5      | 25     | 1,500    | 15,000  | ~60,000   | 1,000    | 20,000  | 80,000   |
+| 1.0   | 5      | 25     | 15,000   | 150,000 | ~600,000  | 10,000   | 200,000 | 800,000  |
 
-Row group size is fixed at 1024 rows, so `lineitem` at SF=0.1 produces
-~60 row groups (enough to exercise morsel-level parallelism).
-
-## Tables
-
-All tables follow the TPC-H schema:
-
-| Table      | Primary Key      | Description                |
-|------------|------------------|----------------------------|
-| `region`   | `r_regionkey`    | 5 regions (Africa, etc.)   |
-| `nation`   | `n_nationkey`    | 25 nations                 |
-| `customer` | `c_custkey`      | Customers with demographics|
-| `orders`   | `o_orderkey`     | Purchase orders            |
-| `lineitem` | `(l_orderkey,l_linenumber)` | Order line items  |
+Each 1024-row batch is flushed as its own Parquet file and Iceberg snapshot.
 
 ## Deterministic Generation
 
-Data is generated with fixed-seed PRNGs (seed per table).
-Running the generator with the same `--scale-factor` always produces
-bit-identical output, so tests are reproducible across machines and time.
+Every table uses a fixed-seed PRNG, so the same `--scale-factor` always
+produces the same rows on every machine.
 
 ## Running Integration Tests
 
 ```bash
-# Run all integration tests
 cargo test -p agoradb-tests
-
-# Run specific test
-cargo test -p agoradb-tests --test sql_pipeline_test
 ```
+
+Tests address tables as `tpch.<table>` or, with the session's default Space
+set to `tpch`, as bare `<table>`.
 
 ## Manual Inspection
 
-You can inspect the generated Parquet files with any parquet reader:
+The data files are plain Parquet:
 
 ```bash
-# Python + pyarrow
-python -c "import pyarrow.parquet as pq; print(pq.read_table('tests/agora-local/default/lineitem/data/*.parquet').to_pandas())"
-
-# DuckDB
-duckdb -c "SELECT COUNT(*) FROM 'tests/agora-local/default/lineitem/data/*.parquet'"
+duckdb -c "SELECT count(*) FROM 'tests/agora-local/tpch/lineitem/data/*.parquet'"
 ```

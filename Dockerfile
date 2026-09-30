@@ -1,74 +1,28 @@
+# AgoraDB test image: builds the workspace and runs the full test suite,
+# including TPC-H Q1-Q5 against freshly generated SF 0.001 data.
+#
+#   docker build -t agoradb-tests .
+#   docker run --rm agoradb-tests
+
 # Stage 1: Builder
 FROM rust:latest AS builder
 
 WORKDIR /app
 
-# Install build dependencies
-RUN apt-get update && apt-get install -y pkg-config libssl-dev \
+# duckdb / rusqlite `bundled` compile C and C++ sources.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        pkg-config libssl-dev clang \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy manifests first for layer caching
-COPY Cargo.toml Cargo.lock rustfmt.toml .clippy.toml ./
-COPY crates/agoradb-core/Cargo.toml ./crates/agoradb-core/
-COPY crates/agoradb-vfs/Cargo.toml ./crates/agoradb-vfs/
-COPY crates/agoradb-catalog/Cargo.toml ./crates/agoradb-catalog/
-COPY crates/agoradb-storage/Cargo.toml ./crates/agoradb-storage/
+COPY Cargo.toml Cargo.lock rust-toolchain.toml rustfmt.toml .clippy.toml ./
+COPY .cargo ./.cargo
+COPY crates ./crates
+COPY tests ./tests
 
-# Create dummy source files to cache dependency build
-RUN mkdir -p crates/agoradb-core/src crates/agoradb-vfs/src \
-    crates/agoradb-catalog/src crates/agoradb-storage/src \
-    crates/agoradb-storage/tests
-RUN echo 'fn main(){}' > crates/agoradb-core/src/lib.rs \
-    && echo 'fn main(){}' > crates/agoradb-vfs/src/lib.rs \
-    && echo 'fn main(){}' > crates/agoradb-catalog/src/lib.rs \
-    && echo 'fn main(){}' > crates/agoradb-storage/src/lib.rs \
-    && echo 'fn main(){}' > crates/agoradb-storage/tests/integration_test.rs \
-    && echo 'fn main(){}' > crates/agoradb-storage/tests/pushdown_test.rs \
-    && echo 'fn main(){}' > crates/agoradb-storage/tests/compaction_test.rs \
-    && echo 'fn main(){}' > crates/agoradb-storage/tests/tpc_h_integration.rs
+# Build every test binary (the DuckDB C++ build dominates: several minutes).
+RUN cargo test --workspace --no-run
 
-# Build dependencies (cached layer)
-RUN cargo build --tests 2>/dev/null || true
+# Generate the TPC-H fixture used by tests/tests/tpch_queries.rs.
+RUN cargo run -p test-data-gen --bin generate-test-data -- --scale-factor 0.001 --force
 
-# Copy actual source code
-COPY crates/ ./crates/
-
-# Build all tests
-RUN cargo test --test integration_test --no-run
-RUN cargo test --test pushdown_test --no-run
-RUN cargo test --test compaction_test --no-run
-RUN cargo test --test tpc_h_integration --no-run
-
-# Stage 2: Runtime
-FROM debian:trixie-slim AS runtime
-
-RUN apt-get update && apt-get install -y ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
-
-WORKDIR /app
-
-# Copy test binaries
-COPY --from=builder /app/target/debug/deps/integration_test* ./
-COPY --from=builder /app/target/debug/deps/pushdown_test* ./
-COPY --from=builder /app/target/debug/deps/compaction_test* ./
-COPY --from=builder /app/target/debug/deps/tpc_h_integration* ./
-
-# Create run script
-RUN echo '#!/bin/bash\n\
-set -e\n\
-echo "=== AgoraDB Phase 0 Tests ==="\n\
-for test in integration_test pushdown_test compaction_test tpc_h_integration; do\n\
-    bin=$(ls ${test}-* 2>/dev/null | head -1)\n\
-    if [ -n "$bin" ]; then\n\
-        echo "Running $test..."\n\
-        ./"$bin" --nocapture\n\
-    else\n\
-        echo "WARNING: $test binary not found"\n\
-    fi\n\
-done\n\
-echo "=== All tests passed ==="\n\
-' > /app/run_tests.sh && chmod +x /app/run_tests.sh
-
-VOLUME ["/app/data"]
-
-CMD ["/app/run_tests.sh"]
+CMD ["cargo", "test", "--workspace"]

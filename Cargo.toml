@@ -9,8 +9,39 @@ license = "Apache-2.0"
 authors = ["The AgoraDB Authors"]
 
 [workspace.dependencies]
+# Async runtime and utilities
 tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+async-trait = "0.1"
+futures = "0.3"
+
+# Errors, serialization, misc
 thiserror = "1"
-memmap2 = "0.9"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 uuid = { version = "1", features = ["v4"] }
-datafusion = "51"
+bytes = "1"
+bitflags = "2"
+tracing = "0.1"
+
+# Arrow / Parquet / Iceberg — all pinned to the arrow 58 line.
+arrow = "58"
+arrow-array = "58"
+arrow-schema = "58"
+arrow-select = "58"
+arrow-cast = { version = "58", features = ["prettyprint"] }
+parquet = { version = "58", features = ["arrow", "zstd"] }
+iceberg = "0.10.1"
+
+# Federation coordinator (DataFusion 54 == arrow 58). Do NOT bump to 55 (arrow 59).
+datafusion = "54"
+datafusion-federation = { version = "=0.5.5", features = ["sql"] }
+sqlparser = { version = "0.62", features = ["visitor"] }
+
+# Engines
+duckdb = { version = "=1.10505.0", features = ["bundled", "parquet"] }
+rusqlite = { version = "0.40", features = ["bundled", "column_decltype"] }
+
+# Dev
+tempfile = "3"
+tokio-test = "0.4"

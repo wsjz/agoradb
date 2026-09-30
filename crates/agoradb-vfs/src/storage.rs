@@ -18,6 +18,8 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use futures::stream::BoxStream;
+use futures::StreamExt;
 use iceberg::io::{
     FileMetadata, FileRead, FileWrite, InputFile, OutputFile, Storage, StorageConfig,
     StorageFactory,
@@ -224,6 +226,19 @@ impl Storage for OpenDalStorage {
                 format!("Failed to delete prefix {path}: {e}"),
             )
         })
+    }
+
+    async fn delete_stream(&self, mut paths: BoxStream<'static, String>) -> Result<()> {
+        let op = self.operator()?;
+        while let Some(path) = paths.next().await {
+            op.delete(&path).await.map_err(|e| {
+                Error::new(
+                    ErrorKind::Unexpected,
+                    format!("Failed to delete {path}: {e}"),
+                )
+            })?;
+        }
+        Ok(())
     }
 
     fn new_input(&self, path: &str) -> Result<InputFile> {

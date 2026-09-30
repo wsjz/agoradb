@@ -12,13 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! AgoraDB catalog: an [`iceberg::Catalog`] implementation over a local
+//! directory tree, plus the Space/Location registries that make up the
+//! node-level namespace and the snapshot resolution engines rely on.
+
 pub mod catalog;
-pub mod datafusion_bridge;
-pub mod datafusion_sink;
-pub mod parquet_util;
-pub mod scan_provider;
+pub mod registry;
+pub mod resolve;
+pub mod space;
 
 pub use catalog::AgoraCatalog;
-pub use datafusion_bridge::{AgoraCatalogProvider, IcebergTableProvider};
-pub use datafusion_sink::IcebergDataSink;
-pub use scan_provider::StorageScanProvider;
+pub use resolve::ResolvedTable;
+pub use space::{Location, LocationFormat, LocationId, Space};

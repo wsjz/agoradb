@@ -58,13 +58,13 @@ async fn test_compaction_merges_multiple_files() {
         .unwrap();
 
     let arrow_schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+    let table_ident = TableIdent::from_strs(["default", "compact_test"]).unwrap();
     let mut engine = StorageEngine::new_with_catalog(
         catalog.clone(),
         file_io.clone(),
-        &root_path,
+        table_ident.clone(),
         arrow_schema.clone(),
         temp_dir.path().to_path_buf(),
-        "compact_test".to_string(),
     );
 
     // Write 3 separate files (each flush creates one file)
@@ -79,7 +79,6 @@ async fn test_compaction_merges_multiple_files() {
     }
 
     // Verify 9 rows before compaction
-    let table_ident = TableIdent::from_strs(["default", "compact_test"]).unwrap();
     let table = catalog.load_table(&table_ident).await.unwrap();
     let scan = table.scan().build().unwrap();
     let mut stream = scan.to_arrow().await.unwrap();
@@ -90,13 +89,17 @@ async fn test_compaction_merges_multiple_files() {
     assert_eq!(total_before, 9);
 
     // Compact
-    let compaction = CompactionService::new(catalog.clone(), file_io.clone(), &root_path, temp_dir.path().to_path_buf());
+    let compaction = CompactionService::new(
+        catalog.clone(),
+        file_io.clone(),
+        temp_dir.path().to_path_buf(),
+    );
     compaction.compact_table(&table_ident).await.unwrap();
 
     // After compaction: 18 rows total.
     // The CompactionService uses fast_append which adds the merged file
-    // without removing the original files (overwrite not available in
-    // iceberg-rust 0.9). This is expected Phase 0 behavior.
+    // without removing the original files (overwrite is not wired up yet).
+    // This is expected Phase 0 behavior.
     let table = catalog.load_table(&table_ident).await.unwrap();
     let scan = table.scan().build().unwrap();
     let mut stream = scan.to_arrow().await.unwrap();

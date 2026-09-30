@@ -12,4 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+/// Number of buffered rows after which [`AppendBuffer`](https://docs.rs/agoradb-storage) flushes.
 pub const APPEND_BUFFER_FLUSH_THRESHOLD_ROWS: usize = 10_000;
+
+/// Number of rows per Arrow batch produced by engines that convert row-oriented results.
+pub const ENGINE_BATCH_ROWS: usize = 1024;

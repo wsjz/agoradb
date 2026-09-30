@@ -21,8 +21,8 @@ use arrow_array::{
 };
 use arrow_schema::{DataType, Field, Schema};
 use futures::StreamExt;
-use iceberg::spec::{NestedField, PrimitiveType, Schema as IcebergSchema, Type};
 use iceberg::io::FileIO;
+use iceberg::spec::{NestedField, PrimitiveType, Schema as IcebergSchema, Type};
 use iceberg::{Catalog, NamespaceIdent, TableCreation, TableIdent};
 
 fn tpch_region_schema() -> Schema {
@@ -128,7 +128,6 @@ fn arrow_to_iceberg_schema(arrow_schema: &Schema) -> IcebergSchema {
 async fn create_and_load_table(
     catalog: Arc<AgoraCatalog>,
     file_io: FileIO,
-    root_path: &str,
     namespace: &NamespaceIdent,
     name: &str,
     arrow_schema: Arc<Schema>,
@@ -147,19 +146,18 @@ async fn create_and_load_table(
         .unwrap();
 
     // 2. Write batch via StorageEngine.
+    let table_ident = TableIdent::new(namespace.clone(), name.to_string());
     let mut engine = StorageEngine::new_with_catalog(
         catalog.clone(),
         file_io.clone(),
-        root_path,
+        table_ident.clone(),
         arrow_schema,
         temp_dir.to_path_buf(),
-        name.to_string(),
     );
     engine.append(batch).await.unwrap();
     engine.flush().await.unwrap();
 
     // 3. Read back via TableScan, collecting all batches.
-    let table_ident = TableIdent::from_strs(["default", name]).unwrap();
     let table = catalog.load_table(&table_ident).await.unwrap();
     let scan = table.scan().build().unwrap();
     let mut stream = scan.to_arrow().await.unwrap();
@@ -202,7 +200,6 @@ async fn test_tpch_region_table() {
     let rows = create_and_load_table(
         catalog,
         file_io.clone(),
-        &root_path,
         &namespace,
         "region",
         arrow_schema,
@@ -243,7 +240,6 @@ async fn test_tpch_nation_table() {
     let rows = create_and_load_table(
         catalog,
         file_io.clone(),
-        &root_path,
         &namespace,
         "nation",
         arrow_schema,
@@ -292,7 +288,6 @@ async fn test_tpch_customer_table() {
     let rows = create_and_load_table(
         catalog,
         file_io.clone(),
-        &root_path,
         &namespace,
         "customer",
         arrow_schema,
@@ -344,7 +339,6 @@ async fn test_tpch_orders_table() {
     let rows = create_and_load_table(
         catalog,
         file_io.clone(),
-        &root_path,
         &namespace,
         "orders",
         arrow_schema,
@@ -417,7 +411,6 @@ async fn test_tpch_lineitem_table() {
     let rows = create_and_load_table(
         catalog,
         file_io.clone(),
-        &root_path,
         &namespace,
         "lineitem",
         arrow_schema,

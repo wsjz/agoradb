@@ -5,3 +5,4 @@ target/
 Dockerfile
 .dockerignore
 .claude/
+tests/agora-local/

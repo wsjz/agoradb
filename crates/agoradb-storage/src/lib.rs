@@ -31,14 +31,17 @@ pub mod compaction;
 
 use buffer::AppendBuffer;
 
-/// The main storage engine for AgoraDB.
+/// Append-only Parquet writer for one Iceberg table.
+///
+/// Batches are buffered in memory, flushed to a Parquet file under the
+/// table's own `data/` directory and committed to the table as a new
+/// snapshot via an Iceberg fast-append transaction.
 pub struct StorageEngine {
     catalog: Arc<dyn Catalog>,
     file_io: FileIO,
-    root_path: String,
+    table: TableIdent,
     buffer: AppendBuffer,
     temp_dir: PathBuf,
-    table_name: String,
 }
 
 impl StorageEngine {
@@ -46,38 +49,42 @@ impl StorageEngine {
     pub fn new_with_catalog<C: Catalog + 'static>(
         catalog: Arc<C>,
         file_io: FileIO,
-        root_path: impl Into<String>,
+        table: TableIdent,
         schema: SchemaRef,
         temp_dir: PathBuf,
-        table_name: String,
     ) -> Self {
-        Self {
-            catalog: catalog as Arc<dyn Catalog>,
+        Self::new(
+            catalog as Arc<dyn Catalog>,
             file_io,
-            root_path: root_path.into(),
-            buffer: AppendBuffer::new(schema),
+            table,
+            schema,
             temp_dir,
-            table_name,
-        }
+        )
     }
 
-    /// Create a new [`StorageEngine`] from a dyn catalog trait object.
+    /// Create a new [`StorageEngine`] writing to `table`.
+    ///
+    /// `temp_dir` must be a local directory; Parquet files are staged there
+    /// before being uploaded through `file_io`.
     pub fn new(
         catalog: Arc<dyn Catalog>,
         file_io: FileIO,
-        root_path: impl Into<String>,
+        table: TableIdent,
         schema: SchemaRef,
         temp_dir: PathBuf,
-        table_name: String,
     ) -> Self {
         Self {
             catalog,
             file_io,
-            root_path: root_path.into(),
+            table,
             buffer: AppendBuffer::new(schema),
             temp_dir,
-            table_name,
         }
+    }
+
+    /// The table this engine writes to.
+    pub fn table(&self) -> &TableIdent {
+        &self.table
     }
 
     /// Append a RecordBatch to the buffer.
@@ -122,10 +129,14 @@ impl StorageEngine {
             .map_err(|e| StorageError::FlushFailed(e.to_string()))?;
         let file_size = std::fs::metadata(&temp_file_path)?.len() as u64;
 
-        // 3. Upload via catalog's file_io.
-        let space_data_dir = format!("{}/data", self.root_path);
-        let target_filename = format!("{}.parquet", uuid::Uuid::new_v4());
-        let target_path = format!("{}/{}", space_data_dir, target_filename);
+        // 3. Load the table so the data file lands under its own location.
+        let table = self
+            .catalog
+            .load_table(&self.table)
+            .await
+            .map_err(|e| StorageError::FlushFailed(e.to_string()))?;
+        let data_dir = format!("{}/data", table.metadata().location());
+        let target_path = format!("{}/{}.parquet", data_dir, uuid::Uuid::new_v4());
 
         let output = self
             .file_io
@@ -149,13 +160,6 @@ impl StorageEngine {
             .map_err(|e| StorageError::FlushFailed(e.to_string()))?;
 
         // 5. Iceberg Transaction Commit.
-        let table_ident = TableIdent::from_strs(["default", &self.table_name])
-            .map_err(|e| StorageError::FlushFailed(e.to_string()))?;
-        let table = self
-            .catalog
-            .load_table(&table_ident)
-            .await
-            .map_err(|e| StorageError::FlushFailed(e.to_string()))?;
         let tx = Transaction::new(&table);
         let action = tx
             .fast_append()

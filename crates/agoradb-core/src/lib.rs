@@ -12,37 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Core types shared by every AgoraDB crate: errors, Space identity and constants.
+//!
+//! This crate is deliberately dependency-free (apart from `thiserror`) so that
+//! it can be used by engines, the catalog and the federation layer alike.
+
 pub mod constants;
 pub mod error;
-pub mod operator;
-pub mod schema_provider;
 pub mod space;
-pub mod stage;
 
 pub use constants::*;
-pub use error::{
-    AgoraError, CatalogError, CompactionError, ExecutionError, Result, StorageError, VfsError,
-};
-pub use operator::{AggFunction, DataType, JoinType, OperatorSpec, PredicateDef};
-pub use schema_provider::SchemaProvider;
-pub use space::{Mode, SpaceUri};
-pub use stage::{
-    ExchangeSpec, ExchangeType, ExecutionPlan, GlobalStateId, Partitioning, PipelineId,
-    SortDirection, Stage, StageId, StagePlan,
-};
-
-/// A unit of parallel work — a fixed-size row range within a single Parquet file.
-/// The scheduler assigns morsels to worker threads. Default size: 10K rows.
-#[derive(Debug, Clone)]
-pub struct Morsel {
-    pub file_path: String,
-    pub row_start: usize,
-    pub row_count: usize,
-}
-
-/// Supported VFS backend schemes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum VfsScheme {
-    File,
-    S3,
-}
+pub use error::{AgoraError, CatalogError, CompactionError, Result, StorageError};
+pub use space::{AccessMode, CreateSpaceRequest, EngineKind, SpaceKind, SpaceUri};

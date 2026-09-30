@@ -13,11 +13,10 @@ path = "src/main.rs"
 agoradb-catalog = { path = "../../../crates/agoradb-catalog" }
 agoradb-storage = { path = "../../../crates/agoradb-storage" }
 agoradb-core = { path = "../../../crates/agoradb-core" }
-arrow-array = "57"
-arrow-schema = "57"
-arrow = "57"
-iceberg = "0.9"
+arrow = { workspace = true }
+arrow-array = { workspace = true }
+arrow-schema = { workspace = true }
+iceberg = { workspace = true }
 tokio = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 rand = { version = "0.8", features = ["small_rng"] }
-uuid = { workspace = true }

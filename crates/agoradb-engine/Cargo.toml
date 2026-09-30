@@ -1,0 +1,21 @@
+[package]
+name = "agoradb-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Pluggable query-engine abstraction for AgoraDB"
+
+[dependencies]
+agoradb-core = { path = "../agoradb-core" }
+arrow-array = { workspace = true }
+arrow-schema = { workspace = true }
+async-trait = { workspace = true }
+bitflags = { workspace = true }
+futures = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+
+[dev-dependencies]
+tokio-test = { workspace = true }

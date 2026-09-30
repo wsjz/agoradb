@@ -29,7 +29,6 @@ use std::sync::Arc;
 pub struct CompactionService {
     catalog: Arc<dyn Catalog>,
     file_io: FileIO,
-    root_path: String,
     #[allow(dead_code)]
     target_file_size: usize,
     temp_dir: PathBuf,
@@ -40,16 +39,12 @@ impl CompactionService {
     pub const DEFAULT_TARGET_FILE_SIZE: usize = 128 * 1024 * 1024;
 
     /// Create a new [`CompactionService`].
-    pub fn new(
-        catalog: Arc<dyn Catalog>,
-        file_io: FileIO,
-        root_path: impl Into<String>,
-        temp_dir: PathBuf,
-    ) -> Self {
+    ///
+    /// `temp_dir` must be a local directory used to stage merged Parquet files.
+    pub fn new(catalog: Arc<dyn Catalog>, file_io: FileIO, temp_dir: PathBuf) -> Self {
         Self {
             catalog,
             file_io,
-            root_path: root_path.into(),
             target_file_size: Self::DEFAULT_TARGET_FILE_SIZE,
             temp_dir,
         }
@@ -59,16 +54,9 @@ impl CompactionService {
     pub fn new_with_catalog<C: Catalog + 'static>(
         catalog: Arc<C>,
         file_io: FileIO,
-        root_path: impl Into<String>,
         temp_dir: PathBuf,
     ) -> Self {
-        Self {
-            catalog: catalog as Arc<dyn Catalog>,
-            file_io,
-            root_path: root_path.into(),
-            target_file_size: Self::DEFAULT_TARGET_FILE_SIZE,
-            temp_dir,
-        }
+        Self::new(catalog as Arc<dyn Catalog>, file_io, temp_dir)
     }
 
     /// Compact all data files in a table into a single Parquet file.
@@ -138,10 +126,9 @@ impl CompactionService {
             .map_err(|e| CompactionError::CompactionFailed(e.to_string()))?;
         let file_size = std::fs::metadata(&temp_path)?.len() as u64;
 
-        // 5. Upload via file_io.
-        let space_data_dir = format!("{}/data", self.root_path);
-        let target_filename = format!("{}.parquet", uuid::Uuid::new_v4());
-        let target_path = format!("{}/{}", space_data_dir, target_filename);
+        // 5. Upload via file_io into the table's own data directory.
+        let data_dir = format!("{}/data", table.metadata().location());
+        let target_path = format!("{}/{}.parquet", data_dir, uuid::Uuid::new_v4());
 
         let output = self
             .file_io

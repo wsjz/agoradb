@@ -1,0 +1,30 @@
+[package]
+name = "agoradb-engine-duckdb"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "DuckDB analytical engine for AgoraDB"
+
+[features]
+default = []
+# Enables the `#[ignore]`d tests that need the DuckDB `sqlite` extension
+# (downloaded at runtime, requires network or a pre-populated extension dir).
+sqlite-scanner-tests = []
+
+[dependencies]
+agoradb-core = { path = "../agoradb-core" }
+agoradb-engine = { path = "../agoradb-engine" }
+arrow-array = { workspace = true }
+arrow-schema = { workspace = true }
+async-trait = { workspace = true }
+duckdb = { workspace = true, features = ["appender-arrow"] }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+futures = { workspace = true }
+parquet = { workspace = true }
+rusqlite = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true }

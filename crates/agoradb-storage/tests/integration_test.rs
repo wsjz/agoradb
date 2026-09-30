@@ -74,10 +74,9 @@ async fn test_end_to_end_write_read_pipeline() {
     let mut engine = StorageEngine::new_with_catalog(
         catalog.clone(),
         file_io.clone(),
-        &root_path,
+        table_ident.clone(),
         arrow_schema.clone(),
         temp_dir.path().to_path_buf(),
-        "test_table".to_string(),
     );
 
     let batch = RecordBatch::try_new(
@@ -95,15 +94,31 @@ async fn test_end_to_end_write_read_pipeline() {
     engine.flush().await.unwrap();
 
     // 8. Load the table from catalog.
-    let table_ident = TableIdent::from_strs(["default", "test_table"]).unwrap();
     let table = catalog.load_table(&table_ident).await.unwrap();
 
-    // 9. Create a TableScan and read data back.
+    // 9. Data files must live under the table's own data directory, not the catalog root.
+    let expected_data_dir = format!("{}/default/test_table/data/", root_path);
+    let scan = table.scan().build().unwrap();
+    let mut files = scan.plan_files().await.unwrap();
+    let mut file_count = 0;
+    while let Some(task) = files.next().await {
+        let task = task.unwrap();
+        assert!(
+            task.data_file_path().starts_with(&expected_data_dir),
+            "data file {} is not under {}",
+            task.data_file_path(),
+            expected_data_dir
+        );
+        file_count += 1;
+    }
+    assert_eq!(file_count, 1);
+
+    // 10. Create a TableScan and read data back.
     let scan = table.scan().build().unwrap();
     let mut stream = scan.to_arrow().await.unwrap();
     let read_batch = stream.next().await.unwrap().unwrap();
 
-    // 10. Verify the data matches what was written.
+    // 11. Verify the data matches what was written.
     assert_eq!(read_batch.num_rows(), 3);
     let id_col = read_batch
         .column(0)

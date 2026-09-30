@@ -115,11 +115,9 @@ mod tests {
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
         let mut buffer = AppendBuffer::new(schema.clone());
 
-        let batch1 = RecordBatch::try_new(
-            schema.clone(),
-            vec![Arc::new(Int64Array::from(vec![1, 2]))],
-        )
-        .unwrap();
+        let batch1 =
+            RecordBatch::try_new(schema.clone(), vec![Arc::new(Int64Array::from(vec![1, 2]))])
+                .unwrap();
         let batch2 = RecordBatch::try_new(
             schema.clone(),
             vec![Arc::new(Int64Array::from(vec![3, 4, 5]))],
@@ -159,13 +157,18 @@ mod tests {
         // Push exactly 10_000 rows (the threshold)
         let batch = RecordBatch::try_new(
             schema.clone(),
-            vec![Arc::new(Int64Array::from((0..10_000i64).collect::<Vec<_>>()))],
+            vec![Arc::new(Int64Array::from(
+                (0..10_000i64).collect::<Vec<_>>(),
+            ))],
         )
         .unwrap();
         buffer.push(batch);
 
         assert_eq!(buffer.row_count, 10_000);
-        assert!(buffer.should_flush(), "Exactly 10_000 rows should trigger flush");
+        assert!(
+            buffer.should_flush(),
+            "Exactly 10_000 rows should trigger flush"
+        );
     }
 
     #[test]
@@ -176,7 +179,9 @@ mod tests {
         // Push 15_000 rows in one batch (exceeds 10_000 threshold)
         let batch = RecordBatch::try_new(
             schema.clone(),
-            vec![Arc::new(Int64Array::from((0..15_000i64).collect::<Vec<_>>()))],
+            vec![Arc::new(Int64Array::from(
+                (0..15_000i64).collect::<Vec<_>>(),
+            ))],
         )
         .unwrap();
         buffer.push(batch);
@@ -205,6 +210,9 @@ mod tests {
 
         assert_eq!(buffer.row_count, 10_000);
         assert_eq!(buffer.batches.len(), 5);
-        assert!(buffer.should_flush(), "5 x 2000 = 10_000 rows should trigger flush");
+        assert!(
+            buffer.should_flush(),
+            "5 x 2000 = 10_000 rows should trigger flush"
+        );
     }
 }

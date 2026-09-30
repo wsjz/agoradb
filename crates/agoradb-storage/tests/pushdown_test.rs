@@ -12,16 +12,51 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Verifies that Iceberg predicate pushdown works on data written by
+//! [`StorageEngine`] (row-group statistics + row selection).
+
 use std::sync::Arc;
 
-use agoradb_catalog::{AgoraCatalog, StorageScanProvider};
+use agoradb_catalog::AgoraCatalog;
 use agoradb_storage::StorageEngine;
 use arrow_array::{ArrayRef, Int64Array, RecordBatch};
 use arrow_schema::{DataType, Field, Schema};
 use futures::StreamExt;
-use iceberg::expr::Reference;
+use iceberg::expr::{Predicate, Reference};
 use iceberg::spec::{Datum, NestedField, PrimitiveType, Schema as IcebergSchema, Type};
+use iceberg::table::Table;
 use iceberg::{Catalog, NamespaceIdent, TableCreation, TableIdent};
+
+/// Scan `table` at `snapshot_id`, optionally applying `filter`, and return all batches.
+async fn scan_with_filter(
+    table: &Table,
+    snapshot_id: i64,
+    filter: Option<Predicate>,
+) -> Vec<RecordBatch> {
+    let mut builder = table
+        .scan()
+        .snapshot_id(snapshot_id)
+        .with_row_selection_enabled(true);
+    if let Some(predicate) = filter {
+        builder = builder.with_filter(predicate);
+    }
+    let stream = builder.build().unwrap().to_arrow().await.unwrap();
+    stream.map(|r| r.unwrap()).collect().await
+}
+
+fn column_values(batches: &[RecordBatch], column: usize) -> Vec<i64> {
+    batches
+        .iter()
+        .flat_map(|b| {
+            b.column(column)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .values()
+                .to_vec()
+        })
+        .collect()
+}
 
 #[tokio::test]
 async fn test_scan_with_predicate_pushdown() {
@@ -59,13 +94,13 @@ async fn test_scan_with_predicate_pushdown() {
         Field::new("value", DataType::Int64, false),
     ]));
 
+    let table_ident = TableIdent::from_strs(["default", "pushdown_test"]).unwrap();
     let mut engine = StorageEngine::new_with_catalog(
         catalog.clone(),
         file_io.clone(),
-        &root_path,
+        table_ident.clone(),
         arrow_schema.clone(),
         temp_dir.path().to_path_buf(),
-        "pushdown_test".to_string(),
     );
 
     let batch = RecordBatch::try_new(
@@ -80,67 +115,23 @@ async fn test_scan_with_predicate_pushdown() {
     engine.append(batch).await.unwrap();
     engine.flush().await.unwrap();
 
-    let table_ident = TableIdent::from_strs(["default", "pushdown_test"]).unwrap();
     let table = catalog.load_table(&table_ident).await.unwrap();
-    let snapshot = table.metadata().current_snapshot().unwrap();
-    let snapshot_id = snapshot.snapshot_id();
-
-    let space = agoradb_core::SpaceUri::parse("space://test/pushdown_test").unwrap();
+    let snapshot_id = table.metadata().current_snapshot().unwrap().snapshot_id();
 
     // 1. Scan WITHOUT filter — should return all 5 rows
-    let stream = catalog.scan_table(&space, snapshot_id, None).await.unwrap();
-    let batches: Vec<_> = stream.map(|r| r.unwrap()).collect().await;
+    let batches = scan_with_filter(&table, snapshot_id, None).await;
     let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
     assert_eq!(total_rows, 5, "Unfiltered scan should return all 5 rows");
 
     // 2. Scan WITH filter id > 2 — should return rows with id 3, 4, 5
     let predicate = Reference::new("id").greater_than(Datum::long(2));
-    let stream = catalog
-        .scan_table(&space, snapshot_id, Some(predicate))
-        .await
-        .unwrap();
-    let batches: Vec<_> = stream.map(|r| r.unwrap()).collect().await;
-    let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
-    assert_eq!(total_rows, 3, "Filtered scan (id > 2) should return 3 rows");
-
-    let all_ids: Vec<i64> = batches
-        .iter()
-        .flat_map(|b| {
-            b.column(0)
-                .as_any()
-                .downcast_ref::<Int64Array>()
-                .unwrap()
-                .values()
-                .to_vec()
-        })
-        .collect();
-    assert_eq!(all_ids, vec![3, 4, 5]);
+    let batches = scan_with_filter(&table, snapshot_id, Some(predicate)).await;
+    assert_eq!(column_values(&batches, 0), vec![3, 4, 5]);
 
     // 3. Scan WITH filter value >= 40 — should return rows with value 40, 50
     let predicate = Reference::new("value").greater_than_or_equal_to(Datum::long(40));
-    let stream = catalog
-        .scan_table(&space, snapshot_id, Some(predicate))
-        .await
-        .unwrap();
-    let batches: Vec<_> = stream.map(|r| r.unwrap()).collect().await;
-    let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
-    assert_eq!(
-        total_rows, 2,
-        "Filtered scan (value >= 40) should return 2 rows"
-    );
-
-    let all_values: Vec<i64> = batches
-        .iter()
-        .flat_map(|b| {
-            b.column(1)
-                .as_any()
-                .downcast_ref::<Int64Array>()
-                .unwrap()
-                .values()
-                .to_vec()
-        })
-        .collect();
-    assert_eq!(all_values, vec![40, 50]);
+    let batches = scan_with_filter(&table, snapshot_id, Some(predicate)).await;
+    assert_eq!(column_values(&batches, 1), vec![40, 50]);
 }
 
 #[tokio::test]
@@ -177,13 +168,13 @@ async fn test_scan_with_predicate_no_matches() {
         .unwrap();
 
     let arrow_schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+    let table_ident = TableIdent::from_strs(["default", "empty_filter_test"]).unwrap();
     let mut engine = StorageEngine::new_with_catalog(
         catalog.clone(),
         file_io.clone(),
-        &root_path,
+        table_ident.clone(),
         arrow_schema.clone(),
         temp_dir.path().to_path_buf(),
-        "empty_filter_test".to_string(),
     );
 
     let batch = RecordBatch::try_new(
@@ -195,18 +186,11 @@ async fn test_scan_with_predicate_no_matches() {
     engine.append(batch).await.unwrap();
     engine.flush().await.unwrap();
 
-    let table_ident = TableIdent::from_strs(["default", "empty_filter_test"]).unwrap();
     let table = catalog.load_table(&table_ident).await.unwrap();
     let snapshot_id = table.metadata().current_snapshot().unwrap().snapshot_id();
 
-    let space = agoradb_core::SpaceUri::parse("space://test/empty_filter_test").unwrap();
-
     let predicate = Reference::new("id").greater_than(Datum::long(100));
-    let stream = catalog
-        .scan_table(&space, snapshot_id, Some(predicate))
-        .await
-        .unwrap();
-    let batches: Vec<_> = stream.map(|r| r.unwrap()).collect().await;
+    let batches = scan_with_filter(&table, snapshot_id, Some(predicate)).await;
     let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
     assert_eq!(total_rows, 0, "Filter with no matches should return 0 rows");
 }

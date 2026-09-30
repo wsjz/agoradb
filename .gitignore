@@ -2,5 +2,6 @@
 target/
 .idea
 docs
-Cargo.lock
 .claude
+.DS_Store
+tests/agora-local/

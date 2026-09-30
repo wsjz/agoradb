@@ -15,5 +15,3 @@
 //! Shared test framework for AgoraDB integration tests.
 
 pub mod catalog;
-pub mod runner;
-pub mod schema;

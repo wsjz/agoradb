@@ -13,34 +13,64 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::str::FromStr;
+use std::sync::{Arc, RwLock};
 
+use agoradb_core::CatalogError;
 use async_trait::async_trait;
 use iceberg::io::FileIO;
-use iceberg::scan::ArrowRecordBatchStream;
 use iceberg::spec::TableMetadataBuilder;
 use iceberg::table::Table;
+use iceberg::Runtime;
 use iceberg::{
     Catalog, Error, ErrorKind, MetadataLocation, Namespace, NamespaceIdent, Result, TableCommit,
     TableCreation, TableIdent,
 };
 
+use crate::registry::Registry;
+
 /// AgoraDB Catalog implementation backed by [`FileIO`].
 ///
 /// Stores namespaces as directories and tables as subdirectories
-/// containing Iceberg metadata files.
+/// containing Iceberg metadata files. Space and Location registries live in
+/// the hidden `.agora/` directory under the root (see [`crate::registry`]).
 #[derive(Debug, Clone)]
 pub struct AgoraCatalog {
     file_io: FileIO,
     root_path: String,
+    pub(crate) registry: Arc<RwLock<Registry>>,
 }
 
 impl AgoraCatalog {
+    /// Open the catalog at `root_path`, loading the Space/Location registries.
+    pub fn open(
+        file_io: FileIO,
+        root_path: impl Into<String>,
+    ) -> std::result::Result<Self, CatalogError> {
+        let root_path = root_path.into();
+        let registry = Registry::load(Path::new(&root_path))?;
+        Ok(Self {
+            file_io,
+            root_path,
+            registry: Arc::new(RwLock::new(registry)),
+        })
+    }
+
     /// Create a new [`AgoraCatalog`] with the given [`FileIO`] and root path.
+    ///
+    /// Like [`Self::open`], but an unreadable registry is logged and treated
+    /// as empty instead of failing.
     pub fn new(file_io: FileIO, root_path: impl Into<String>) -> Self {
+        let root_path = root_path.into();
+        let registry = Registry::load(Path::new(&root_path)).unwrap_or_else(|e| {
+            tracing::warn!(root = %root_path, error = %e, "could not load space registry");
+            Registry::default()
+        });
         Self {
             file_io,
-            root_path: root_path.into(),
+            root_path,
+            registry: Arc::new(RwLock::new(registry)),
         }
     }
 
@@ -429,18 +459,15 @@ impl Catalog for AgoraCatalog {
             .metadata;
 
         // Write metadata file
-        let metadata_location = MetadataLocation::new_with_table_location(&location);
-        let metadata_file_path = metadata_location.to_string();
-
-        metadata
-            .write_to(&self.file_io, &metadata_file_path)
-            .await?;
+        let metadata_location = MetadataLocation::new_with_metadata(&location, &metadata);
+        metadata.write_to(&self.file_io, &metadata_location).await?;
 
         Table::builder()
+            .runtime(Runtime::try_current()?)
             .file_io(self.file_io.clone())
             .metadata(metadata)
             .identifier(table_ident)
-            .metadata_location(metadata_file_path)
+            .metadata_location(metadata_location.to_string())
             .build()
     }
 
@@ -471,6 +498,7 @@ impl Catalog for AgoraCatalog {
             iceberg::spec::TableMetadata::read_from(&self.file_io, &metadata_file).await?;
 
         Table::builder()
+            .runtime(Runtime::try_current()?)
             .file_io(self.file_io.clone())
             .metadata(metadata)
             .identifier(table.clone())
@@ -492,6 +520,15 @@ impl Catalog for AgoraCatalog {
                 format!("Failed to drop table {table_dir}: {e}"),
             )),
         }
+    }
+
+    /// Drop a table and delete its data.
+    ///
+    /// Tables own their `metadata/` and `data/` directories under the table
+    /// path, so removing the table directory (what [`Self::drop_table`] does)
+    /// already purges every file that belongs to it.
+    async fn purge_table(&self, table: &TableIdent) -> Result<()> {
+        self.drop_table(table).await
     }
 
     /// Check if a table exists in the catalog.
@@ -561,7 +598,7 @@ impl Catalog for AgoraCatalog {
     /// After writing the new metadata file we re-read the latest metadata to
     /// verify our write won the race.  If another commit raced ahead we delete
     /// our stale file and return a retryable error so the caller (typically
-    /// [`Transaction::commit`]) can re-try with the updated state.
+    /// [`iceberg::transaction::Transaction::commit`]) can re-try with the updated state.
     async fn update_table(&self, commit: TableCommit) -> Result<Table> {
         let table_ident = commit.identifier().clone();
 
@@ -573,14 +610,14 @@ impl Catalog for AgoraCatalog {
 
         // 3. Build the new metadata file path.
         let metadata_location = staged_table.metadata_location_result()?;
-        let new_metadata_location = MetadataLocation::from_str(metadata_location)?
-            .with_next_version()
-            .to_string();
+        let next_metadata_location =
+            MetadataLocation::from_str(metadata_location)?.with_next_version();
+        let new_metadata_location = next_metadata_location.to_string();
 
         // 4. Write the new metadata file.
         staged_table
             .metadata()
-            .write_to(staged_table.file_io(), &new_metadata_location)
+            .write_to(staged_table.file_io(), &next_metadata_location)
             .await?;
 
         // 5. Verify: did our write win the race?
@@ -616,206 +653,12 @@ impl Catalog for AgoraCatalog {
 
         // 6. Our write won — return the updated table.
         Table::builder()
+            .runtime(Runtime::try_current()?)
             .file_io(self.file_io.clone())
             .metadata(staged_table.metadata().clone())
             .identifier(table_ident)
             .metadata_location(new_metadata_location)
             .build()
-    }
-}
-
-use crate::scan_provider::StorageScanProvider;
-use agoradb_core::{CatalogError, DataType, ExecutionError, Morsel, SchemaProvider, SpaceUri};
-use futures::StreamExt;
-use iceberg::expr::Predicate;
-use iceberg::spec::{PrimitiveType, Type};
-
-#[async_trait]
-impl StorageScanProvider for AgoraCatalog {
-    async fn scan_table(
-        &self,
-        space: &SpaceUri,
-        snapshot_id: i64,
-        filter: Option<Predicate>,
-    ) -> std::result::Result<ArrowRecordBatchStream, CatalogError> {
-        let table_ident = TableIdent::from_strs(["default", &space.name])
-            .map_err(|e| CatalogError::Iceberg(e.to_string()))?;
-
-        let table = self
-            .load_table(&table_ident)
-            .await
-            .map_err(|e| CatalogError::Iceberg(e.to_string()))?;
-
-        let mut scan_builder = table
-            .scan()
-            .snapshot_id(snapshot_id)
-            .with_row_selection_enabled(true);
-
-        if let Some(predicate) = filter {
-            scan_builder = scan_builder.with_filter(predicate);
-        }
-
-        let scan = scan_builder
-            .build()
-            .map_err(|e| CatalogError::Iceberg(e.to_string()))?;
-
-        scan.to_arrow()
-            .await
-            .map_err(|e| CatalogError::Iceberg(e.to_string()))
-    }
-
-    async fn list_morsels(
-        &self,
-        space: &SpaceUri,
-        snapshot_id: i64,
-        morsel_size: usize,
-    ) -> std::result::Result<Vec<Morsel>, CatalogError> {
-        let table_ident = TableIdent::from_strs(["default", &space.name])
-            .map_err(|e| CatalogError::Iceberg(e.to_string()))?;
-
-        let table = self
-            .load_table(&table_ident)
-            .await
-            .map_err(|e| CatalogError::Iceberg(e.to_string()))?;
-
-        let scan = table
-            .scan()
-            .snapshot_id(snapshot_id)
-            .build()
-            .map_err(|e| CatalogError::Iceberg(e.to_string()))?;
-
-        let mut task_stream = scan
-            .plan_files()
-            .await
-            .map_err(|e| CatalogError::Iceberg(e.to_string()))?;
-
-        let chunk_size = if morsel_size == 0 {
-            10_000
-        } else {
-            morsel_size
-        };
-        let mut morsels = Vec::new();
-
-        while let Some(result) = task_stream.next().await {
-            let task = result.map_err(|e| CatalogError::Iceberg(e.to_string()))?;
-            let path = task.data_file_path().to_string();
-
-            // record_count comes from Iceberg metadata; fall back to reading
-            // the Parquet footer when the metadata field is absent.
-            let total_rows = match task.record_count {
-                Some(n) => n as usize,
-                None => crate::parquet_util::parquet_row_count(&path).map_err(|e| {
-                    CatalogError::Iceberg(format!(
-                        "missing record_count and failed to read parquet footer for {path}: {e}"
-                    ))
-                })?,
-            };
-
-            if total_rows == 0 {
-                continue;
-            }
-
-            let mut row_start = 0usize;
-            while row_start < total_rows {
-                let row_count = chunk_size.min(total_rows - row_start);
-                morsels.push(Morsel {
-                    file_path: path.clone(),
-                    row_start,
-                    row_count,
-                });
-                row_start += row_count;
-            }
-        }
-
-        Ok(morsels)
-    }
-
-    async fn read_morsel(
-        &self,
-        morsel: &Morsel,
-    ) -> std::result::Result<Vec<arrow_array::RecordBatch>, CatalogError> {
-        crate::parquet_util::read_morsel(morsel).await
-    }
-}
-
-// ------------------------------------------------------------------
-// SchemaProvider — bridges catalog metadata to the query analyzer
-// ------------------------------------------------------------------
-
-impl SchemaProvider for AgoraCatalog {
-    fn get_table_schema(
-        &self,
-        table: &str,
-    ) -> std::result::Result<HashMap<String, DataType>, ExecutionError> {
-        futures::executor::block_on(async {
-            // Search all namespaces for a table with the given name.
-            let namespaces = self.list_namespaces(None).await.map_err(|e| {
-                ExecutionError::OperatorError(format!("Failed to list namespaces: {}", e))
-            })?;
-
-            let mut found_table = None;
-            for ns in &namespaces {
-                let tables = self.list_tables(ns).await.map_err(|e| {
-                    ExecutionError::OperatorError(format!(
-                        "Failed to list tables in namespace '{}': {}",
-                        ns, e
-                    ))
-                })?;
-                if let Some(ident) = tables.iter().find(|t| t.name() == table) {
-                    found_table = Some(ident.clone());
-                    break;
-                }
-            }
-
-            let table_ident = found_table.ok_or_else(|| {
-                ExecutionError::OperatorError(format!("Table not found: {}", table))
-            })?;
-
-            let table = self.load_table(&table_ident).await.map_err(|e| {
-                ExecutionError::OperatorError(format!(
-                    "Failed to load table '{}': {}",
-                    table, e
-                ))
-            })?;
-
-            let schema = table.metadata().current_schema();
-            let mut result = HashMap::new();
-            for field in schema.as_struct().fields() {
-                let dt = iceberg_type_to_data_type(&field.field_type).ok_or_else(|| {
-                    ExecutionError::OperatorError(format!(
-                        "Unsupported Iceberg type for column '{}': {:?}",
-                        field.name, field.field_type
-                    ))
-                })?;
-                result.insert(field.name.clone(), dt);
-            }
-            Ok(result)
-        })
-    }
-}
-
-/// Convert an Iceberg [`Type`] to an AgoraDB [`DataType`].
-fn iceberg_type_to_data_type(ty: &Type) -> Option<DataType> {
-    match ty {
-        Type::Primitive(p) => match p {
-            PrimitiveType::Long => Some(DataType::Int64),
-            PrimitiveType::Int => Some(DataType::Int64),
-            PrimitiveType::Double => Some(DataType::Float64),
-            PrimitiveType::Float => Some(DataType::Float64),
-            PrimitiveType::Boolean => Some(DataType::Boolean),
-            PrimitiveType::String => Some(DataType::Utf8),
-            PrimitiveType::Date
-            | PrimitiveType::Time
-            | PrimitiveType::Timestamp
-            | PrimitiveType::Timestamptz
-            | PrimitiveType::TimestampNs
-            | PrimitiveType::TimestamptzNs
-            | PrimitiveType::Decimal { .. }
-            | PrimitiveType::Uuid
-            | PrimitiveType::Binary
-            | PrimitiveType::Fixed(_) => None,
-        },
-        Type::Struct(_) | Type::List(_) | Type::Map(_) => None,
     }
 }
 
@@ -1012,37 +855,5 @@ mod tests {
             updated.properties().get("owner"),
             Some(&"new_team".to_string())
         );
-    }
-
-    #[tokio::test]
-    async fn test_schema_provider() {
-        use agoradb_core::{DataType, SchemaProvider};
-        use iceberg::spec::{NestedField, Schema, Type};
-
-        let (_dir, catalog) = new_test_catalog().await;
-        let ns = NamespaceIdent::new("test_ns".to_string());
-        catalog.create_namespace(&ns, HashMap::new()).await.unwrap();
-
-        let schema = Schema::builder()
-            .with_fields(vec![
-                NestedField::required(1, "id", Type::Primitive(PrimitiveType::Long)).into(),
-                NestedField::required(2, "price", Type::Primitive(PrimitiveType::Double)).into(),
-                NestedField::required(3, "active", Type::Primitive(PrimitiveType::Boolean)).into(),
-                NestedField::required(4, "name", Type::Primitive(PrimitiveType::String)).into(),
-            ])
-            .build()
-            .unwrap();
-
-        let creation = TableCreation::builder()
-            .name("products".to_string())
-            .schema(schema)
-            .build();
-        catalog.create_table(&ns, creation).await.unwrap();
-
-        let table_schema = catalog.get_table_schema("products").unwrap();
-        assert_eq!(table_schema.get("id"), Some(&DataType::Int64));
-        assert_eq!(table_schema.get("price"), Some(&DataType::Float64));
-        assert_eq!(table_schema.get("active"), Some(&DataType::Boolean));
-        assert_eq!(table_schema.get("name"), Some(&DataType::Utf8));
     }
 }
