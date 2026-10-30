@@ -48,15 +48,37 @@ pub struct BoundTable {
 /// A Space whose tables are attached to `engine` and ready to be queried.
 #[derive(Clone)]
 pub struct BoundSpace {
+    /// The name queries use (`<space>.<table>`).
     pub space: String,
+    /// The name the engine knows the Space by, used in pushed-down SQL. It
+    /// differs from `space` for a remote Space mounted under a local name.
+    pub engine_space: String,
     pub engine: Arc<dyn QueryEngine>,
     pub tables: Vec<BoundTable>,
+}
+
+impl BoundSpace {
+    /// A Space the engine knows under the same name.
+    pub fn new(
+        space: impl Into<String>,
+        engine: Arc<dyn QueryEngine>,
+        tables: Vec<BoundTable>,
+    ) -> Self {
+        let space = space.into();
+        Self {
+            engine_space: space.clone(),
+            space,
+            engine,
+            tables,
+        }
+    }
 }
 
 impl std::fmt::Debug for BoundSpace {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BoundSpace")
             .field("space", &self.space)
+            .field("engine_space", &self.engine_space)
             .field("engine", &self.engine.instance_id())
             .field("tables", &self.tables)
             .finish()
@@ -104,11 +126,15 @@ impl Coordinator {
 
         let mut pins = BTreeMap::new();
         for bound in spaces {
-            let executor = Arc::new(EngineSqlExecutor::new(&bound.space, bound.engine.clone()));
+            let executor = Arc::new(EngineSqlExecutor::new(
+                &bound.engine_space,
+                bound.engine.clone(),
+            ));
             let provider = Arc::new(SQLFederationProvider::new(executor));
             let schema_provider = MemorySchemaProvider::new();
             for table in &bound.tables {
-                let remote = AgoraRemoteTable::new(&bound.space, &table.name, table.schema.clone());
+                let remote =
+                    AgoraRemoteTable::new(&bound.engine_space, &table.name, table.schema.clone());
                 let source = Arc::new(SQLTableSource::new_with_table(
                     provider.clone(),
                     Arc::new(remote),

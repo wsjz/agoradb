@@ -132,8 +132,24 @@ impl AgoraSession {
         match parse_single(sql)? {
             AgoraStatement::CreateSpace(request) => {
                 self.deny_principal("CREATE SPACE")?;
+                if request.kind == Some(SpaceKind::Remote) {
+                    return self.create_remote_space(request);
+                }
                 self.catalog.create_space(request).await?;
                 Ok(QueryResult::Empty)
+            }
+            AgoraStatement::ShowIdentity => self.show_identity(),
+            AgoraStatement::IssueUcan(request) => {
+                self.deny_principal("ISSUE UCAN")?;
+                self.issue_ucan(&request)
+            }
+            AgoraStatement::RevokeUcan(id) => {
+                self.deny_principal("REVOKE UCAN")?;
+                self.revoke_ucan(&id)
+            }
+            AgoraStatement::ShowUcans => {
+                self.deny_principal("SHOW UCANS")?;
+                self.show_ucans()
             }
             AgoraStatement::DropSpace(name) => {
                 self.deny_principal("DROP SPACE")?;
@@ -247,6 +263,13 @@ impl AgoraSession {
         &self.engines
     }
 
+    fn remote_is_read_only(space: &Space) -> SessionError {
+        SessionError::Unsupported(format!(
+            "space '{}' is a remote space and read-only",
+            space.name
+        ))
+    }
+
     /// Published Spaces are written only by `PUBLISH SPACE <source>`.
     fn require_writable(&self, space: &Space) -> Result<(), SessionError> {
         match &space.published_from {
@@ -281,6 +304,23 @@ impl AgoraSession {
         spaces: &BTreeSet<String>,
         text: &str,
     ) -> Result<(SchemaRef, RecordBatchStream), SessionError> {
+        let mut remote = false;
+        for name in spaces {
+            remote |= self.space(name)?.kind == SpaceKind::Remote;
+        }
+        if remote {
+            // A node never forwards a peer's query to a third node: the
+            // capability it was presented covers this node's Spaces only.
+            if let Some(p) = &self.principal {
+                return Err(SessionError::PermissionDenied(format!(
+                    "principal '{p}' cannot query remote spaces through this node"
+                )));
+            }
+            // Always federate, so the SQL each owner receives names its
+            // tables by their names on the owner.
+            let coordinator = self.federate(spaces).await?;
+            return Ok(coordinator.run(text).await?);
+        }
         let engine = match spaces.len() {
             // `SELECT 1`: any engine will do; prefer the analytical one.
             0 => self.engines.duckdb()?,
@@ -310,6 +350,18 @@ impl AgoraSession {
                     (engine, pins)
                 }
                 SpaceKind::Transactional => (self.bind(&space).await?, Default::default()),
+                SpaceKind::Remote => {
+                    if self.principal.is_some() {
+                        return Err(SessionError::PermissionDenied(
+                            "remote spaces are not served to peers".to_string(),
+                        ));
+                    }
+                    (self.engines.engine_for(&space)?, Default::default())
+                }
+            };
+            let engine_space = match &space.uri {
+                Some(uri) if space.kind == SpaceKind::Remote => uri.name.clone(),
+                _ => name.clone(),
             };
             let mut tables = Vec::new();
             for table in engine.table_names(name).await? {
@@ -325,6 +377,7 @@ impl AgoraSession {
             }
             bound.push(BoundSpace {
                 space: name.clone(),
+                engine_space,
                 engine,
                 tables,
             });
@@ -358,6 +411,7 @@ impl AgoraSession {
         let space = self.space(space_name)?;
         self.require_writable(&space)?;
         match space.kind {
+            SpaceKind::Remote => return Err(Self::remote_is_read_only(&space)),
             SpaceKind::Transactional => {
                 let engine = self.bind(&space).await?;
                 engine.execute(&routed.text, &[]).await?;
@@ -404,6 +458,7 @@ impl AgoraSession {
         let space = self.space(space_name)?;
         self.require_writable(&space)?;
         match space.kind {
+            SpaceKind::Remote => Err(Self::remote_is_read_only(&space)),
             SpaceKind::Transactional => {
                 if spaces.iter().any(|s| s != space_name) {
                     return Err(SessionError::MultiSpaceNotSupported(
@@ -455,7 +510,8 @@ impl AgoraSession {
                 let space = self.space(&name)?;
                 if space.kind != SpaceKind::Transactional {
                     return Err(SessionError::Unsupported(format!(
-                        "BEGIN on analytical space '{name}'"
+                        "BEGIN on {} space '{name}'",
+                        space.kind
                     )));
                 }
                 {

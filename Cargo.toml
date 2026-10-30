@@ -29,6 +29,7 @@ arrow = "58"
 arrow-array = "58"
 arrow-schema = "58"
 arrow-select = "58"
+arrow-ipc = "58"
 arrow-cast = { version = "58", features = ["prettyprint"] }
 parquet = { version = "58", features = ["arrow", "zstd"] }
 iceberg = "0.10.1"
@@ -42,6 +43,18 @@ sqlparser = { version = "0.62", features = ["visitor"] }
 # Prebuilt libduckdb via DUCKDB_DOWNLOAD_LIB (.cargo/config.toml); parquet is built in.
 duckdb = { version = "=1.10505.0" }
 rusqlite = { version = "0.40", features = ["bundled", "column_decltype"] }
+
+# Identity and networking
+ed25519-dalek = { version = "2.2", features = ["zeroize"] }
+getrandom = "0.3"
+base64 = "0.22"
+bs58 = "0.5"
+blake3 = "1.8"
+zeroize = "1"
+arrow-flight = "58.4"
+tonic = "0.14"
+clap = { version = "4", features = ["derive", "env"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Dev
 tempfile = "3"

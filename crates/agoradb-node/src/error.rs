@@ -38,6 +38,9 @@ pub enum SessionError {
     #[error("arrow error: {0}")]
     Arrow(#[from] arrow_schema::ArrowError),
 
+    #[error(transparent)]
+    Identity(#[from] agoradb_identity::IdentityError),
+
     #[error("iceberg error: {0}")]
     Iceberg(String),
 

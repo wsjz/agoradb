@@ -40,6 +40,8 @@ pub struct AgoraCatalog {
     file_io: FileIO,
     root_path: String,
     pub(crate) registry: Arc<RwLock<Registry>>,
+    /// Fingerprint of the registry files the in-memory copy was loaded from.
+    pub(crate) registry_fp: Arc<std::sync::Mutex<Option<u64>>>,
 }
 
 impl AgoraCatalog {
@@ -49,11 +51,12 @@ impl AgoraCatalog {
         root_path: impl Into<String>,
     ) -> std::result::Result<Self, CatalogError> {
         let root_path = root_path.into();
-        let registry = Registry::load(Path::new(&root_path))?;
+        let (registry, fingerprint) = Registry::load(Path::new(&root_path))?;
         Ok(Self {
             file_io,
             root_path,
             registry: Arc::new(RwLock::new(registry)),
+            registry_fp: Arc::new(std::sync::Mutex::new(Some(fingerprint))),
         })
     }
 
@@ -63,14 +66,18 @@ impl AgoraCatalog {
     /// as empty instead of failing.
     pub fn new(file_io: FileIO, root_path: impl Into<String>) -> Self {
         let root_path = root_path.into();
-        let registry = Registry::load(Path::new(&root_path)).unwrap_or_else(|e| {
-            tracing::warn!(root = %root_path, error = %e, "could not load space registry");
-            Registry::default()
-        });
+        let (registry, fingerprint) = match Registry::load(Path::new(&root_path)) {
+            Ok((registry, fp)) => (registry, Some(fp)),
+            Err(e) => {
+                tracing::warn!(root = %root_path, error = %e, "could not load space registry");
+                (Registry::default(), None)
+            }
+        };
         Self {
             file_io,
             root_path,
             registry: Arc::new(RwLock::new(registry)),
+            registry_fp: Arc::new(std::sync::Mutex::new(fingerprint)),
         }
     }
 

@@ -15,12 +15,14 @@
 //! Node-wide engine instances.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock, RwLock};
 
-use agoradb_catalog::{AgoraCatalog, Space};
-use agoradb_core::EngineKind;
+use agoradb_catalog::{AgoraCatalog, LocationFormat, Space};
+use agoradb_core::{CatalogError, EngineKind};
 use agoradb_engine::QueryEngine;
+use agoradb_identity::{load_node_identity, Did, NodeIdentity};
+use agoradb_network::{FlightEngine, RemoteSpaceConfig};
 
 use crate::error::SessionError;
 
@@ -33,7 +35,14 @@ pub struct NodeConfig {
     /// Local scratch directory for staging Parquet files; defaults to
     /// `<catalog root>/.agora/tmp`.
     pub temp_dir: Option<PathBuf>,
+    /// The node's signing identity. When unset it is loaded on first use
+    /// from `AGORADB_NODE_KEY` or `<catalog root>/.agora/identity/`.
+    pub identity: Option<Arc<NodeIdentity>>,
 }
+
+/// A remote Space's engine and the binding (peer, Space, owner, token id)
+/// it was built for.
+type RemoteEngine = (String, Arc<dyn QueryEngine>);
 
 /// The engines available on this node.
 ///
@@ -44,6 +53,10 @@ pub struct EngineRegistry {
     catalog: Arc<AgoraCatalog>,
     duckdb: Option<Arc<dyn QueryEngine>>,
     sqlite: RwLock<HashMap<String, Arc<dyn QueryEngine>>>,
+    /// Flight engines of remote Spaces, keyed by Space name, with the
+    /// binding they were built for (so a re-created Space gets a new one).
+    remote: RwLock<HashMap<String, RemoteEngine>>,
+    identity: OnceLock<Arc<NodeIdentity>>,
     temp_dir: PathBuf,
 }
 
@@ -72,12 +85,73 @@ impl EngineRegistry {
         #[cfg(not(feature = "engine-duckdb"))]
         let duckdb: Option<Arc<dyn QueryEngine>> = None;
 
+        let identity = OnceLock::new();
+        if let Some(id) = config.identity {
+            let _ = identity.set(id);
+        }
         Ok(Self {
             catalog,
             duckdb,
             sqlite: RwLock::new(HashMap::new()),
+            remote: RwLock::new(HashMap::new()),
+            identity,
             temp_dir,
         })
+    }
+
+    /// The node's identity, loaded on first use if it was not configured.
+    pub fn identity(&self) -> Result<Arc<NodeIdentity>, SessionError> {
+        if let Some(id) = self.identity.get() {
+            return Ok(id.clone());
+        }
+        let loaded = Arc::new(load_node_identity(Path::new(self.catalog.root_path()))?);
+        Ok(self.identity.get_or_init(|| loaded).clone())
+    }
+
+    /// The Flight engine querying the remote Space `space` on its owner.
+    pub fn remote_for(&self, space: &Space) -> Result<Arc<dyn QueryEngine>, SessionError> {
+        let location = self.catalog.get_location(&space.location)?;
+        let LocationFormat::Remote {
+            peer,
+            space: remote_space,
+            owner,
+        } = &location.format
+        else {
+            return Err(CatalogError::KindFormatMismatch {
+                kind: space.kind.to_string(),
+                format: location.format.name().to_string(),
+            }
+            .into());
+        };
+        let token = self.catalog.remote_token(&space.name)?;
+        let binding = format!(
+            "{peer}|{remote_space}|{owner}|{}",
+            agoradb_identity::ucan::token_id(token.expose())
+        );
+        if let Some((key, engine)) = self
+            .remote
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(&space.name)
+        {
+            if *key == binding {
+                return Ok(engine.clone());
+            }
+        }
+        let engine: Arc<dyn QueryEngine> = Arc::new(FlightEngine::new(
+            RemoteSpaceConfig {
+                peer: peer.clone(),
+                remote_space: remote_space.clone(),
+                owner: Did::parse(owner)?,
+                token: token.expose().to_string(),
+            },
+            self.identity()?,
+        ));
+        self.remote
+            .write()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(space.name.clone(), (binding, engine.clone()));
+        Ok(engine)
     }
 
     /// Directory for staging files before they are committed to a table.
@@ -148,6 +222,7 @@ impl EngineRegistry {
         match space.engine {
             EngineKind::DuckDb => self.duckdb(),
             EngineKind::Sqlite => self.sqlite_for(space),
+            EngineKind::Flight => self.remote_for(space),
         }
     }
 }

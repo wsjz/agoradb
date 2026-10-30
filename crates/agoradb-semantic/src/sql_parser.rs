@@ -14,7 +14,7 @@
 
 //! Parsing of AgoraDB statements.
 //!
-//! AgoraDB adds three statements on top of SQL:
+//! AgoraDB adds these statements on top of SQL:
 //!
 //! ```sql
 //! CREATE SPACE <name> [WITH KIND = 'analytical' | 'transactional',
@@ -22,10 +22,14 @@
 //!                           LOCATION = '<location id>',
 //!                           ACCESS = 'writable' | 'readonly',
 //!                           STORAGE = 'disk']
+//! CREATE SPACE <name> WITH PEER = 'http://host:port', TOKEN = '<ucan>'
+//!                          [, REMOTE = '<space on the peer>'] [, KIND = 'remote']
 //! DROP SPACE <name>
 //! SET SPACE [=] <name>
 //! PUBLISH SPACE <name> [TABLES (<table>, ...)] [TO <target space>]
 //! ```
+//!
+//! plus the identity and capability statements of [`crate::capability`].
 //!
 //! Everything else is parsed by `sqlparser` with the generic dialect and
 //! returned as an AST for classification and routing.
@@ -35,6 +39,7 @@ use sqlparser::ast::Statement;
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
 
+use crate::capability::{parse_issue_ucan, parse_revoke_ucan, IssueUcanRequest};
 use crate::error::SemanticError;
 
 /// One parsed statement.
@@ -48,6 +53,14 @@ pub enum AgoraStatement {
     SetSpace(String),
     /// `PUBLISH SPACE ...`: snapshot a transactional Space into an analytical one.
     PublishSpace(PublishRequest),
+    /// `SHOW IDENTITY`: this node's DID.
+    ShowIdentity,
+    /// `ISSUE UCAN ...`: grant a peer a capability on Spaces of this node.
+    IssueUcan(IssueUcanRequest),
+    /// `REVOKE UCAN '<id>'`
+    RevokeUcan(String),
+    /// `SHOW UCANS`: issued and revoked tokens.
+    ShowUcans,
     /// Any standard SQL statement.
     Sql(Box<Statement>),
 }
@@ -97,6 +110,20 @@ fn parse_one(stmt: &str) -> Result<AgoraStatement, SemanticError> {
             Ok(AgoraStatement::DropSpace(validate_name(name)?))
         }
         (Some("PUBLISH"), Some("SPACE")) => parse_publish(stmt),
+        (Some("ISSUE"), Some("UCAN")) => Ok(AgoraStatement::IssueUcan(parse_issue_ucan(stmt)?)),
+        (Some("REVOKE"), Some("UCAN")) => Ok(AgoraStatement::RevokeUcan(parse_revoke_ucan(stmt)?)),
+        (Some("SHOW"), Some(second @ ("IDENTITY" | "UCANS"))) => {
+            if words.len() > 2 {
+                return Err(SemanticError::Parse(format!(
+                    "SHOW {second}: unexpected input after {second}"
+                )));
+            }
+            Ok(if second == "IDENTITY" {
+                AgoraStatement::ShowIdentity
+            } else {
+                AgoraStatement::ShowUcans
+            })
+        }
         (Some("SET"), Some("SPACE")) => {
             let rest: Vec<&str> = words[2..].iter().copied().filter(|w| *w != "=").collect();
             let raw = match rest.as_slice() {
@@ -171,13 +198,38 @@ fn parse_create_space(stmt: &str) -> Result<AgoraStatement, SemanticError> {
             "ACCESS" => request.access = Some(value.parse().map_err(invalid)?),
             "LOCATION" => request.location = Some(value),
             "STORAGE" => request.storage = Some(value),
+            "PEER" => request.peer = Some(value),
+            "REMOTE" => request.remote = Some(validate_name(&value)?),
+            "TOKEN" => request.token = Some(value),
             other => {
                 return Err(SemanticError::InvalidProperty(format!(
                     "unknown CREATE SPACE property '{other}' \
-                     (expected KIND, ENGINE, LOCATION, ACCESS or STORAGE)"
+                     (expected KIND, ENGINE, LOCATION, ACCESS, STORAGE, PEER, REMOTE or TOKEN)"
                 )))
             }
         }
+    }
+    let remote_keys = request.peer.is_some() || request.remote.is_some() || request.token.is_some();
+    let remote_kind = request.kind == Some(agoradb_core::SpaceKind::Remote);
+    if remote_keys || remote_kind {
+        if request.peer.is_none() || request.token.is_none() {
+            return Err(SemanticError::InvalidProperty(
+                "a remote space needs PEER = 'http://host:port' and TOKEN = '<ucan>'".to_string(),
+            ));
+        }
+        if request
+            .kind
+            .is_some_and(|k| k != agoradb_core::SpaceKind::Remote)
+            || request.engine.is_some()
+            || request.location.is_some()
+            || request.access.is_some()
+            || request.storage.is_some()
+        {
+            return Err(SemanticError::InvalidProperty(
+                "a remote space only takes PEER, REMOTE, TOKEN and KIND = 'remote'".to_string(),
+            ));
+        }
+        request.kind = Some(agoradb_core::SpaceKind::Remote);
     }
     Ok(AgoraStatement::CreateSpace(request))
 }
@@ -279,7 +331,7 @@ fn split_top_level(input: &str, sep: char) -> Vec<String> {
 }
 
 /// Split a script into statements on top-level `;`, dropping empty ones.
-fn split_statements(sql: &str) -> Vec<String> {
+pub fn split_statements(sql: &str) -> Vec<String> {
     split_top_level(sql, ';')
         .into_iter()
         .map(|s| s.trim().to_string())
@@ -360,6 +412,61 @@ mod tests {
         assert!(matches!(
             parse_single("CREATE SPACE s FOO = 1"),
             Err(SemanticError::Parse(_))
+        ));
+    }
+
+    #[test]
+    fn test_parse_create_remote_space() {
+        let req = create(
+            "CREATE SPACE pub WITH PEER = 'http://node-a:50051', REMOTE = 'blog', TOKEN = 'a.b.c'",
+        );
+        assert_eq!(req.kind, Some(SpaceKind::Remote));
+        assert_eq!(req.peer.as_deref(), Some("http://node-a:50051"));
+        assert_eq!(req.remote.as_deref(), Some("blog"));
+        assert_eq!(req.token.as_deref(), Some("a.b.c"));
+        let req = create("CREATE SPACE blog WITH KIND='remote', PEER='http://a:1', TOKEN='t'");
+        assert_eq!(req.remote, None);
+
+        for bad in [
+            "CREATE SPACE pub WITH PEER = 'http://a:1'",
+            "CREATE SPACE pub WITH TOKEN = 't'",
+            "CREATE SPACE pub WITH KIND = 'remote'",
+            "CREATE SPACE pub WITH PEER = 'http://a:1', TOKEN = 't', KIND = 'analytical'",
+            "CREATE SPACE pub WITH PEER = 'http://a:1', TOKEN = 't', LOCATION = 'x'",
+            "CREATE SPACE pub WITH PEER = 'http://a:1', TOKEN = 't', REMOTE = 'a.b'",
+        ] {
+            assert!(parse_single(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn test_parse_identity_statements() {
+        assert_eq!(
+            parse_single("SHOW IDENTITY").unwrap(),
+            AgoraStatement::ShowIdentity
+        );
+        assert_eq!(
+            parse_single("show ucans;").unwrap(),
+            AgoraStatement::ShowUcans
+        );
+        assert!(parse_single("SHOW IDENTITY x").is_err());
+        assert!(matches!(
+            parse_single("ISSUE UCAN ON SPACE blog TO 'did:key:z'").unwrap(),
+            AgoraStatement::IssueUcan(_)
+        ));
+        assert_eq!(
+            parse_single("REVOKE UCAN 'abc'").unwrap(),
+            AgoraStatement::RevokeUcan("abc".into())
+        );
+        // REVOKE SELECT stays standard SQL.
+        assert!(matches!(
+            parse_single("REVOKE SELECT ON blog.posts FROM alice").unwrap(),
+            AgoraStatement::Sql(_)
+        ));
+        // Other SHOW statements are left to sqlparser.
+        assert!(matches!(
+            parse_single("SHOW TABLES").unwrap(),
+            AgoraStatement::Sql(_)
         ));
     }
 

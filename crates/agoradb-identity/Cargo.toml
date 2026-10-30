@@ -1,0 +1,21 @@
+[package]
+name = "agoradb-identity"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Node identity (did:key), UCAN capabilities and peer authentication for AgoraDB"
+
+[dependencies]
+base64 = { workspace = true }
+blake3 = { workspace = true }
+bs58 = { workspace = true }
+ed25519-dalek = { workspace = true }
+getrandom = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+zeroize = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

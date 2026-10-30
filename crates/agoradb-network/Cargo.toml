@@ -1,0 +1,25 @@
+[package]
+name = "agoradb-network"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "AgoraDB peer protocol over Arrow Flight: request signing and the remote-Space engine"
+
+[dependencies]
+agoradb-core = { path = "../agoradb-core" }
+agoradb-engine = { path = "../agoradb-engine" }
+agoradb-identity = { path = "../agoradb-identity" }
+arrow-array = { workspace = true }
+arrow-flight = { workspace = true }
+arrow-schema = { workspace = true }
+async-trait = { workspace = true }
+base64 = { workspace = true }
+blake3 = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tonic = { workspace = true }
+tracing = { workspace = true }

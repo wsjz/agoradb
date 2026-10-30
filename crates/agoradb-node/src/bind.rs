@@ -39,8 +39,9 @@ pub async fn bind_space(
     pins: Option<&SnapshotPins>,
 ) -> Result<Arc<dyn QueryEngine>, SessionError> {
     let engine = engines.engine_for(space)?;
-    if space.kind == SpaceKind::Transactional {
-        // The SQLite engine attaches its file when opened.
+    if matches!(space.kind, SpaceKind::Transactional | SpaceKind::Remote) {
+        // The SQLite engine attaches its file when opened; a remote Space's
+        // tables live on its owner.
         return Ok(engine);
     }
 
@@ -93,6 +94,12 @@ pub async fn bind_space(
                     )
                     .await?;
             }
+        }
+        LocationFormat::Remote { .. } => {
+            return Err(SessionError::Unsupported(format!(
+                "space '{}' is bound to a remote location but is not a remote space",
+                space.name
+            )))
         }
     }
     Ok(engine)

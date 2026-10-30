@@ -22,8 +22,10 @@ pub mod registry;
 pub mod replace;
 pub mod resolve;
 pub mod space;
+pub mod ucan;
 
 pub use acl::{Grant, RowPolicy, ViewDef};
 pub use catalog::AgoraCatalog;
 pub use resolve::ResolvedTable;
 pub use space::{Location, LocationFormat, LocationId, Space};
+pub use ucan::{validate_peer_url, HeldToken, IssuedUcan, Revocation, UcanCapability};

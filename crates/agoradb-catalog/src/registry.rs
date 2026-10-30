@@ -17,6 +17,7 @@
 //! listing ignores it.
 
 use std::collections::{BTreeMap, HashMap};
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -27,6 +28,7 @@ use serde::{Deserialize, Serialize};
 use crate::acl::{Grant, RowPolicy, ViewDef};
 use crate::catalog::AgoraCatalog;
 use crate::space::{validate_binding, Location, LocationFormat, LocationId, Space};
+use crate::ucan::{IssuedUcan, RemoteToken, Revocation};
 
 /// Name of the hidden directory holding registries and SQLite files.
 pub const AGORA_DIR: &str = ".agora";
@@ -35,6 +37,11 @@ const LOCATIONS_FILE: &str = "locations.json";
 const VIEWS_FILE: &str = "views.json";
 const GRANTS_FILE: &str = "grants.json";
 const POLICIES_FILE: &str = "policies.json";
+const UCANS_FILE: &str = "ucans.json";
+const REVOCATIONS_FILE: &str = "revocations.json";
+/// Held UCANs live apart from the other registries, readable by the owner only.
+const IDENTITY_DIR: &str = "identity";
+const REMOTE_TOKENS_FILE: &str = "remote_tokens.json";
 const REGISTRY_VERSION: u32 = 1;
 
 /// Namespace property marking a namespace as backing an analytical Space.
@@ -57,15 +64,26 @@ pub(crate) struct Registry {
     pub(crate) grants: BTreeMap<(String, String, String), Grant>,
     /// Keyed by `(space, relation, policy name)`.
     pub(crate) policies: BTreeMap<(String, String, String), RowPolicy>,
+    /// UCANs this node issued, keyed by token id.
+    pub(crate) issued: BTreeMap<String, IssuedUcan>,
+    /// Revoked token ids.
+    pub(crate) revoked: BTreeMap<String, Revocation>,
+    /// UCANs held for remote Spaces, keyed by Space name.
+    pub(crate) tokens: BTreeMap<String, RemoteToken>,
 }
 
 fn registry_err(context: &str, e: impl std::fmt::Display) -> CatalogError {
     CatalogError::Registry(format!("{context}: {e}"))
 }
 
-fn read_items<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<Vec<T>, CatalogError> {
+/// Read a registry file, feeding its bytes (or their absence) to `hasher`.
+fn read_items<T: for<'de> Deserialize<'de>>(
+    path: &Path,
+    hasher: &mut impl Hasher,
+) -> Result<Vec<T>, CatalogError> {
     match std::fs::read(path) {
         Ok(bytes) => {
+            bytes.hash(hasher);
             let file: RegistryFile<T> = serde_json::from_slice(&bytes)
                 .map_err(|e| registry_err(&format!("parsing {}", path.display()), e))?;
             if file.version != REGISTRY_VERSION {
@@ -78,39 +96,79 @@ fn read_items<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<Vec<T>, Catal
             }
             Ok(file.items)
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            None::<()>.hash(hasher);
+            Ok(Vec::new())
+        }
         Err(e) => Err(e.into()),
     }
 }
 
-fn write_items<T: Serialize>(path: &Path, items: Vec<T>) -> Result<(), CatalogError> {
+fn serialise<T: Serialize>(path: &Path, items: Vec<T>) -> Result<Vec<u8>, CatalogError> {
     let file = RegistryFile {
         version: REGISTRY_VERSION,
         items,
     };
-    let bytes = serde_json::to_vec_pretty(&file)
-        .map_err(|e| registry_err(&format!("serialising {}", path.display()), e))?;
+    serde_json::to_vec_pretty(&file)
+        .map_err(|e| registry_err(&format!("serialising {}", path.display()), e))
+}
+
+fn write_items<T: Serialize>(path: &Path, items: Vec<T>) -> Result<(), CatalogError> {
+    let bytes = serialise(path, items)?;
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, bytes)?;
     std::fs::rename(&tmp, path)?;
     Ok(())
 }
 
+/// Like [`write_items`], but the file is created readable by the owner only.
+fn write_items_private<T: Serialize>(path: &Path, items: Vec<T>) -> Result<(), CatalogError> {
+    let bytes = serialise(path, items)?;
+    let tmp = path.with_extension("json.tmp");
+    let _ = std::fs::remove_file(&tmp);
+    {
+        use std::io::Write;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&tmp)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+    }
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
 impl Registry {
-    pub(crate) fn load(root: &Path) -> Result<Self, CatalogError> {
+    /// Load every registry file, returning a fingerprint of their contents
+    /// so later changes (by another process) can be detected.
+    pub(crate) fn load(root: &Path) -> Result<(Self, u64), CatalogError> {
         let dir = root.join(AGORA_DIR);
-        let spaces: Vec<Space> = read_items(&dir.join(SPACES_FILE))?;
-        let locations: Vec<Location> = read_items(&dir.join(LOCATIONS_FILE))?;
-        let views: Vec<ViewDef> = read_items(&dir.join(VIEWS_FILE))?;
-        let grants: Vec<Grant> = read_items(&dir.join(GRANTS_FILE))?;
-        let policies: Vec<RowPolicy> = read_items(&dir.join(POLICIES_FILE))?;
-        Ok(Self {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        let spaces: Vec<Space> = read_items(&dir.join(SPACES_FILE), &mut h)?;
+        let locations: Vec<Location> = read_items(&dir.join(LOCATIONS_FILE), &mut h)?;
+        let views: Vec<ViewDef> = read_items(&dir.join(VIEWS_FILE), &mut h)?;
+        let grants: Vec<Grant> = read_items(&dir.join(GRANTS_FILE), &mut h)?;
+        let policies: Vec<RowPolicy> = read_items(&dir.join(POLICIES_FILE), &mut h)?;
+        let issued: Vec<IssuedUcan> = read_items(&dir.join(UCANS_FILE), &mut h)?;
+        let revoked: Vec<Revocation> = read_items(&dir.join(REVOCATIONS_FILE), &mut h)?;
+        let tokens: Vec<RemoteToken> =
+            read_items(&dir.join(IDENTITY_DIR).join(REMOTE_TOKENS_FILE), &mut h)?;
+        let registry = Self {
             spaces: spaces.into_iter().map(|s| (s.name.clone(), s)).collect(),
             locations: locations.into_iter().map(|l| (l.id.clone(), l)).collect(),
             views: views.into_iter().map(|v| (v.key(), v)).collect(),
             grants: grants.into_iter().map(|g| (g.key(), g)).collect(),
             policies: policies.into_iter().map(|p| (p.key(), p)).collect(),
-        })
+            issued: issued.into_iter().map(|u| (u.id.clone(), u)).collect(),
+            revoked: revoked.into_iter().map(|r| (r.id.clone(), r)).collect(),
+            tokens: tokens.into_iter().map(|t| (t.space.clone(), t)).collect(),
+        };
+        Ok((registry, h.finish()))
     }
 
     pub(crate) fn save(&self, root: &Path) -> Result<(), CatalogError> {
@@ -136,6 +194,22 @@ impl Registry {
             &dir.join(POLICIES_FILE),
             self.policies.values().cloned().collect(),
         )?;
+        write_items(
+            &dir.join(UCANS_FILE),
+            self.issued.values().cloned().collect(),
+        )?;
+        write_items(
+            &dir.join(REVOCATIONS_FILE),
+            self.revoked.values().cloned().collect(),
+        )?;
+        if !self.tokens.is_empty() || dir.join(IDENTITY_DIR).join(REMOTE_TOKENS_FILE).exists() {
+            let identity = dir.join(IDENTITY_DIR);
+            std::fs::create_dir_all(&identity)?;
+            write_items_private(
+                &identity.join(REMOTE_TOKENS_FILE),
+                self.tokens.values().cloned().collect(),
+            )?;
+        }
         Ok(())
     }
 }
@@ -168,7 +242,26 @@ impl AgoraCatalog {
         let out = f(&mut next)?;
         next.save(Path::new(self.root_path()))?;
         *guard = next;
+        // Unknown until re-read: the next refresh() reloads from disk.
+        *self.registry_fp.lock().unwrap_or_else(|p| p.into_inner()) = None;
         Ok(out)
+    }
+
+    /// Reload the registries if their files changed since they were last
+    /// read, e.g. because `agoradb sql` ran a `GRANT` or `REVOKE UCAN` in
+    /// another process. Returns whether anything was reloaded.
+    ///
+    /// Long-running servers call this before authorizing a request, so a
+    /// revocation takes effect on the next call.
+    pub fn refresh(&self) -> Result<bool, CatalogError> {
+        let (fresh, fingerprint) = Registry::load(Path::new(self.root_path()))?;
+        let mut fp = self.registry_fp.lock().unwrap_or_else(|p| p.into_inner());
+        if *fp == Some(fingerprint) {
+            return Ok(false);
+        }
+        *self.registry.write().unwrap_or_else(|p| p.into_inner()) = fresh;
+        *fp = Some(fingerprint);
+        Ok(true)
     }
 
     /// Create a Space (and, unless `LOCATION` names an existing one, its Location).
@@ -213,6 +306,8 @@ impl AgoraCatalog {
                         std::fs::create_dir_all(parent)?;
                     }
                 }
+                // validate_binding never creates one (see create_remote_space).
+                LocationFormat::Remote { .. } => {}
             }
         }
 
@@ -259,6 +354,15 @@ impl AgoraCatalog {
             reg.views.retain(|(s, _), _| s != name);
             reg.grants.retain(|(_, s, _), _| s != name);
             reg.policies.retain(|(s, _, _), _| s != name);
+            // A remote Location holds no data of ours: forget it with its token.
+            if reg
+                .locations
+                .get(&space.location)
+                .is_some_and(|l| matches!(l.format, LocationFormat::Remote { .. }))
+            {
+                reg.locations.remove(&space.location);
+            }
+            reg.tokens.remove(name);
             Ok(())
         })
     }

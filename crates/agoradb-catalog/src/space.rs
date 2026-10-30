@@ -21,6 +21,9 @@ use serde::{Deserialize, Serialize};
 /// Identifier of a [`Location`]; defaults to the name of the Space that created it.
 pub type LocationId = String;
 
+/// Residency token of a remote Location.
+pub const RESIDENCY_REMOTE: &str = "remote";
+
 /// Relative (to the catalog root) directory that holds SQLite Space files.
 pub const SQLITE_DIR: &str = ".agora/sqlite";
 
@@ -54,6 +57,15 @@ pub enum LocationFormat {
     IcebergParquet { namespace: String },
     /// A single SQLite database file, path relative to the catalog root.
     SqliteFile { path: String },
+    /// A Space on another node, served over Arrow Flight.
+    Remote {
+        /// Flight endpoint, `http://host:port`.
+        peer: String,
+        /// The Space's name on the peer.
+        space: String,
+        /// DID of the owning node (root issuer of the UCAN).
+        owner: String,
+    },
 }
 
 impl LocationFormat {
@@ -62,6 +74,7 @@ impl LocationFormat {
         match self {
             LocationFormat::IcebergParquet { .. } => "iceberg_parquet",
             LocationFormat::SqliteFile { .. } => "sqlite_file",
+            LocationFormat::Remote { .. } => "remote",
         }
     }
 }
@@ -81,6 +94,8 @@ pub struct Location {
 /// Whether `engine` can read `format` at all.
 pub fn engine_reads(engine: EngineKind, format: &LocationFormat) -> bool {
     match (engine, format) {
+        (EngineKind::Flight, LocationFormat::Remote { .. }) => true,
+        (_, LocationFormat::Remote { .. }) | (EngineKind::Flight, _) => false,
         (EngineKind::DuckDb, _) => true,
         (EngineKind::Sqlite, LocationFormat::SqliteFile { .. }) => true,
         (EngineKind::Sqlite, LocationFormat::IcebergParquet { .. }) => false,
@@ -116,6 +131,12 @@ pub fn validate_binding(
     }
 
     let kind = request.kind.unwrap_or(SpaceKind::Analytical);
+    if kind == SpaceKind::Remote || request.peer.is_some() || request.token.is_some() {
+        return Err(CatalogError::InvalidProperty(
+            "a remote space needs PEER and TOKEN and is created with create_remote_space"
+                .to_string(),
+        ));
+    }
     let engine = request.engine.unwrap_or_else(|| kind.default_engine());
 
     let mut location = match existing {
@@ -126,7 +147,7 @@ pub fn validate_binding(
                 SpaceKind::Analytical => LocationFormat::IcebergParquet {
                     namespace: request.name.clone(),
                 },
-                SpaceKind::Transactional => LocationFormat::SqliteFile {
+                SpaceKind::Transactional | SpaceKind::Remote => LocationFormat::SqliteFile {
                     path: format!("{SQLITE_DIR}/{}.sqlite", request.name),
                 },
             },
@@ -136,6 +157,12 @@ pub fn validate_binding(
     };
 
     let access = match (kind, &location.format) {
+        (_, LocationFormat::Remote { .. }) | (SpaceKind::Remote, _) => {
+            return Err(CatalogError::KindFormatMismatch {
+                kind: kind.to_string(),
+                format: location.format.name().to_string(),
+            })
+        }
         (SpaceKind::Transactional, LocationFormat::IcebergParquet { .. }) => {
             return Err(CatalogError::KindFormatMismatch {
                 kind: kind.to_string(),
@@ -352,6 +379,39 @@ mod tests {
         assert!(matches!(
             validate_binding(&r, None, 0),
             Err(CatalogError::LocationNotFound(l)) if l == "ghost"
+        ));
+    }
+
+    #[test]
+    fn remote_locations_only_bind_through_flight() {
+        let remote = Location {
+            id: "pub".to_string(),
+            format: LocationFormat::Remote {
+                peer: "http://a:50051".to_string(),
+                space: "blog".to_string(),
+                owner: "did:key:z6Mk".to_string(),
+            },
+            residency: vec![RESIDENCY_REMOTE.to_string()],
+            writer: None,
+        };
+        assert!(engine_reads(EngineKind::Flight, &remote.format));
+        assert!(!engine_reads(EngineKind::DuckDb, &remote.format));
+        assert!(!engine_reads(
+            EngineKind::Flight,
+            &parquet_location("a", None).format
+        ));
+
+        let mut r = req("pub_ro");
+        r.location = Some("pub".to_string());
+        assert!(matches!(
+            validate_binding(&r, Some(&remote), 0),
+            Err(CatalogError::KindFormatMismatch { .. })
+        ));
+        let mut r = req("pub");
+        r.kind = Some(SpaceKind::Remote);
+        assert!(matches!(
+            validate_binding(&r, None, 0),
+            Err(CatalogError::InvalidProperty(_))
         ));
     }
 

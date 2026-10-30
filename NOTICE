@@ -12,7 +12,7 @@ AgoraDB depends on the following third-party projects. Their licenses are
 checked on every change with `cargo deny check licenses` (see deny.toml).
 The complete, exact dependency set is recorded in Cargo.lock.
 
-Apache Arrow (arrow, arrow-array, arrow-schema, arrow-select, arrow-cast, parquet)
+Apache Arrow (arrow, arrow-array, arrow-schema, arrow-select, arrow-cast, arrow-ipc, arrow-flight, parquet)
   https://arrow.apache.org/  -  Apache License 2.0
   Copyright The Apache Software Foundation
 
@@ -55,3 +55,16 @@ libbzip2 (libbz2-rs-sys, via DataFusion's default `compression` feature)
 Tokio (tokio, tokio-stream)
   https://tokio.rs/  -  MIT License
   Copyright (c) Tokio Contributors
+
+Tonic (tonic)
+  https://github.com/hyperium/tonic  -  MIT License
+  Copyright (c) 2025 Lucio Franco
+
+dalek-cryptography (ed25519-dalek, curve25519-dalek)
+  https://github.com/dalek-cryptography/curve25519-dalek  -  BSD 3-Clause License
+  ed25519-dalek: Copyright (c) 2017-2019 isis agora lovecruft
+  curve25519-dalek: Copyright (c) 2016-2021 isis agora lovecruft, Henry de Valence
+
+BLAKE3 (blake3)
+  https://github.com/BLAKE3-team/BLAKE3  -  Apache License 2.0 (dual-licensed with CC0-1.0)
+  Copyright 2019 Jack O'Connor and Samuel Neves

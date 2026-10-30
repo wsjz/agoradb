@@ -19,9 +19,15 @@
 //! grants and row policies, and routes it to the catalog, to one Space's
 //! engine, or — for statements spanning several Spaces — to the federation
 //! coordinator. Engines are shared per node through [`EngineRegistry`].
+//!
+//! Remote Spaces (mounted with `CREATE SPACE ... WITH PEER, TOKEN`) are
+//! queried through the federation coordinator too, their subqueries shipped
+//! to the owner node over Arrow Flight; `ISSUE UCAN` / `REVOKE UCAN` manage
+//! the capabilities other nodes use to query this one ([`capability`]).
 
 mod acl;
 mod bind;
+pub mod capability;
 mod ddl;
 mod dml;
 pub mod error;
@@ -30,6 +36,7 @@ pub mod registry;
 pub mod result;
 pub mod session;
 
+pub use capability::query_spaces;
 pub use error::SessionError;
 pub use publish::{spawn_publisher, PublishReport, PublishedTable};
 pub use registry::{EngineRegistry, NodeConfig};

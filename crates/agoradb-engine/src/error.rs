@@ -57,4 +57,12 @@ pub enum EngineError {
     /// The blocking worker running the statement was cancelled or panicked.
     #[error("engine worker cancelled: {0}")]
     Cancelled(String),
+
+    /// A remote node refused the request (authentication or capability).
+    #[error("permission denied: {0}")]
+    PermissionDenied(String),
+
+    /// A remote node could not be reached or failed the request.
+    #[error("remote error: {0}")]
+    Remote(String),
 }

@@ -19,11 +19,13 @@
 //! classifies statements so the session can route them. [`rewrite`] adds
 //! views and per-principal column grants and row policies.
 
+pub mod capability;
 pub mod classify;
 pub mod error;
 pub mod rewrite;
 pub mod sql_parser;
 
+pub use capability::IssueUcanRequest;
 pub use classify::{
     classify, collect_spaces, cte_names, qualify_tables, DmlKind, StatementClass, TclKind,
 };
@@ -31,4 +33,4 @@ pub use error::SemanticError;
 pub use rewrite::{
     apply_access_control, inline_views, AccessResolver, RelationAccess, ViewResolver,
 };
-pub use sql_parser::{parse, parse_single, AgoraStatement, PublishRequest};
+pub use sql_parser::{parse, parse_single, split_statements, AgoraStatement, PublishRequest};

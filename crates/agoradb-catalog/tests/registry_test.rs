@@ -277,3 +277,127 @@ async fn views_grants_and_policies_persist_and_cascade() {
     assert!(reopened.policies_on("blog", "recent").is_empty());
     assert!(!open(&root).has_grants_in("alice", "blog"));
 }
+
+#[tokio::test]
+async fn remote_spaces_keep_their_token_private_and_drop_cleanly() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_str().unwrap().to_string();
+    let catalog = open(&root);
+    let token = agoradb_catalog::HeldToken::new("header.payload.signature");
+
+    let space = catalog
+        .create_remote_space(
+            "pub",
+            "http://node-a:50051/",
+            "blog",
+            "did:key:z6Mkowner",
+            token,
+        )
+        .unwrap();
+    assert_eq!(space.kind, SpaceKind::Remote);
+    assert_eq!(space.engine, EngineKind::Flight);
+    assert_eq!(space.access, AccessMode::ReadOnly);
+    assert_eq!(
+        space.uri.as_ref().unwrap().to_string(),
+        "space://did:key:z6Mkowner/blog"
+    );
+    let loc = catalog.get_location("pub").unwrap();
+    assert_eq!(
+        loc.format,
+        LocationFormat::Remote {
+            peer: "http://node-a:50051".to_string(),
+            space: "blog".to_string(),
+            owner: "did:key:z6Mkowner".to_string(),
+        }
+    );
+
+    // The token is not in the shared registries, only in the private file.
+    let agora = dir.path().join(".agora");
+    for file in ["spaces.json", "locations.json"] {
+        let text = std::fs::read_to_string(agora.join(file)).unwrap();
+        assert!(!text.contains("header.payload.signature"), "{file}");
+    }
+    let token_file = agora.join("identity").join("remote_tokens.json");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&token_file).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
+    let reopened = open(&root);
+    assert_eq!(
+        reopened.remote_token("pub").unwrap().expose(),
+        "header.payload.signature"
+    );
+    assert!(matches!(
+        reopened.create_remote_space(
+            "pub",
+            "http://x:1",
+            "blog",
+            "did:key:z6Mkowner",
+            agoradb_catalog::HeldToken::new("t")
+        ),
+        Err(CatalogError::SpaceExists(_))
+    ));
+    assert!(matches!(
+        reopened.create_remote_space(
+            "other",
+            "https://x:1",
+            "blog",
+            "did:key:z6Mkowner",
+            agoradb_catalog::HeldToken::new("t")
+        ),
+        Err(CatalogError::InvalidProperty(_))
+    ));
+
+    reopened.drop_space("pub").unwrap();
+    assert!(reopened.get_location("pub").is_err());
+    assert!(reopened.remote_token("pub").is_err());
+    let text = std::fs::read_to_string(&token_file).unwrap();
+    assert!(!text.contains("header.payload.signature"));
+}
+
+#[tokio::test]
+async fn revocations_persist_and_refresh_picks_up_other_writers() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_str().unwrap().to_string();
+    let server = open(&root);
+    let cli = open(&root);
+    let id = "0123456789abcdef0123456789abcdef";
+
+    assert!(!server.refresh().unwrap(), "nothing changed yet");
+    cli.record_issued_ucan(agoradb_catalog::IssuedUcan {
+        id: id.to_string(),
+        audience: "did:key:z6Mkbob".to_string(),
+        capabilities: vec![agoradb_catalog::UcanCapability {
+            with: "space://did:key:z6Mkowner/blog".to_string(),
+            can: "space/query".to_string(),
+        }],
+        issued_at_ms: 1,
+        expires_at: 2,
+    })
+    .unwrap();
+    assert!(cli.revoke_ucan(id).unwrap());
+    assert!(!cli.revoke_ucan(id).unwrap(), "already revoked");
+    assert!(matches!(
+        cli.revoke_ucan("not-an-id"),
+        Err(CatalogError::InvalidProperty(_))
+    ));
+
+    // Another process wrote the files: the server sees them after refresh().
+    assert!(server.revoked_ucans().is_empty());
+    assert!(server.refresh().unwrap());
+    assert!(server.revoked_ucans().contains(id));
+    assert_eq!(server.list_issued_ucans().len(), 1);
+    assert!(!server.refresh().unwrap());
+
+    // Its own writes need no reload to be visible.
+    cli.create_space(CreateSpaceRequest::new("blog"))
+        .await
+        .unwrap();
+    assert!(cli.get_space("blog").is_ok());
+    assert!(server.get_space("blog").is_err());
+    server.refresh().unwrap();
+    assert!(server.get_space("blog").is_ok());
+}

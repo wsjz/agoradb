@@ -18,6 +18,8 @@ agoradb-engine = { path = "../agoradb-engine" }
 agoradb-engine-duckdb = { path = "../agoradb-engine-duckdb", optional = true }
 agoradb-engine-sqlite = { path = "../agoradb-engine-sqlite", optional = true }
 agoradb-federation = { path = "../agoradb-federation" }
+agoradb-identity = { path = "../agoradb-identity" }
+agoradb-network = { path = "../agoradb-network" }
 agoradb-semantic = { path = "../agoradb-semantic" }
 agoradb-storage = { path = "../agoradb-storage" }
 arrow-array = { workspace = true }

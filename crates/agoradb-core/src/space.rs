@@ -59,6 +59,9 @@ pub enum SpaceKind {
     Analytical,
     /// A single SQLite database file, served by SQLite.
     Transactional,
+    /// A Space owned by another node, queried over Arrow Flight with a UCAN.
+    /// Always read-only.
+    Remote,
 }
 
 impl SpaceKind {
@@ -67,6 +70,7 @@ impl SpaceKind {
         match self {
             SpaceKind::Analytical => EngineKind::DuckDb,
             SpaceKind::Transactional => EngineKind::Sqlite,
+            SpaceKind::Remote => EngineKind::Flight,
         }
     }
 }
@@ -76,6 +80,7 @@ impl fmt::Display for SpaceKind {
         match self {
             SpaceKind::Analytical => f.write_str("analytical"),
             SpaceKind::Transactional => f.write_str("transactional"),
+            SpaceKind::Remote => f.write_str("remote"),
         }
     }
 }
@@ -87,8 +92,9 @@ impl FromStr for SpaceKind {
         match s.to_ascii_lowercase().as_str() {
             "analytical" => Ok(SpaceKind::Analytical),
             "transactional" => Ok(SpaceKind::Transactional),
+            "remote" => Ok(SpaceKind::Remote),
             other => Err(crate::error::AgoraError::InvalidArgument(format!(
-                "unknown space kind '{other}' (expected 'analytical' or 'transactional')"
+                "unknown space kind '{other}' (expected 'analytical', 'transactional' or 'remote')"
             ))),
         }
     }
@@ -102,6 +108,8 @@ pub enum EngineKind {
     DuckDb,
     /// SQLite: transactional, row-oriented.
     Sqlite,
+    /// Another node, reached over Arrow Flight (remote Spaces).
+    Flight,
 }
 
 impl fmt::Display for EngineKind {
@@ -109,6 +117,7 @@ impl fmt::Display for EngineKind {
         match self {
             EngineKind::DuckDb => f.write_str("duckdb"),
             EngineKind::Sqlite => f.write_str("sqlite"),
+            EngineKind::Flight => f.write_str("flight"),
         }
     }
 }
@@ -163,7 +172,11 @@ impl FromStr for AccessMode {
 /// What `CREATE SPACE` asks for. Unset fields take the defaults described in
 /// the v3 architecture (§3.2): `kind` = analytical, `engine` = the kind's
 /// default engine, a new Location named after the Space, `access` = writable.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+///
+/// A request with `peer` set creates a remote Space (§9): `remote` names the
+/// Space on the peer (default: the same name) and `token` is the UCAN that
+/// authorizes this node to query it. `Debug` never prints the token.
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct CreateSpaceRequest {
     pub name: String,
     pub kind: Option<SpaceKind>,
@@ -173,6 +186,28 @@ pub struct CreateSpaceRequest {
     pub access: Option<AccessMode>,
     /// Storage strategy (`'disk'` only in 3.0).
     pub storage: Option<String>,
+    /// Flight endpoint of the node owning a remote Space (`http://host:port`).
+    pub peer: Option<String>,
+    /// Name of the Space on the peer.
+    pub remote: Option<String>,
+    /// UCAN granting this node `space/query` on the remote Space.
+    pub token: Option<String>,
+}
+
+impl fmt::Debug for CreateSpaceRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CreateSpaceRequest")
+            .field("name", &self.name)
+            .field("kind", &self.kind)
+            .field("engine", &self.engine)
+            .field("location", &self.location)
+            .field("access", &self.access)
+            .field("storage", &self.storage)
+            .field("peer", &self.peer)
+            .field("remote", &self.remote)
+            .field("token", &self.token.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
 }
 
 impl CreateSpaceRequest {
@@ -238,6 +273,17 @@ mod tests {
             AccessMode::ReadOnly
         );
         assert!("graph".parse::<SpaceKind>().is_err());
+        assert_eq!("remote".parse::<SpaceKind>().unwrap(), SpaceKind::Remote);
+        assert_eq!(SpaceKind::Remote.default_engine(), EngineKind::Flight);
+    }
+
+    #[test]
+    fn test_create_request_debug_redacts_token() {
+        let mut req = CreateSpaceRequest::new("pub");
+        req.token = Some("eyJhbGciOiJFZERTQSJ9.secret.sig".to_string());
+        let text = format!("{req:?}");
+        assert!(text.contains("<redacted>"));
+        assert!(!text.contains("secret"));
     }
 
     #[test]
