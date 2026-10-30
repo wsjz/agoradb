@@ -478,6 +478,13 @@ The peer protocol over Arrow Flight (`agoradb-network::protocol`). Every call ca
 - Crossing NATs (relay, DHT) is not covered.
 - mDNS needs multicast, and on macOS the application firewall must let `agoradb` receive it.
 
+**Running nodes (3.1d).** `docker/agoradb.Dockerfile` builds the node image: the `agoradb` binary and the prebuilt libduckdb, with the node's data in `/data`. `docker/compose.yml` runs three nodes on one bridge network:
+- `node-a` owns the data;
+- `node-b` reaches it after dialing `node-a`'s libp2p address;
+- `node-c` is given no address and has to find `node-a` by mDNS.
+
+`tests/e2e/docker_nodes.sh` drives them, checking each step against its expected result: discovery, a UCAN-gated federated query over TLS with no `PEER`, a subscription, then revocation stopping both the query and refreshes while the copy stays readable. `.github/workflows/docker-e2e.yml` runs it on GitHub Actions on every push to `feat/**` or `ci/**`.
+
 ---
 
 ## 10. Browser Node
@@ -638,7 +645,7 @@ Roughly 1,100 of the current ~4,300 lines are engine-bridge code that goes away;
 | **3.0-B Federation** ✅ | DataFusion coordinator over `datafusion-federation` + `EngineSqlExecutor`; cross-Space join (Parquet ⋈ SQLite) locally; snapshot pinning | Two-Space join returns correct results; EXPLAIN shows two pushed-down SQL leaves |
 | **3.0-C Semantic** ✅ | Views, column grants and row policies as SQL rewrites; principals read-only and deny-by-default; enumeration resistance | Policy test suite: a restricted DID sees rewritten `*` and injected predicates inside the engine SQL |
 | **3.0-D Publish** ✅ | `PUBLISH SPACE` → `orders_published` analytical read-only Space; scheduled publisher | Publish → query via DuckDB matches SQLite source |
-| **3.1 Network** | DID/UCAN, Arrow Flight remote Spaces (3.1a ✅), snapshot subscription (3.1b ✅), libp2p discovery and TLS (3.1c ✅), two Docker nodes (3.1d) | Two Docker nodes: UCAN-gated federated query; revocation cuts access |
+| **3.1 Network** ✅ | DID/UCAN, Arrow Flight remote Spaces (3.1a ✅), snapshot subscription (3.1b ✅), libp2p discovery and TLS (3.1c ✅), two Docker nodes plus an mDNS-only node, run in CI (3.1d ✅) | Two Docker nodes: UCAN-gated federated query; revocation cuts access |
 | **3.2 Browser** | WASM core + `HostEngine` bridge to duckdb-wasm / wa-sqlite | Browser node runs a local query and a federated query via a Full Node |
 | **3.3 Multimodal** | Lance Locations through DuckDB's `lance` extension (vector, full-text, large objects; version pinning and sync); DuckPGQ; FTS5/`sqlite-vec`; `Mode` capability checks | Vector + FTS query on a Lance Space and on a transactional Space; a subscribed Lance Space is searchable without rebuilding its index |
 | **3.4 Cloud drives** | opendal drive services behind feature flags; one writing node per drive Location; newest-complete-snapshot reads; bounded local cache; client-side encryption; transactional Spaces rejected on drive Locations | An analytical Space on a WebDAV Location is written by one node and read by another; a transactional Space on a drive Location is rejected at DDL; files on the drive cannot be read without the key |
@@ -695,6 +702,7 @@ No phase skipping (AGENT.md §4.1).
 | 2026-10-30 | A subscribed copy is a remote Space (read-only, never served onwards) bound to a replica Location and read by the local DuckDB; files are named by BLAKE3 hash and the manifest is swapped by rename | Reuses every remote-Space guard; hashes verify the download and keep owner paths private; a failed refresh never leaves a half copy |
 | 2026-10-30 | TLS between nodes with self-signed certificates pinned to the owner's DID; plaintext only with `--allow-http` | The DID is already the identity every request is signed with; pinning it needs no CA or host names, and an address that points at another node fails the handshake |
 | 2026-10-30 | libp2p only for discovery (mDNS + endpoint exchange), results kept in the catalog's Peers table; `PEER` optional | Keeps data on Flight; the libp2p key is the DID key, so nothing new has to be trusted; a table in the catalog serves both `agoradb serve` and `agoradb sql` |
+| 2026-10-30 | The 3.1 exit run is three Docker nodes on GitHub Actions (`docker-e2e`), one of them found only by mDNS | Development machines may have no container runtime; CI runs it on every push, and the Docker bridge network gives mDNS the multicast a firewalled laptop may block |
 | 2026-10-30 | VFS `materialize()` moves from 3.1 to 3.4 | Subscription copies live on local disk; the VFS is first needed for cloud drives |
 | 2026-10-30 | Lance as a third Location format for vector, full-text and large-object data; it replaces DuckDB `vss` / `fts` for analytical Spaces | Lance indexes live in the dataset and sync with its versions, while extension indexes must be rebuilt on every subscriber; Lance versions are immutable files plus a manifest, which fits principle 4; Iceberg + Parquet stays for tables that are scanned and aggregated |
 
