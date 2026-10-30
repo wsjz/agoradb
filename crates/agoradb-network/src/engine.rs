@@ -20,29 +20,22 @@
 
 use std::fmt;
 use std::sync::Arc;
-use std::time::Duration;
 
 use agoradb_engine::{
     Capabilities, EngineError, EngineKind, QualifiedName, QueryEngine, RecordBatchStream,
     SqlDialect, TableSource, TxHandle, Value,
 };
-use agoradb_identity::{unix_now_ms, AuthRequest, Did, NodeIdentity};
-use arrow_flight::error::FlightError;
-use arrow_flight::{Action, FlightClient, FlightDescriptor, Ticket};
+use agoradb_identity::{Did, NodeIdentity};
+use arrow_flight::{Action, FlightDescriptor, Ticket};
 use arrow_schema::{Schema, SchemaRef};
 use async_trait::async_trait;
 use futures::{StreamExt, TryStreamExt};
-use tokio::sync::OnceCell;
-use tonic::transport::{Channel, Endpoint};
-use tonic::Code;
 
+use crate::client::{flight_to_engine, PeerClient};
 use crate::protocol::{
-    digest, schema_payload, ListTablesRequest, ListTablesResponse, QueryTicket, ACTION_LIST_TABLES,
-    HEADER_AUTH, HEADER_UCAN, METHOD_DO_GET, METHOD_GET_SCHEMA, METHOD_LIST_TABLES,
+    schema_payload, ListTablesRequest, ListTablesResponse, QueryTicket, ACTION_LIST_TABLES,
+    METHOD_DO_GET, METHOD_GET_SCHEMA, METHOD_LIST_TABLES,
 };
-
-/// How long to wait for a TCP connection to a peer.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Where a remote Space lives and the UCAN to query it with.
 #[derive(Clone)]
@@ -71,9 +64,8 @@ impl fmt::Debug for RemoteSpaceConfig {
 /// Queries a Space on another node over Arrow Flight. Read-only.
 pub struct FlightEngine {
     config: RemoteSpaceConfig,
-    identity: Arc<NodeIdentity>,
     instance_id: String,
-    channel: OnceCell<Channel>,
+    client: PeerClient,
 }
 
 impl fmt::Debug for FlightEngine {
@@ -85,24 +77,6 @@ impl fmt::Debug for FlightEngine {
     }
 }
 
-fn status_to_engine(status: &tonic::Status) -> EngineError {
-    match status.code() {
-        Code::PermissionDenied | Code::Unauthenticated => {
-            EngineError::PermissionDenied(status.message().to_string())
-        }
-        Code::NotFound => EngineError::TableNotFound(status.message().to_string()),
-        code => EngineError::Remote(format!("{code:?}: {}", status.message())),
-    }
-}
-
-fn flight_to_engine(e: FlightError) -> EngineError {
-    match e {
-        FlightError::Tonic(status) => status_to_engine(&status),
-        FlightError::Arrow(e) => EngineError::Arrow(e),
-        other => EngineError::Remote(other.to_string()),
-    }
-}
-
 impl FlightEngine {
     /// An engine for one remote Space, signing requests as `identity`.
     /// Connects on first use.
@@ -110,47 +84,22 @@ impl FlightEngine {
         // Unique per remote Space, so a pushed-down statement never spans two
         // Spaces (each needs its own capability check on the owner).
         let instance_id = format!("flight:{}/{}", config.peer, config.remote_space);
+        let client = PeerClient::new(
+            config.peer.clone(),
+            config.owner.clone(),
+            config.token.clone(),
+            identity,
+        );
         Self {
             config,
-            identity,
             instance_id,
-            channel: OnceCell::new(),
+            client,
         }
     }
 
     /// Where this engine sends its queries.
     pub fn config(&self) -> &RemoteSpaceConfig {
         &self.config
-    }
-
-    async fn channel(&self) -> Result<Channel, EngineError> {
-        self.channel
-            .get_or_try_init(|| async {
-                let endpoint = Endpoint::from_shared(self.config.peer.clone())
-                    .map_err(|e| EngineError::Remote(format!("invalid peer address: {e}")))?
-                    .connect_timeout(CONNECT_TIMEOUT);
-                endpoint.connect().await.map_err(|e| {
-                    EngineError::Remote(format!("cannot reach {}: {e}", self.config.peer))
-                })
-            })
-            .await
-            .cloned()
-    }
-
-    /// A client whose headers authorize exactly one call: `method` with `payload`.
-    async fn client(&self, method: &str, payload: &[u8]) -> Result<FlightClient, EngineError> {
-        let mut client = FlightClient::new(self.channel().await?);
-        let digest = digest(method, payload, &self.config.token);
-        let auth = AuthRequest::sign(&self.identity, &self.config.owner, unix_now_ms(), &digest)
-            .and_then(|a| a.to_header())
-            .map_err(|e| EngineError::Remote(e.to_string()))?;
-        client
-            .add_header(HEADER_AUTH, &auth)
-            .map_err(flight_to_engine)?;
-        client
-            .add_header(HEADER_UCAN, &self.config.token)
-            .map_err(flight_to_engine)?;
-        Ok(client)
     }
 
     fn read_only(&self, what: &str) -> EngineError {
@@ -197,7 +146,7 @@ impl QueryEngine for FlightEngine {
             space: self.config.remote_space.clone(),
         })
         .map_err(|e| EngineError::Remote(e.to_string()))?;
-        let mut client = self.client(METHOD_LIST_TABLES, &body).await?;
+        let mut client = self.client.signed(METHOD_LIST_TABLES, &body).await?;
         let mut results = client
             .do_action(Action::new(ACTION_LIST_TABLES, body))
             .await
@@ -216,7 +165,8 @@ impl QueryEngine for FlightEngine {
     async fn table_schema(&self, name: &QualifiedName) -> Result<SchemaRef, EngineError> {
         let space = &self.config.remote_space;
         let mut client = self
-            .client(METHOD_GET_SCHEMA, &schema_payload(space, &name.table))
+            .client
+            .signed(METHOD_GET_SCHEMA, &schema_payload(space, &name.table))
             .await?;
         let schema = client
             .get_schema(FlightDescriptor::new_path(vec![
@@ -245,7 +195,7 @@ impl QueryEngine for FlightEngine {
         })
         .map_err(|e| EngineError::Remote(e.to_string()))?;
         tracing::debug!(peer = %self.config.peer, space = %self.config.remote_space, %sql, "query shipping");
-        let mut client = self.client(METHOD_DO_GET, &ticket).await?;
+        let mut client = self.client.signed(METHOD_DO_GET, &ticket).await?;
         let mut stream = client
             .do_get(Ticket::new(ticket))
             .await

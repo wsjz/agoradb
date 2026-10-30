@@ -21,27 +21,36 @@
 //!    method, payload and UCAN.
 //! 2. **Authorize** — the `x-agora-ucan` token must chain back to this
 //!    node, be issued to the caller, be unexpired and unrevoked (re-read
-//!    from the registry on every call), and grant `space/query` on every
-//!    Space the request names. Remote Spaces are never served.
+//!    from the registry on every call), and grant the call's ability on
+//!    every Space the request names: `space/query` to query,
+//!    `space/read` to subscribe. Remote Spaces are never served.
 //! 3. **Execute** as a read-only principal — the DID the node issued the
 //!    root token to — through the node's own semantic layer, so its grants,
 //!    column restrictions and row policies apply to whatever the peer sent.
+//!    A subscription copies files, which no policy can filter, so it only
+//!    covers tables the principal may read in full.
 //!
 //! Authentication and capability failures all look the same to the caller.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
 
-use agoradb_catalog::AgoraCatalog;
+use agoradb_catalog::{AgoraCatalog, LocationFormat, Space};
 use agoradb_core::{CatalogError, SpaceKind};
 use agoradb_engine::EngineError;
-use agoradb_identity::ucan::{self, Capability, VerifyOptions, ABILITY_QUERY, MAX_TOKEN_BYTES};
+use agoradb_identity::ucan::{
+    self, Capability, VerifyOptions, ABILITY_QUERY, ABILITY_READ, MAX_TOKEN_BYTES,
+};
 use agoradb_identity::{unix_now, unix_now_ms, AuthRequest, Did, NodeIdentity};
 use agoradb_network::protocol::{
-    digest, is_identifier, schema_payload, ListTablesRequest, ListTablesResponse, QueryTicket,
-    ACTION_LIST_TABLES, HEADER_AUTH, HEADER_UCAN, MAX_SQL_BYTES, METHOD_DO_GET, METHOD_GET_SCHEMA,
-    METHOD_LIST_TABLES,
+    digest, encode_schema, is_file_hash, is_identifier, schema_payload, FetchFileRequest,
+    FileEntry, ListTablesRequest, ListTablesResponse, QueryTicket, SnapshotRequest,
+    SnapshotResponse, TableSnapshot, ACTION_FETCH_FILE, ACTION_LIST_TABLES, ACTION_SNAPSHOT,
+    FILE_CHUNK_BYTES, HEADER_AUTH, HEADER_UCAN, MAX_SQL_BYTES, METHOD_DO_GET, METHOD_FETCH_FILE,
+    METHOD_GET_SCHEMA, METHOD_LIST_TABLES, METHOD_SNAPSHOT,
 };
 use agoradb_node::{query_spaces, AgoraSession, EngineRegistry, SessionConfig, SessionError};
 use agoradb_semantic::rewrite::quote_ident;
@@ -54,14 +63,53 @@ use arrow_flight::{
     HandshakeRequest, HandshakeResponse, PollInfo, PutResult, SchemaAsIpc, SchemaResult, Ticket,
 };
 use arrow_ipc::writer::IpcWriteOptions;
-use futures::stream::{self, BoxStream};
+use futures::stream;
 use futures::{StreamExt, TryStreamExt};
+use tokio::io::AsyncReadExt;
 use tonic::{Request, Response, Status, Streaming};
 
 use crate::replay::{ReplayError, ReplayGuard};
 
 const DENIED: &str = "permission denied";
 const MAX_ACTION_BODY_BYTES: usize = 4096;
+/// Entries kept by [`HashCache`] before it starts over.
+const HASH_CACHE_ENTRIES: usize = 100_000;
+
+/// BLAKE3 hashes of data files, keyed by path, size and modification time.
+/// Data files are immutable, so an entry never goes stale.
+#[derive(Default)]
+struct HashCache(Mutex<HashMap<(PathBuf, u64, SystemTime), String>>);
+
+impl HashCache {
+    /// Hash and size of the file at `path`.
+    async fn hash(&self, path: &Path) -> std::io::Result<(String, u64)> {
+        let meta = tokio::fs::metadata(path).await?;
+        let key = (path.to_path_buf(), meta.len(), meta.modified()?);
+        if let Some(hash) = self.0.lock().unwrap_or_else(|p| p.into_inner()).get(&key) {
+            return Ok((hash.clone(), meta.len()));
+        }
+        let owned = path.to_path_buf();
+        let hash = tokio::task::spawn_blocking(move || -> std::io::Result<String> {
+            let mut hasher = blake3::Hasher::new();
+            hasher.update_reader(std::fs::File::open(&owned)?)?;
+            Ok(hasher.finalize().to_hex().to_string())
+        })
+        .await
+        .map_err(std::io::Error::other)??;
+        let mut map = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        if map.len() >= HASH_CACHE_ENTRIES {
+            map.clear();
+        }
+        map.insert(key, hash.clone());
+        Ok((hash, meta.len()))
+    }
+}
+
+/// Log a local I/O failure and return a status that does not reveal it.
+fn io_status(e: std::io::Error) -> Status {
+    tracing::warn!(error = %e, "serving a data file failed");
+    Status::internal("reading data failed on the remote node")
+}
 
 type FlightStream<T> = Pin<Box<dyn futures::Stream<Item = Result<T, Status>> + Send + 'static>>;
 
@@ -77,6 +125,7 @@ pub struct AgoraFlightService {
     engines: Arc<EngineRegistry>,
     identity: Arc<NodeIdentity>,
     replay: ReplayGuard,
+    hashes: HashCache,
 }
 
 impl std::fmt::Debug for AgoraFlightService {
@@ -126,6 +175,7 @@ impl AgoraFlightService {
             engines,
             identity,
             replay: ReplayGuard::default(),
+            hashes: HashCache::default(),
         })
     }
 
@@ -176,9 +226,14 @@ impl AgoraFlightService {
         })
     }
 
-    /// Step 2: check the caller's UCAN against every Space it wants to read
-    /// and return the principal to run the request as.
-    fn authorize(&self, caller: &Caller, spaces: &BTreeSet<String>) -> Result<String, Status> {
+    /// Step 2: check that the caller's UCAN grants `ability` on every Space
+    /// it names and return the principal to run the request as.
+    fn authorize(
+        &self,
+        caller: &Caller,
+        spaces: &BTreeSet<String>,
+        ability: &str,
+    ) -> Result<String, Status> {
         let deny = |reason: String| {
             tracing::info!(caller = %caller.did, %reason, "peer request denied");
             Status::permission_denied(DENIED)
@@ -200,7 +255,7 @@ impl AgoraFlightService {
                 &VerifyOptions {
                     root: self.identity.did(),
                     audience: &caller.did,
-                    required: &Capability::space(self.identity.did(), space, ABILITY_QUERY),
+                    required: &Capability::space(self.identity.did(), space, ability),
                     now,
                     revoked: &revoked,
                 },
@@ -246,7 +301,8 @@ impl AgoraFlightService {
         if !is_identifier(&req.space) {
             return Err(Status::invalid_argument("invalid space name"));
         }
-        let principal = self.authorize(&caller, &BTreeSet::from([req.space.clone()]))?;
+        let principal =
+            self.authorize(&caller, &BTreeSet::from([req.space.clone()]), ABILITY_QUERY)?;
         let tables = self
             .session(principal)
             .readable_relations(&req.space)
@@ -255,6 +311,150 @@ impl AgoraFlightService {
         serde_json::to_vec(&ListTablesResponse { tables })
             .map_err(|e| Status::internal(e.to_string()))
     }
+
+    /// A Space a peer may subscribe to: analytical and stored as Iceberg
+    /// tables. Transactional Spaces are shared by publishing them.
+    fn subscribable(&self, name: &str) -> Result<Space, Status> {
+        let space = self
+            .catalog
+            .get_space(name)
+            .map_err(|e| session_status(e.into()))?;
+        match space.kind {
+            SpaceKind::Analytical => {}
+            SpaceKind::Transactional => {
+                return Err(Status::failed_precondition(format!(
+                    "space '{name}' is transactional: PUBLISH it and subscribe to the publication"
+                )))
+            }
+            // authorize() already refuses these; never serve them onwards.
+            SpaceKind::Remote => return Err(Status::permission_denied(DENIED)),
+        }
+        match self.catalog.get_location(&space.location) {
+            Ok(l) if matches!(l.format, LocationFormat::IcebergParquet { .. }) => Ok(space),
+            _ => Err(Status::failed_precondition(format!(
+                "space '{name}' is not stored as Iceberg tables and cannot be subscribed"
+            ))),
+        }
+    }
+
+    /// Whether `principal` may read `space.table` in full: `None` if it has
+    /// no grant on it at all, `Some(false)` under a column grant or a row
+    /// policy.
+    fn full_access(&self, principal: &str, space: &str, table: &str) -> Option<bool> {
+        let grant = self.catalog.get_grant(principal, space, table)?;
+        Some(grant.columns.is_none() && self.catalog.policies_on(space, table).is_empty())
+    }
+
+    /// `agora.snapshot`: the current snapshot of every table of a Space the
+    /// caller may copy, with its files named by hash.
+    async fn snapshot(&self, request: Request<Action>) -> Result<Vec<u8>, Status> {
+        let body = request.get_ref().body.clone();
+        if body.len() > MAX_ACTION_BODY_BYTES {
+            return Err(Status::invalid_argument("request too large"));
+        }
+        let caller = self.authenticate(&request, METHOD_SNAPSHOT, &body)?;
+        let req: SnapshotRequest = serde_json::from_slice(&body)
+            .map_err(|e| Status::invalid_argument(format!("snapshot request: {e}")))?;
+        if !is_identifier(&req.space) {
+            return Err(Status::invalid_argument("invalid space name"));
+        }
+        let principal =
+            self.authorize(&caller, &BTreeSet::from([req.space.clone()]), ABILITY_READ)?;
+        let space = self.subscribable(&req.space)?;
+        let mut response = SnapshotResponse::default();
+        let tables = self
+            .catalog
+            .space_tables(&space)
+            .await
+            .map_err(|e| session_status(e.into()))?;
+        for table in tables {
+            match self.full_access(&principal, &space.name, &table) {
+                None => continue,
+                Some(false) => {
+                    response.restricted.push(table);
+                    continue;
+                }
+                Some(true) => {}
+            }
+            let resolved = self
+                .catalog
+                .resolve_table(&space, &table, None)
+                .await
+                .map_err(|e| session_status(e.into()))?;
+            let mut files = Vec::with_capacity(resolved.files.len());
+            for path in &resolved.files {
+                let (hash, size) = self.hashes.hash(path).await.map_err(io_status)?;
+                files.push(FileEntry { hash, size });
+            }
+            response.tables.push(TableSnapshot {
+                name: table,
+                snapshot_id: resolved.snapshot_id,
+                schema: encode_schema(&resolved.schema)
+                    .map_err(|e| Status::internal(e.to_string()))?,
+                files,
+            });
+        }
+        tracing::debug!(caller = %caller.did, %principal, space = %space.name, tables = response.tables.len(), "serving snapshot");
+        serde_json::to_vec(&response).map_err(|e| Status::internal(e.to_string()))
+    }
+
+    /// `agora.fetch_file`: stream one data file of a table's snapshot.
+    async fn fetch_file(
+        &self,
+        request: Request<Action>,
+    ) -> Result<FlightStream<arrow_flight::Result>, Status> {
+        let body = request.get_ref().body.clone();
+        if body.len() > MAX_ACTION_BODY_BYTES {
+            return Err(Status::invalid_argument("request too large"));
+        }
+        let caller = self.authenticate(&request, METHOD_FETCH_FILE, &body)?;
+        let req: FetchFileRequest = serde_json::from_slice(&body)
+            .map_err(|e| Status::invalid_argument(format!("fetch_file request: {e}")))?;
+        if !is_identifier(&req.space) || !is_identifier(&req.table) || !is_file_hash(&req.hash) {
+            return Err(Status::invalid_argument("invalid space, table or file"));
+        }
+        let principal =
+            self.authorize(&caller, &BTreeSet::from([req.space.clone()]), ABILITY_READ)?;
+        let space = self.subscribable(&req.space)?;
+        if self.full_access(&principal, &space.name, &req.table) != Some(true) {
+            tracing::info!(caller = %caller.did, table = %req.table, "file of a restricted table refused");
+            return Err(Status::permission_denied(DENIED));
+        }
+        let not_found = || Status::not_found("file not found in this snapshot");
+        let resolved = self
+            .catalog
+            .resolve_table(&space, &req.table, Some(req.snapshot_id))
+            .await
+            .map_err(|e| {
+                tracing::info!(error = %e, "fetch_file: snapshot not resolved");
+                not_found()
+            })?;
+        let mut found = None;
+        for path in resolved.files {
+            if self.hashes.hash(&path).await.map_err(io_status)?.0 == req.hash {
+                found = Some(path);
+                break;
+            }
+        }
+        let file = tokio::fs::File::open(found.ok_or_else(not_found)?)
+            .await
+            .map_err(io_status)?;
+        let chunks = stream::try_unfold(file, |mut file| async move {
+            let mut buf = vec![0u8; FILE_CHUNK_BYTES];
+            let n = file.read(&mut buf).await?;
+            if n == 0 {
+                return Ok(None);
+            }
+            buf.truncate(n);
+            Ok(Some((arrow_flight::Result { body: buf.into() }, file)))
+        })
+        .map_err(io_status);
+        Ok(Box::pin(chunks))
+    }
+}
+
+fn single_result(body: Vec<u8>) -> FlightStream<arrow_flight::Result> {
+    stream::once(async move { Ok(arrow_flight::Result { body: body.into() }) }).boxed()
 }
 
 #[tonic::async_trait]
@@ -311,7 +511,7 @@ impl FlightService for AgoraFlightService {
         }
         let caller =
             self.authenticate(&request, METHOD_GET_SCHEMA, &schema_payload(space, table))?;
-        let principal = self.authorize(&caller, &BTreeSet::from([space.clone()]))?;
+        let principal = self.authorize(&caller, &BTreeSet::from([space.clone()]), ABILITY_QUERY)?;
         // Both names are validated identifiers, and quoted on top.
         let sql = format!(
             "SELECT * FROM {}.{} LIMIT 0",
@@ -342,7 +542,7 @@ impl FlightService for AgoraFlightService {
         let QueryTicket { sql } = serde_json::from_slice(&ticket)
             .map_err(|e| Status::invalid_argument(format!("ticket: {e}")))?;
         let spaces = query_spaces(&sql).map_err(session_status)?;
-        let principal = self.authorize(&caller, &spaces)?;
+        let principal = self.authorize(&caller, &spaces, ABILITY_QUERY)?;
         tracing::debug!(caller = %caller.did, %principal, ?spaces, "serving peer query");
         let (schema, batches) = self
             .session(principal)
@@ -374,12 +574,12 @@ impl FlightService for AgoraFlightService {
         &self,
         request: Request<Action>,
     ) -> Result<Response<Self::DoActionStream>, Status> {
-        if request.get_ref().r#type != ACTION_LIST_TABLES {
-            return Err(Status::unimplemented("unknown action"));
-        }
-        let body = self.list_tables(request).await?;
-        let out: BoxStream<'static, Result<arrow_flight::Result, Status>> =
-            stream::once(async move { Ok(arrow_flight::Result { body: body.into() }) }).boxed();
+        let out = match request.get_ref().r#type.as_str() {
+            ACTION_LIST_TABLES => single_result(self.list_tables(request).await?),
+            ACTION_SNAPSHOT => single_result(self.snapshot(request).await?),
+            ACTION_FETCH_FILE => self.fetch_file(request).await?,
+            _ => return Err(Status::unimplemented("unknown action")),
+        };
         Ok(Response::new(out))
     }
 
@@ -387,10 +587,26 @@ impl FlightService for AgoraFlightService {
         &self,
         _request: Request<Empty>,
     ) -> Result<Response<Self::ListActionsStream>, Status> {
-        let actions = vec![Ok(ActionType {
-            r#type: ACTION_LIST_TABLES.to_string(),
-            description: "Relations of a Space the caller may read".to_string(),
-        })];
+        let action = |name: &str, description: &str| {
+            Ok(ActionType {
+                r#type: name.to_string(),
+                description: description.to_string(),
+            })
+        };
+        let actions = vec![
+            action(
+                ACTION_LIST_TABLES,
+                "Relations of a Space the caller may read",
+            ),
+            action(
+                ACTION_SNAPSHOT,
+                "Current snapshot of the tables the caller may copy (space/read)",
+            ),
+            action(
+                ACTION_FETCH_FILE,
+                "One data file of a snapshot, by hash (space/read)",
+            ),
+        ];
         Ok(Response::new(Box::pin(stream::iter(actions))))
     }
 }

@@ -12,10 +12,12 @@ agoradb-engine = { path = "../agoradb-engine" }
 agoradb-identity = { path = "../agoradb-identity" }
 arrow-array = { workspace = true }
 arrow-flight = { workspace = true }
+arrow-ipc = { workspace = true }
 arrow-schema = { workspace = true }
 async-trait = { workspace = true }
 base64 = { workspace = true }
 blake3 = { workspace = true }
+bytes = { workspace = true }
 futures = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

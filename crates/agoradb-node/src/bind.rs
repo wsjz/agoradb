@@ -23,6 +23,7 @@ use agoradb_engine::{QualifiedName, QueryEngine, TableSource};
 
 use crate::error::SessionError;
 use crate::registry::EngineRegistry;
+use crate::subscribe::replica_tables;
 
 /// Snapshot to use per table when binding an analytical Space; `None`
 /// entries (or a missing table) mean "current".
@@ -39,14 +40,32 @@ pub async fn bind_space(
     pins: Option<&SnapshotPins>,
 ) -> Result<Arc<dyn QueryEngine>, SessionError> {
     let engine = engines.engine_for(space)?;
-    if matches!(space.kind, SpaceKind::Transactional | SpaceKind::Remote) {
-        // The SQLite engine attaches its file when opened; a remote Space's
-        // tables live on its owner.
+    if space.kind == SpaceKind::Transactional || space.engine == EngineKind::Flight {
+        // The SQLite engine attaches its file when opened; a remote Space
+        // queried over Flight has its tables on its owner.
         return Ok(engine);
     }
 
     let location = catalog.get_location(&space.location)?;
     match &location.format {
+        LocationFormat::Replica { .. } => {
+            let tables = replica_tables(catalog, &location)?;
+            for attached in engine.table_names(&space.name).await? {
+                if !tables.iter().any(|(name, _, _)| *name == attached) {
+                    engine
+                        .detach(&QualifiedName::new(&space.name, &attached))
+                        .await?;
+                }
+            }
+            for (table, files, schema) in tables {
+                engine
+                    .attach(
+                        &QualifiedName::new(&space.name, &table),
+                        TableSource::ParquetFiles { files, schema },
+                    )
+                    .await?;
+            }
+        }
         LocationFormat::IcebergParquet { .. } => {
             let tables = catalog.space_tables(space).await?;
             // Forget tables dropped since the last bind, so a stale view can

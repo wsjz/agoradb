@@ -9,15 +9,25 @@
 
 ## 1. 项目概览
 
-Agora DB 是一个**去中心化的本地联邦查询语义层** —— 嵌入式、主权化、原生 P2P。
+Agora DB 是一个 **AI Native 的多模态私域数据中心**，通常使用个人资源，支持受信的数据交换。
 
-AgoraDB 负责"谁能看什么、数据在哪、查询发到哪"，**不负责"怎么算"**：计算交给可插拔的嵌入式引擎（分析型 DuckDB、事务型 SQLite，浏览器端由 JS 宿主提供），DataFusion 只作为联邦协调器合并多个引擎的 Arrow 结果。规范见 `agoradb_architecture_v3.md`。
+- **私域**：数据归所有者（个人、家庭或小团队），存在自己控制的存储上（本地硬盘、NAS、网盘），由数据接入从各个 App 接进来。
+- **多模态**：文本、图片、音频、文件、向量和表格一样是一等数据。
+- **AI Native**：AI 工具和 Agent 通过 MCP 像其他应用一样接入，只看到授权给它的数据；数据存成 AI 能直接用的形式（文本、向量、检索索引）；视图和命名让 AI 知道数据的含义；向量化、推理等计算也跑在个人资源上。
+- **个人资源**：存储和算力来自个人，而不是平台的云：先用自己的机器，不够时通过算力共享用其他个人的机器。
+- **受信的数据交换**：数据只在互信的数据中心之间双向流动，授权可撤销。
+
+数据交换和算力共享用同一套信任机制（DID、对等关系、默认拒绝、UCAN 撤销），授权分开（数据：`space/query` / `space/read`；算力：`compute/<runtime>`），互不包含。
+
+底层是一个**去中心化的本地联邦查询语义层** —— 嵌入式、主权化、原生 P2P。
+
+AgoraDB 负责"谁能看什么、数据从哪来、存在哪、查询和任务发到哪"，**不负责"怎么算"**：计算交给可插拔的嵌入式引擎（分析型 DuckDB、事务型 SQLite，浏览器端由 JS 宿主提供），DataFusion 只作为联邦协调器合并多个引擎的 Arrow 结果。规范见 `agoradb_architecture_v3.md`。
 
 - **核心语言**: Rust（WASM 可编译、内存安全）
 - **计算引擎**: DuckDB（分析型 Space）、SQLite（事务型 Space）
 - **联邦协调**: Apache DataFusion + `datafusion-federation`（仅合并，不读文件）
 - **目录系统**: Apache Iceberg（分析型 Space）+ `.agora/` 下的 Space/Location 注册表
-- **存储格式**: Apache Parquet（分析型、P2P 同步单元）、SQLite 文件（事务型）
+- **存储格式**: Apache Parquet（分析型、P2P 同步单元）、SQLite 文件（事务型）、Lance（向量 / 全文 / 大对象，3.3）
 - **内存格式**: Apache Arrow
 - **网络传输**: Arrow Flight (gRPC) + libp2p（3.1）
 - **密码学**: ed25519-dalek + Blake3（3.1）
@@ -26,12 +36,12 @@ AgoraDB 负责"谁能看什么、数据在哪、查询发到哪"，**不负责"�
 ### 架构分层（自底向上）
 
 ```
-L0: 身份与网络层 (DID, UCAN, libp2p, Arrow Flight, 快照同步)
-L1: 目录与存储层 (Space/Location 注册表, Iceberg 元数据, Parquet 写路径, VFS)
+L0: 身份与网络层 (DID, UCAN, libp2p, Arrow Flight, 快照同步, 算力共享)
+L1: 目录与存储层 (Space/Location 注册表, Iceberg 元数据, Parquet 写路径, VFS: 本地盘 / NAS / S3 / 网盘)
 L2: 引擎抽象层 (QueryEngine trait: DuckDB | SQLite | 宿主引擎)
 L3: 联邦层 (DataFusion 协调器: 按引擎下推 SQL, 合并 Arrow 流)
 L4: 语义层 (<space>.<table> 命名, 语句分类路由, 视图 / UCAN 策略重写)
-L5: 接口层 (SQL API, HTTP, WASM, CLI)
+L5: 接口层 (SQL API, HTTP, WASM, CLI, MCP) + 数据接入 (Connector: App 官方 API、导出文件)
 ```
 
 ### 设计原则（不可违背）
@@ -39,7 +49,7 @@ L5: 接口层 (SQL API, HTTP, WASM, CLI)
 1. **计算外包**：不实现扫描、Join、聚合或索引算法；引擎做不到就换引擎或配置引擎，不写算子。
 2. **每个 Space 单写主**；写权限通过 UCAN 显式委托。
 3. **Space（逻辑）与 Location（物理）分离**：多个 Space 可绑定同一 Location，至多一个可写。
-4. **只有不可变文件跨网络**：P2P 只同步 Iceberg 快照；事务型 Space 通过发布 Parquet 快照对外共享。
+4. **只有不可变文件跨网络**：P2P 只同步 Iceberg 快照和 Lance 版本；事务型 Space 通过发布 Parquet 快照对外共享。
 5. **默认拒绝**：无对等关系 = 无目录可见性 = 无查询权限。
 
 ---
@@ -125,7 +135,7 @@ L5: 接口层 (SQL API, HTTP, WASM, CLI)
 
 项目遵循严格的分阶段路线图：
 
-v3 路线图（详见 `agoradb_architecture_v3.md` §12）：
+v3 路线图（详见 `agoradb_architecture_v3.md` §14）：
 
 | 阶段 | 目标 | 状态 |
 |-------|------|----------|
@@ -133,9 +143,12 @@ v3 路线图（详见 `agoradb_architecture_v3.md` §12）：
 | 3.0-B 联邦 | DataFusion 协调器 + `datafusion-federation`、跨 Space join、快照 pinning | ✅ |
 | 3.0-C 语义层 | 视图、列授权与行策略（SQL 改写）、principal 只读 + 默认拒绝、枚举抵抗 | ✅ |
 | 3.0-D 发布 | `PUBLISH SPACE`：SQLite → Iceberg 快照（覆盖式）、定时发布 | ✅ |
-| 3.1 网络 | DID/UCAN、Arrow Flight 远端表、libp2p 发现、快照订阅 | 待开始 |
+| 3.1 网络 | DID/UCAN、Arrow Flight 远端表、libp2p 发现、快照订阅 | 进行中：3.1a 远程查询 ✅、3.1b 快照订阅 ✅；3.1c 节点发现与加密传输、3.1d 两个 Docker 节点跑通待做 |
 | 3.2 浏览器 | WASM 核心 + 宿主引擎桥 (duckdb-wasm / wa-sqlite) | 待开始 |
-| 3.3 多模态 | 引擎扩展：DuckDB vss/fts/DuckPGQ、SQLite FTS5/sqlite-vec | 待开始 |
+| 3.3 多模态 | Lance Location（经 DuckDB `lance` 扩展：向量、全文、大对象）、DuckPGQ、SQLite FTS5/sqlite-vec | 待开始 |
+| 3.4 网盘 | opendal 网盘服务（WebDAV、Google Drive、Dropbox、OneDrive 等）、同步文件夹、客户端加密；SQLite 不放网盘 | 待开始 |
+| 3.5 数据接入 | `Connector` 合约、按来源主键 upsert + 游标同事务提交、定时拉取；首批：文件导入、flomo | 待开始 |
+| 3.6 算力共享 | `compute/<runtime>` UCAN 能力与限额（与数据授权分开）、任务经 Arrow Flight 路由到对端已注册的运行时、按对端配额 | 待开始 |
 
 **规则**: 禁止跳阶段。每个阶段的退出标准必须达成后才能进入下一阶段。
 
@@ -216,7 +229,7 @@ agoradb/
 ├── agoradb_architecture_v3.md  # 规范架构（v1/v2 为历史）
 ├── crates/
 │   ├── agoradb-core/           # 错误、SpaceUri、SpaceKind/EngineKind/AccessMode
-│   ├── agoradb-vfs/            # OpenDAL VFS（3.1 接入）
+│   ├── agoradb-vfs/            # OpenDAL VFS（3.4 接入）
 │   ├── agoradb-catalog/        # Iceberg Catalog + Space/Location 注册表 + 快照解析
 │   ├── agoradb-storage/        # Parquet 写路径、Compaction
 │   ├── agoradb-engine/         # QueryEngine trait、TableSource、BlockingWorker
@@ -224,12 +237,15 @@ agoradb/
 │   ├── agoradb-engine-sqlite/  # 事务型引擎（SQLite 行 → Arrow）
 │   ├── agoradb-semantic/       # Agora 语句解析、语句分类、视图展开与权限改写
 │   ├── agoradb-federation/     # DataFusion 协调器、EngineSqlExecutor
-│   └── agoradb-node/           # AgoraSession、EngineRegistry、路由
+│   ├── agoradb-node/           # AgoraSession、EngineRegistry、路由、订阅副本
+│   ├── agoradb-identity/       # DID、UCAN 签发 / 委托 / 撤销、请求签名
+│   ├── agoradb-network/        # 节点间协议、PeerClient、FlightEngine
+│   └── agoradb-server/         # Arrow Flight 服务、agoradb 命令行
 ├── tests/                      # agoradb-tests（TPC-H Q1–Q5）+ tools/data-gen
 └── docs/                       # 用户和开发者文档（gitignored）
 ```
 
-计划中：`agoradb-identity`、`agoradb-network`（3.1），`agoradb-wasm`（3.2），`agoradb-cli`。
+计划中：`agoradb-wasm`（3.2），`agoradb-connect`（3.5），`agoradb-cli`。
 
 ---
 
@@ -255,7 +271,7 @@ agoradb/
 | 概念 | 代码标识符 | 说明 |
 |---------|-----------------|---------|
 | Space | `Space` | 主权单元（逻辑），SQL 限定名 `<space>.<table>` |
-| Location | `Location` | 物理存放位置（Iceberg namespace 或 SQLite 文件），可被多个 Space 绑定 |
+| Location | `Location` | 物理存放位置（Iceberg namespace、SQLite 文件或 Lance 数据集），可被多个 Space 绑定 |
 | SpaceKind | `SpaceKind` | `Analytical`（Iceberg + Parquet）/ `Transactional`（SQLite） |
 | Engine | `QueryEngine` / `EngineKind` | 计算引擎（DuckDB / SQLite / 宿主） |
 | Node | `Node` | 对等实体 |
@@ -372,6 +388,9 @@ agoradb/
 | 2025-05-30 | 初始 AGENT.md 创建 | 为分阶段实现建立开发协议 |
 | 2026-06-08 | 执行内核迁移到 DataFusion（v2） | 放弃自研优化器/执行器 |
 | 2026-09-27 | 转型为去中心化本地联邦查询语义层（v3）：计算交给 DuckDB/SQLite，DataFusion 只做联邦合并 | 自研 OLAP 超出团队范围；差异化在主权、联邦与 P2P，而非算子 |
+| 2026-10-30 | 定位改为 AI Native 的多模态私域数据中心（通常使用个人资源、支持受信的数据交换）：新增网盘接入（3.4）、数据接入（3.5）、算力共享（3.6），v3 各层不变；数据交换和算力共享同一信任机制、不同授权 | 数据和算力留在个人手里，个人之间互相调用而不交给大平台；架构见 `agoradb_architecture_v3.md` §1、§7.5、§11、§12 |
+| 2026-10-30 | 3.1b 快照订阅：只复制对方能看整张表的表，其余标 `restricted` 只能远程查；撤销只停止后续同步，已复制的文件收不回；VFS 接入推迟到 3.4 | 文件无法按列授权和行策略过滤；数据一旦复制就无法收回，写明而不是默认。见架构 §5.3、§9 |
+| 2026-10-30 | Lance 作为第三种 Location 格式，用于向量、全文和大对象；分析型 Space 不再用 DuckDB vss/fts | Lance 的索引存在数据集里、随版本同步，订阅方不用重建；表格数据仍用 Iceberg + Parquet。见 §7.6 |
 
 ---
 

@@ -33,7 +33,7 @@ use crate::error::SessionError;
 use crate::result::QueryResult;
 use crate::session::AgoraSession;
 
-fn invalid(msg: impl Into<String>) -> SessionError {
+pub(crate) fn invalid(msg: impl Into<String>) -> SessionError {
     CatalogError::InvalidProperty(msg.into()).into()
 }
 
@@ -206,14 +206,43 @@ impl AgoraSession {
         &self,
         request: CreateSpaceRequest,
     ) -> Result<QueryResult, SessionError> {
+        let name = request.name.clone();
+        let (peer, remote, token) = Self::peer_space_request(request)?;
+        let owner = self.peer_space_owner(&token, &remote, ABILITY_QUERY)?;
+        self.catalog.create_remote_space(
+            &name,
+            &peer,
+            &remote,
+            owner.as_str(),
+            HeldToken::new(token),
+        )?;
+        Ok(QueryResult::Empty)
+    }
+
+    /// The peer, remote Space name (default: the local name) and token of a
+    /// `CREATE SPACE ... WITH PEER` request.
+    pub(crate) fn peer_space_request(
+        request: CreateSpaceRequest,
+    ) -> Result<(String, String, String), SessionError> {
         let peer = validate_peer_url(request.peer.as_deref().unwrap_or_default())?;
         let token = request
             .token
             .ok_or_else(|| invalid("a remote space needs TOKEN = '<ucan>'"))?;
-        let remote = request.remote.unwrap_or_else(|| request.name.clone());
-        let me = self.engines().identity()?;
+        let remote = request.remote.unwrap_or(request.name);
+        Ok((peer, remote, token))
+    }
 
-        let decoded = Ucan::decode(&token).map_err(|e| invalid(format!("TOKEN: {e}")))?;
+    /// Check that `token` was issued (or delegated) to this node and grants
+    /// `ability` on `remote`; return its root issuer, the node every request
+    /// will be signed for.
+    pub(crate) fn peer_space_owner(
+        &self,
+        token: &str,
+        remote: &str,
+        ability: &str,
+    ) -> Result<Did, SessionError> {
+        let me = self.engines().identity()?;
+        let decoded = Ucan::decode(token).map_err(|e| invalid(format!("TOKEN: {e}")))?;
         let owner = decoded
             .root_issuer()
             .map_err(|e| invalid(format!("TOKEN: {e}")))?;
@@ -222,30 +251,27 @@ impl AgoraSession {
                 "TOKEN was issued by this node; query its spaces directly",
             ));
         }
+        let verb = if ability == ABILITY_QUERY {
+            "query"
+        } else {
+            "subscribe to"
+        };
         ucan::verify(
-            &token,
+            token,
             &VerifyOptions {
                 root: &owner,
                 audience: me.did(),
-                required: &Capability::space(&owner, &remote, ABILITY_QUERY),
+                required: &Capability::space(&owner, remote, ability),
                 now: unix_now(),
                 revoked: &HashSet::new(),
             },
         )
         .map_err(|e| {
             invalid(format!(
-                "TOKEN does not let this node query '{remote}': {e}"
+                "TOKEN does not let this node {verb} '{remote}': {e}"
             ))
         })?;
-
-        self.catalog.create_remote_space(
-            &request.name,
-            &peer,
-            &remote,
-            owner.as_str(),
-            HeldToken::new(token),
-        )?;
-        Ok(QueryResult::Empty)
+        Ok(owner)
     }
 
     /// Relations (tables and views) of `space` this session may read: all

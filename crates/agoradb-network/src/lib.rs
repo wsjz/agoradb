@@ -16,6 +16,8 @@
 //!
 //! * [`protocol`]: the calls, payloads and headers nodes exchange over
 //!   Arrow Flight.
+//! * [`PeerClient`]: signed calls to one peer, shared by query shipping and
+//!   subscription (`agora.snapshot`, `agora.fetch_file`).
 //! * [`FlightEngine`]: the client side — a remote Space exposed as a
 //!   [`QueryEngine`](agoradb_engine::QueryEngine), so the federation layer
 //!   pushes subqueries to the owner node exactly as it does to a local
@@ -23,7 +25,9 @@
 //!
 //! The server side lives in `agoradb-server`.
 
+pub mod client;
 pub mod engine;
 pub mod protocol;
 
+pub use client::{ChunkStream, PeerClient};
 pub use engine::{FlightEngine, RemoteSpaceConfig};

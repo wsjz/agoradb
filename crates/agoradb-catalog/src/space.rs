@@ -66,6 +66,16 @@ pub enum LocationFormat {
         /// DID of the owning node (root issuer of the UCAN).
         owner: String,
     },
+    /// A local copy of a Space on another node (subscription, §5.3): the
+    /// owner's snapshot files under `.agora/replicas/<location id>/`.
+    Replica {
+        /// Flight endpoint, `http://host:port`.
+        peer: String,
+        /// The Space's name on the peer.
+        space: String,
+        /// DID of the owning node (root issuer of the UCAN).
+        owner: String,
+    },
 }
 
 impl LocationFormat {
@@ -75,7 +85,17 @@ impl LocationFormat {
             LocationFormat::IcebergParquet { .. } => "iceberg_parquet",
             LocationFormat::SqliteFile { .. } => "sqlite_file",
             LocationFormat::Remote { .. } => "remote",
+            LocationFormat::Replica { .. } => "replica",
         }
+    }
+
+    /// Whether the Location belongs to another node's Space (queried
+    /// remotely or copied), so dropping its Space forgets it.
+    pub fn is_peer_space(&self) -> bool {
+        matches!(
+            self,
+            LocationFormat::Remote { .. } | LocationFormat::Replica { .. }
+        )
     }
 }
 
@@ -98,7 +118,10 @@ pub fn engine_reads(engine: EngineKind, format: &LocationFormat) -> bool {
         (_, LocationFormat::Remote { .. }) | (EngineKind::Flight, _) => false,
         (EngineKind::DuckDb, _) => true,
         (EngineKind::Sqlite, LocationFormat::SqliteFile { .. }) => true,
-        (EngineKind::Sqlite, LocationFormat::IcebergParquet { .. }) => false,
+        (
+            EngineKind::Sqlite,
+            LocationFormat::IcebergParquet { .. } | LocationFormat::Replica { .. },
+        ) => false,
     }
 }
 
@@ -157,7 +180,8 @@ pub fn validate_binding(
     };
 
     let access = match (kind, &location.format) {
-        (_, LocationFormat::Remote { .. }) | (SpaceKind::Remote, _) => {
+        (_, LocationFormat::Remote { .. } | LocationFormat::Replica { .. })
+        | (SpaceKind::Remote, _) => {
             return Err(CatalogError::KindFormatMismatch {
                 kind: kind.to_string(),
                 format: location.format.name().to_string(),
@@ -412,6 +436,32 @@ mod tests {
         assert!(matches!(
             validate_binding(&r, None, 0),
             Err(CatalogError::InvalidProperty(_))
+        ));
+    }
+
+    #[test]
+    fn replica_locations_are_read_by_duckdb_and_never_rebound() {
+        let replica = Location {
+            id: "copy".to_string(),
+            format: LocationFormat::Replica {
+                peer: "http://a:50051".to_string(),
+                space: "blog".to_string(),
+                owner: "did:key:z6Mk".to_string(),
+            },
+            residency: vec![RESIDENCY_REMOTE.to_string()],
+            writer: None,
+        };
+        assert!(replica.format.is_peer_space());
+        assert!(!parquet_location("a", None).format.is_peer_space());
+        assert!(engine_reads(EngineKind::DuckDb, &replica.format));
+        assert!(!engine_reads(EngineKind::Sqlite, &replica.format));
+        assert!(!engine_reads(EngineKind::Flight, &replica.format));
+
+        let mut r = req("copy_ro");
+        r.location = Some("copy".to_string());
+        assert!(matches!(
+            validate_binding(&r, Some(&replica), 0),
+            Err(CatalogError::KindFormatMismatch { .. })
         ));
     }
 

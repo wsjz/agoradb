@@ -17,8 +17,8 @@
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, RwLock};
 
-use agoradb_catalog::{AgoraCatalog, Space};
-use agoradb_core::SpaceKind;
+use agoradb_catalog::{AgoraCatalog, LocationFormat, Space};
+use agoradb_core::{EngineKind, RemoteMode, SpaceKind};
 use agoradb_engine::{QualifiedName, QueryEngine, RecordBatchStream, TxHandle};
 use agoradb_federation::{BoundSpace, BoundTable, Coordinator};
 use agoradb_semantic::{
@@ -102,7 +102,7 @@ impl AgoraSession {
         self.principal.as_deref()
     }
 
-    fn deny_principal(&self, what: &str) -> Result<(), SessionError> {
+    pub(crate) fn deny_principal(&self, what: &str) -> Result<(), SessionError> {
         match &self.principal {
             Some(p) => Err(SessionError::PermissionDenied(format!(
                 "principal '{p}' is read-only and cannot run {what}"
@@ -133,7 +133,10 @@ impl AgoraSession {
             AgoraStatement::CreateSpace(request) => {
                 self.deny_principal("CREATE SPACE")?;
                 if request.kind == Some(SpaceKind::Remote) {
-                    return self.create_remote_space(request);
+                    return match request.mode.unwrap_or_default() {
+                        RemoteMode::Query => self.create_remote_space(request),
+                        RemoteMode::Subscribe => self.create_subscribed_space(request).await,
+                    };
                 }
                 self.catalog.create_space(request).await?;
                 Ok(QueryResult::Empty)
@@ -153,13 +156,22 @@ impl AgoraSession {
             }
             AgoraStatement::DropSpace(name) => {
                 self.deny_principal("DROP SPACE")?;
+                let space = self.space(&name)?;
+                let replica = self
+                    .catalog
+                    .get_location(&space.location)
+                    .is_ok_and(|l| matches!(l.format, LocationFormat::Replica { .. }));
                 self.catalog.drop_space(&name)?;
                 if self.default_space().as_deref() == Some(name.as_str()) {
                     self.set_default_space(None);
                 }
+                if replica {
+                    self.remove_replica(&space.location).await?;
+                }
                 Ok(QueryResult::Empty)
             }
             AgoraStatement::PublishSpace(request) => self.publish(&request).await?.into_result(),
+            AgoraStatement::RefreshSpace(name) => self.refresh_space(&name).await?.into_result(),
             AgoraStatement::SetSpace(name) => {
                 // A principal cannot tell a Space it has no grant in from one
                 // that does not exist.
@@ -356,11 +368,13 @@ impl AgoraSession {
                             "remote spaces are not served to peers".to_string(),
                         ));
                     }
-                    (self.engines.engine_for(&space)?, Default::default())
+                    // A subscribed copy is attached to the local DuckDB.
+                    (self.bind(&space).await?, Default::default())
                 }
             };
+            // Queries shipped to an owner name its tables as the owner does.
             let engine_space = match &space.uri {
-                Some(uri) if space.kind == SpaceKind::Remote => uri.name.clone(),
+                Some(uri) if space.engine == EngineKind::Flight => uri.name.clone(),
                 _ => name.clone(),
             };
             let mut tables = Vec::new();

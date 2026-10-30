@@ -306,8 +306,8 @@ impl AgoraCatalog {
                         std::fs::create_dir_all(parent)?;
                     }
                 }
-                // validate_binding never creates one (see create_remote_space).
-                LocationFormat::Remote { .. } => {}
+                // validate_binding never creates these (see create_peer_space).
+                LocationFormat::Remote { .. } | LocationFormat::Replica { .. } => {}
             }
         }
 
@@ -354,11 +354,12 @@ impl AgoraCatalog {
             reg.views.retain(|(s, _), _| s != name);
             reg.grants.retain(|(_, s, _), _| s != name);
             reg.policies.retain(|(s, _, _), _| s != name);
-            // A remote Location holds no data of ours: forget it with its token.
+            // Another node's Space: forget its Location with the token. The
+            // caller removes a replica's files (see `replica_dir`).
             if reg
                 .locations
                 .get(&space.location)
-                .is_some_and(|l| matches!(l.format, LocationFormat::Remote { .. }))
+                .is_some_and(|l| l.format.is_peer_space())
             {
                 reg.locations.remove(&space.location);
             }

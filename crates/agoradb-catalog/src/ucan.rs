@@ -21,13 +21,17 @@
 
 use std::collections::HashSet;
 use std::fmt;
+use std::path::PathBuf;
 
-use agoradb_core::{AccessMode, CatalogError, EngineKind, SpaceKind, SpaceUri};
+use agoradb_core::{AccessMode, CatalogError, EngineKind, RemoteMode, SpaceKind, SpaceUri};
 use serde::{Deserialize, Serialize};
 
 use crate::catalog::AgoraCatalog;
 use crate::registry::now_ms;
 use crate::space::{Location, LocationFormat, Space, RESIDENCY_REMOTE};
+
+/// Directory under `.agora/` holding subscribed copies, one per Location.
+const REPLICA_DIR: &str = "replicas";
 
 /// One capability of an issued UCAN.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -220,12 +224,63 @@ impl AgoraCatalog {
         owner: &str,
         token: HeldToken,
     ) -> Result<Space, CatalogError> {
+        self.create_peer_space(name, peer, space, owner, token, RemoteMode::Query)
+    }
+
+    /// Register `name` as a local copy of `space` on the node `owner`
+    /// reachable at `peer`, holding `token` (with `space/read`) to refresh
+    /// it. The copy lives in [`replica_dir`](Self::replica_dir) and is read
+    /// by DuckDB; it is still a remote Space: read-only, never granted or
+    /// served onwards.
+    pub fn create_replica_space(
+        &self,
+        name: &str,
+        peer: &str,
+        space: &str,
+        owner: &str,
+        token: HeldToken,
+    ) -> Result<Space, CatalogError> {
+        self.create_peer_space(name, peer, space, owner, token, RemoteMode::Subscribe)
+    }
+
+    /// Directory holding the files of the replica Location `location`.
+    pub fn replica_dir(&self, location: &str) -> PathBuf {
+        self.agora_dir().join(REPLICA_DIR).join(location)
+    }
+
+    fn create_peer_space(
+        &self,
+        name: &str,
+        peer: &str,
+        space: &str,
+        owner: &str,
+        token: HeldToken,
+        mode: RemoteMode,
+    ) -> Result<Space, CatalogError> {
         if name.is_empty() || space.is_empty() || owner.is_empty() {
             return Err(CatalogError::InvalidProperty(
                 "remote space, name and owner must not be empty".to_string(),
             ));
         }
         let peer = validate_peer_url(peer)?;
+        let (engine, format) = match mode {
+            RemoteMode::Query => (
+                EngineKind::Flight,
+                LocationFormat::Remote {
+                    peer,
+                    space: space.to_string(),
+                    owner: owner.to_string(),
+                },
+            ),
+            RemoteMode::Subscribe => (
+                EngineKind::DuckDb,
+                LocationFormat::Replica {
+                    peer,
+                    space: space.to_string(),
+                    owner: owner.to_string(),
+                },
+            ),
+        };
         let created = Space {
             name: name.to_string(),
             uri: Some(SpaceUri {
@@ -233,7 +288,7 @@ impl AgoraCatalog {
                 name: space.to_string(),
             }),
             kind: SpaceKind::Remote,
-            engine: EngineKind::Flight,
+            engine,
             location: name.to_string(),
             access: AccessMode::ReadOnly,
             created_at_ms: now_ms(),
@@ -241,11 +296,7 @@ impl AgoraCatalog {
         };
         let location = Location {
             id: name.to_string(),
-            format: LocationFormat::Remote {
-                peer,
-                space: space.to_string(),
-                owner: owner.to_string(),
-            },
+            format,
             residency: vec![RESIDENCY_REMOTE.to_string()],
             writer: None,
         };

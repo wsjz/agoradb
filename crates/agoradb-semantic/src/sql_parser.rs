@@ -24,7 +24,9 @@
 //!                           STORAGE = 'disk']
 //! CREATE SPACE <name> WITH PEER = 'http://host:port', TOKEN = '<ucan>'
 //!                          [, REMOTE = '<space on the peer>'] [, KIND = 'remote']
+//!                          [, MODE = 'query' | 'subscribe']
 //! DROP SPACE <name>
+//! REFRESH SPACE <name>
 //! SET SPACE [=] <name>
 //! PUBLISH SPACE <name> [TABLES (<table>, ...)] [TO <target space>]
 //! ```
@@ -53,6 +55,9 @@ pub enum AgoraStatement {
     SetSpace(String),
     /// `PUBLISH SPACE ...`: snapshot a transactional Space into an analytical one.
     PublishSpace(PublishRequest),
+    /// `REFRESH SPACE <name>`: copy the owner's current snapshot of a
+    /// subscribed Space.
+    RefreshSpace(String),
     /// `SHOW IDENTITY`: this node's DID.
     ShowIdentity,
     /// `ISSUE UCAN ...`: grant a peer a capability on Spaces of this node.
@@ -98,16 +103,21 @@ fn parse_one(stmt: &str) -> Result<AgoraStatement, SemanticError> {
     let upper = |i: usize| words.get(i).map(|w| w.to_ascii_uppercase());
     match (upper(0).as_deref(), upper(1).as_deref()) {
         (Some("CREATE"), Some("SPACE")) => parse_create_space(stmt),
-        (Some("DROP"), Some("SPACE")) => {
-            let name = words
-                .get(2)
-                .ok_or_else(|| SemanticError::Parse("DROP SPACE: expected a space name".into()))?;
+        (Some(verb @ ("DROP" | "REFRESH")), Some("SPACE")) => {
+            let name = words.get(2).ok_or_else(|| {
+                SemanticError::Parse(format!("{verb} SPACE: expected a space name"))
+            })?;
             if words.len() > 3 {
                 return Err(SemanticError::Parse(format!(
-                    "DROP SPACE: unexpected input after '{name}'"
+                    "{verb} SPACE: unexpected input after '{name}'"
                 )));
             }
-            Ok(AgoraStatement::DropSpace(validate_name(name)?))
+            let name = validate_name(name)?;
+            Ok(if verb == "DROP" {
+                AgoraStatement::DropSpace(name)
+            } else {
+                AgoraStatement::RefreshSpace(name)
+            })
         }
         (Some("PUBLISH"), Some("SPACE")) => parse_publish(stmt),
         (Some("ISSUE"), Some("UCAN")) => Ok(AgoraStatement::IssueUcan(parse_issue_ucan(stmt)?)),
@@ -201,15 +211,19 @@ fn parse_create_space(stmt: &str) -> Result<AgoraStatement, SemanticError> {
             "PEER" => request.peer = Some(value),
             "REMOTE" => request.remote = Some(validate_name(&value)?),
             "TOKEN" => request.token = Some(value),
+            "MODE" => request.mode = Some(value.parse().map_err(invalid)?),
             other => {
                 return Err(SemanticError::InvalidProperty(format!(
                     "unknown CREATE SPACE property '{other}' \
-                     (expected KIND, ENGINE, LOCATION, ACCESS, STORAGE, PEER, REMOTE or TOKEN)"
+                     (expected KIND, ENGINE, LOCATION, ACCESS, STORAGE, PEER, REMOTE, TOKEN or MODE)"
                 )))
             }
         }
     }
-    let remote_keys = request.peer.is_some() || request.remote.is_some() || request.token.is_some();
+    let remote_keys = request.peer.is_some()
+        || request.remote.is_some()
+        || request.token.is_some()
+        || request.mode.is_some();
     let remote_kind = request.kind == Some(agoradb_core::SpaceKind::Remote);
     if remote_keys || remote_kind {
         if request.peer.is_none() || request.token.is_none() {
@@ -226,7 +240,8 @@ fn parse_create_space(stmt: &str) -> Result<AgoraStatement, SemanticError> {
             || request.storage.is_some()
         {
             return Err(SemanticError::InvalidProperty(
-                "a remote space only takes PEER, REMOTE, TOKEN and KIND = 'remote'".to_string(),
+                "a remote space only takes PEER, REMOTE, TOKEN, MODE and KIND = 'remote'"
+                    .to_string(),
             ));
         }
         request.kind = Some(agoradb_core::SpaceKind::Remote);
@@ -435,6 +450,34 @@ mod tests {
             "CREATE SPACE pub WITH PEER = 'http://a:1', TOKEN = 't', LOCATION = 'x'",
             "CREATE SPACE pub WITH PEER = 'http://a:1', TOKEN = 't', REMOTE = 'a.b'",
         ] {
+            assert!(parse_single(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn test_parse_subscription() {
+        let req = create(
+            "CREATE SPACE copy WITH PEER = 'http://a:1', TOKEN = 't', REMOTE = 'blog', MODE = 'subscribe'",
+        );
+        assert_eq!(req.kind, Some(SpaceKind::Remote));
+        assert_eq!(req.mode, Some(agoradb_core::RemoteMode::Subscribe));
+        let req = create("CREATE SPACE pub WITH PEER = 'http://a:1', TOKEN = 't'");
+        assert_eq!(req.mode, None);
+
+        for bad in [
+            // MODE only applies to a remote space.
+            "CREATE SPACE copy WITH MODE = 'subscribe'",
+            "CREATE SPACE copy WITH KIND = 'analytical', MODE = 'query'",
+            "CREATE SPACE copy WITH PEER = 'http://a:1', TOKEN = 't', MODE = 'mirror'",
+        ] {
+            assert!(parse_single(bad).is_err(), "{bad}");
+        }
+
+        assert_eq!(
+            parse_single("refresh space copy;").unwrap(),
+            AgoraStatement::RefreshSpace("copy".to_string())
+        );
+        for bad in ["REFRESH SPACE", "REFRESH SPACE a b", "REFRESH SPACE a.b"] {
             assert!(parse_single(bad).is_err(), "{bad}");
         }
     }

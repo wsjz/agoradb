@@ -15,6 +15,8 @@
 //! Nodes talking to each other over Arrow Flight (3.1a exit criteria):
 //! a UCAN-gated federated query, and revocation cutting access.
 
+mod common;
+
 use std::sync::Arc;
 
 use agoradb_catalog::AgoraCatalog;
@@ -23,132 +25,11 @@ use agoradb_identity::ucan::{token_id, Capability, UcanBuilder, ABILITY_QUERY};
 use agoradb_identity::{unix_now, unix_now_ms, AuthRequest, NodeIdentity};
 use agoradb_network::protocol::{digest, QueryTicket, HEADER_AUTH, HEADER_UCAN, METHOD_DO_GET};
 use agoradb_network::{FlightEngine, RemoteSpaceConfig};
-use agoradb_node::{AgoraSession, EngineRegistry, NodeConfig, QueryResult, SessionConfig};
-use agoradb_server::{serve, AgoraFlightService};
-use arrow_array::{Array, Int64Array, StringArray};
+use agoradb_node::{AgoraSession, EngineRegistry, NodeConfig, SessionConfig};
 use arrow_flight::{FlightClient, Ticket};
+use common::{ints, strings, Node};
 use futures::TryStreamExt;
 use iceberg::io::FileIO;
-use tokio::net::TcpListener;
-use tokio::sync::oneshot;
-
-struct Node {
-    _dir: tempfile::TempDir,
-    catalog: Arc<AgoraCatalog>,
-    engines: Arc<EngineRegistry>,
-    identity: Arc<NodeIdentity>,
-    owner: AgoraSession,
-    url: Option<String>,
-    _shutdown: Option<oneshot::Sender<()>>,
-}
-
-impl Node {
-    fn new(seed: u8) -> Self {
-        let dir = tempfile::tempdir().unwrap();
-        let catalog = Arc::new(
-            AgoraCatalog::open(FileIO::new_with_fs(), dir.path().to_str().unwrap()).unwrap(),
-        );
-        let identity = Arc::new(NodeIdentity::from_seed(&[seed; 32]));
-        let engines = Arc::new(
-            EngineRegistry::new(
-                catalog.clone(),
-                NodeConfig {
-                    identity: Some(identity.clone()),
-                    ..Default::default()
-                },
-            )
-            .unwrap(),
-        );
-        let owner = AgoraSession::new(catalog.clone(), engines.clone(), SessionConfig::default());
-        Self {
-            _dir: dir,
-            catalog,
-            engines,
-            identity,
-            owner,
-            url: None,
-            _shutdown: None,
-        }
-    }
-
-    /// Start serving Arrow Flight on an ephemeral port.
-    async fn serve(mut self) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}", listener.local_addr().unwrap());
-        let service = AgoraFlightService::new(self.catalog.clone(), self.engines.clone()).unwrap();
-        let (tx, rx) = oneshot::channel::<()>();
-        tokio::spawn(async move {
-            serve(listener, service, async {
-                let _ = rx.await;
-            })
-            .await
-            .unwrap();
-        });
-        self.url = Some(url);
-        self._shutdown = Some(tx);
-        self
-    }
-
-    fn url(&self) -> &str {
-        self.url.as_deref().unwrap()
-    }
-
-    fn did(&self) -> String {
-        self.identity.did().to_string()
-    }
-
-    async fn sql(&self, sql: &str) -> QueryResult {
-        self.owner
-            .sql(sql)
-            .await
-            .unwrap_or_else(|e| panic!("{sql}: {e}"))
-    }
-
-    async fn sql_err(&self, sql: &str) -> String {
-        match self.owner.sql(sql).await {
-            Ok(_) => panic!("{sql}: expected an error"),
-            Err(e) => e.to_string(),
-        }
-    }
-
-    /// `ISSUE UCAN ...` → (id, token).
-    async fn issue(&self, sql: &str) -> (String, String) {
-        let result = self.sql(sql).await;
-        (
-            strings(&result, 0)[0].clone(),
-            strings(&result, 3)[0].clone(),
-        )
-    }
-}
-
-fn strings(result: &QueryResult, column: usize) -> Vec<String> {
-    result
-        .batches()
-        .iter()
-        .flat_map(|b| {
-            let arr = arrow_cast::cast(b.column(column), &arrow_schema::DataType::Utf8).unwrap();
-            let arr = arr.as_any().downcast_ref::<StringArray>().unwrap().clone();
-            (0..arr.len())
-                .map(|i| arr.value(i).to_string())
-                .collect::<Vec<_>>()
-        })
-        .collect()
-}
-
-fn ints(result: &QueryResult, column: usize) -> Vec<i64> {
-    result
-        .batches()
-        .iter()
-        .flat_map(|b| {
-            let arr = arrow_cast::cast(b.column(column), &arrow_schema::DataType::Int64).unwrap();
-            arr.as_any()
-                .downcast_ref::<Int64Array>()
-                .unwrap()
-                .values()
-                .to_vec()
-        })
-        .collect()
-}
 
 /// Node A owns `blog.posts` (analytical) and `blog.secrets`, grants the
 /// DID `grantee` three of four columns of `posts` and, by row policy, only

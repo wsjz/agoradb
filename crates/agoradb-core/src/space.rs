@@ -169,13 +169,49 @@ impl FromStr for AccessMode {
     }
 }
 
+/// How a remote Space reads its owner's data (§5.3).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteMode {
+    /// Ship each query to the owner (`space/query`).
+    #[default]
+    Query,
+    /// Copy the owner's snapshot files and query them locally (`space/read`).
+    Subscribe,
+}
+
+impl fmt::Display for RemoteMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RemoteMode::Query => f.write_str("query"),
+            RemoteMode::Subscribe => f.write_str("subscribe"),
+        }
+    }
+}
+
+impl FromStr for RemoteMode {
+    type Err = crate::error::AgoraError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "query" => Ok(RemoteMode::Query),
+            "subscribe" => Ok(RemoteMode::Subscribe),
+            other => Err(crate::error::AgoraError::InvalidArgument(format!(
+                "unknown remote mode '{other}' (expected 'query' or 'subscribe')"
+            ))),
+        }
+    }
+}
+
 /// What `CREATE SPACE` asks for. Unset fields take the defaults described in
 /// the v3 architecture (§3.2): `kind` = analytical, `engine` = the kind's
 /// default engine, a new Location named after the Space, `access` = writable.
 ///
 /// A request with `peer` set creates a remote Space (§9): `remote` names the
-/// Space on the peer (default: the same name) and `token` is the UCAN that
-/// authorizes this node to query it. `Debug` never prints the token.
+/// Space on the peer (default: the same name), `token` is the UCAN that
+/// authorizes this node to read it and `mode` says whether queries are
+/// shipped to the owner or run on a local copy. `Debug` never prints the
+/// token.
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct CreateSpaceRequest {
     pub name: String,
@@ -190,8 +226,11 @@ pub struct CreateSpaceRequest {
     pub peer: Option<String>,
     /// Name of the Space on the peer.
     pub remote: Option<String>,
-    /// UCAN granting this node `space/query` on the remote Space.
+    /// UCAN granting this node `space/query` (or `space/read` to subscribe)
+    /// on the remote Space.
     pub token: Option<String>,
+    /// Query shipping (default) or subscription.
+    pub mode: Option<RemoteMode>,
 }
 
 impl fmt::Debug for CreateSpaceRequest {
@@ -206,6 +245,7 @@ impl fmt::Debug for CreateSpaceRequest {
             .field("peer", &self.peer)
             .field("remote", &self.remote)
             .field("token", &self.token.as_ref().map(|_| "<redacted>"))
+            .field("mode", &self.mode)
             .finish()
     }
 }
@@ -274,6 +314,12 @@ mod tests {
         );
         assert!("graph".parse::<SpaceKind>().is_err());
         assert_eq!("remote".parse::<SpaceKind>().unwrap(), SpaceKind::Remote);
+        assert_eq!(
+            "Subscribe".parse::<RemoteMode>().unwrap(),
+            RemoteMode::Subscribe
+        );
+        assert_eq!(RemoteMode::default().to_string(), "query");
+        assert!("mirror".parse::<RemoteMode>().is_err());
         assert_eq!(SpaceKind::Remote.default_engine(), EngineKind::Flight);
     }
 

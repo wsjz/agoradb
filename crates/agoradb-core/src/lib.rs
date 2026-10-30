@@ -23,4 +23,4 @@ pub mod space;
 
 pub use constants::*;
 pub use error::{AgoraError, CatalogError, CompactionError, Result, StorageError};
-pub use space::{AccessMode, CreateSpaceRequest, EngineKind, SpaceKind, SpaceUri};
+pub use space::{AccessMode, CreateSpaceRequest, EngineKind, RemoteMode, SpaceKind, SpaceUri};
