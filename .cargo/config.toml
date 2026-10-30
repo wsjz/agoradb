@@ -1,8 +1,12 @@
-[profile.dev]
-split-debuginfo = "packed"
+# Dependencies keep only line tables: backtraces stay readable, but DataFusion /
+# Arrow no longer ship full debug info into every test binary.
+[profile.dev.package."*"]
+debug = "line-tables-only"
 
-[profile.test]
-split-debuginfo = "packed"
+# Link the official prebuilt libduckdb (downloaded once into target/duckdb-download)
+# instead of compiling DuckDB's C++ sources.
+[env]
+DUCKDB_DOWNLOAD_LIB = "1"
 
 [build]
 rustflags = ["-C", "symbol-mangling-version=v0"]

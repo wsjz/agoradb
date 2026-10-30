@@ -9,7 +9,7 @@ FROM rust:latest AS builder
 
 WORKDIR /app
 
-# duckdb / rusqlite `bundled` compile C and C++ sources.
+# rusqlite `bundled` compiles C sources; duckdb links the prebuilt libduckdb.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         pkg-config libssl-dev clang \
     && rm -rf /var/lib/apt/lists/*
@@ -19,7 +19,7 @@ COPY .cargo ./.cargo
 COPY crates ./crates
 COPY tests ./tests
 
-# Build every test binary (the DuckDB C++ build dominates: several minutes).
+# Build every test binary.
 RUN cargo test --workspace --no-run
 
 # Generate the TPC-H fixture used by tests/tests/tpch_queries.rs.
