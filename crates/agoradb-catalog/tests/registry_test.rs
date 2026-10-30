@@ -288,7 +288,7 @@ async fn remote_spaces_keep_their_token_private_and_drop_cleanly() {
     let space = catalog
         .create_remote_space(
             "pub",
-            "http://node-a:50051/",
+            Some("http://node-a:50051/"),
             "blog",
             "did:key:z6Mkowner",
             token,
@@ -305,7 +305,7 @@ async fn remote_spaces_keep_their_token_private_and_drop_cleanly() {
     assert_eq!(
         loc.format,
         LocationFormat::Remote {
-            peer: "http://node-a:50051".to_string(),
+            peer: Some("http://node-a:50051".to_string()),
             space: "blog".to_string(),
             owner: "did:key:z6Mkowner".to_string(),
         }
@@ -333,7 +333,7 @@ async fn remote_spaces_keep_their_token_private_and_drop_cleanly() {
     assert!(matches!(
         reopened.create_remote_space(
             "pub",
-            "http://x:1",
+            Some("http://x:1"),
             "blog",
             "did:key:z6Mkowner",
             agoradb_catalog::HeldToken::new("t")
@@ -343,7 +343,7 @@ async fn remote_spaces_keep_their_token_private_and_drop_cleanly() {
     assert!(matches!(
         reopened.create_remote_space(
             "other",
-            "https://x:1",
+            Some("ftp://x:1"),
             "blog",
             "did:key:z6Mkowner",
             agoradb_catalog::HeldToken::new("t")
@@ -400,4 +400,31 @@ async fn revocations_persist_and_refresh_picks_up_other_writers() {
     assert!(server.get_space("blog").is_err());
     server.refresh().unwrap();
     assert!(server.get_space("blog").is_ok());
+}
+
+#[test]
+fn discovered_peers_persist_across_processes() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_str().unwrap().to_string();
+    let serving = open(&root);
+    let did = "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK";
+    serving.record_peer(did, "https://10.0.0.5:50051/").unwrap();
+
+    // Another process of the same node (e.g. `agoradb sql`) sees it.
+    let other = open(&root);
+    let peer = other.get_peer(did).unwrap();
+    assert_eq!(peer.endpoint, "https://10.0.0.5:50051");
+    assert!(peer.last_seen_ms > 0);
+    assert_eq!(other.list_peers().len(), 1);
+
+    // A new address replaces the old one.
+    serving.record_peer(did, "https://10.0.0.6:50051").unwrap();
+    assert_eq!(
+        open(&root).get_peer(did).unwrap().endpoint,
+        "https://10.0.0.6:50051"
+    );
+
+    assert!(serving.record_peer("z6Mk", "https://a:1").is_err());
+    assert!(serving.record_peer(did, "https://a:1/path").is_err());
+    assert!(serving.get_peer("did:key:z6Mkother").is_none());
 }

@@ -29,6 +29,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use agoradb_catalog::AgoraCatalog;
+use agoradb_discovery::{Discovery, DiscoveryConfig, EndpointResponse};
 use agoradb_node::{AgoraSession, EngineRegistry, NodeConfig, QueryResult, SessionConfig};
 use agoradb_server::{serve, AgoraFlightService};
 use arrow_cast::display::{ArrayFormatter, FormatOptions};
@@ -53,6 +54,11 @@ struct Cli {
     )]
     root: PathBuf,
 
+    /// Accept plaintext (http://) peers. By default peers are reached over
+    /// TLS, their certificate pinned to their DID.
+    #[arg(long, env = "AGORADB_ALLOW_HTTP", global = true)]
+    allow_http: bool,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -72,24 +78,43 @@ enum Command {
         #[arg(long)]
         raw: bool,
     },
-    /// Serve this node's Spaces to peers over Arrow Flight.
+    /// Serve this node's Spaces to peers over Arrow Flight (TLS).
     Serve {
         /// Address to listen on.
         #[arg(long, env = "AGORADB_LISTEN", default_value = "0.0.0.0:50051")]
         listen: SocketAddr,
+        /// Serve plaintext gRPC instead of TLS; needs --allow-http.
+        #[arg(long)]
+        plaintext: bool,
+        /// libp2p address used to find peers; port 0 picks a free one.
+        #[arg(long, env = "AGORADB_P2P_LISTEN", default_value = "/ip4/0.0.0.0/tcp/0")]
+        p2p_listen: String,
+        /// Do not look for peers on the local network (mDNS).
+        #[arg(long)]
+        no_mdns: bool,
+        /// libp2p address of a known peer to connect to (repeatable).
+        #[arg(long)]
+        dial: Vec<String>,
     },
 }
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
-fn open_node(root: &Path) -> Result<(Arc<AgoraCatalog>, Arc<EngineRegistry>), BoxError> {
+fn open_node(
+    root: &Path,
+    allow_http: bool,
+) -> Result<(Arc<AgoraCatalog>, Arc<EngineRegistry>), BoxError> {
     std::fs::create_dir_all(root)?;
     let root = root.canonicalize()?;
     let root = root
         .to_str()
         .ok_or("the data directory path must be valid UTF-8")?;
     let catalog = Arc::new(AgoraCatalog::open(FileIO::new_with_fs(), root)?);
-    let engines = Arc::new(EngineRegistry::new(catalog.clone(), NodeConfig::default())?);
+    let config = NodeConfig {
+        allow_http,
+        ..Default::default()
+    };
+    let engines = Arc::new(EngineRegistry::new(catalog.clone(), config)?);
     Ok((catalog, engines))
 }
 
@@ -122,7 +147,7 @@ fn print_result(result: &QueryResult, raw: bool) -> Result<(), BoxError> {
 async fn run(cli: Cli) -> Result<(), BoxError> {
     match cli.command {
         Command::Identity => {
-            let (_, engines) = open_node(&cli.root)?;
+            let (_, engines) = open_node(&cli.root, cli.allow_http)?;
             println!("{}", engines.identity()?.did());
         }
         Command::Sql { sql, space, raw } => {
@@ -133,7 +158,7 @@ async fn run(cli: Cli) -> Result<(), BoxError> {
             } else {
                 sql
             };
-            let (catalog, engines) = open_node(&cli.root)?;
+            let (catalog, engines) = open_node(&cli.root, cli.allow_http)?;
             let session = AgoraSession::new(
                 catalog,
                 engines,
@@ -147,12 +172,45 @@ async fn run(cli: Cli) -> Result<(), BoxError> {
                 print_result(&result, raw)?;
             }
         }
-        Command::Serve { listen } => {
-            let (catalog, engines) = open_node(&cli.root)?;
-            let service = AgoraFlightService::new(catalog, engines)?;
+        Command::Serve {
+            listen,
+            plaintext,
+            p2p_listen,
+            no_mdns,
+            dial,
+        } => {
+            if plaintext && !cli.allow_http {
+                return Err("--plaintext needs --allow-http".into());
+            }
+            let (catalog, engines) = open_node(&cli.root, cli.allow_http)?;
+            let tls = if plaintext {
+                None
+            } else {
+                Some(engines.identity()?.tls_identity()?)
+            };
+            let identity = engines.identity()?;
+            let service = AgoraFlightService::new(catalog.clone(), engines)?;
             let listener = TcpListener::bind(listen).await?;
-            tracing::info!(did = %service.did(), addr = %listener.local_addr()?, "serving Arrow Flight");
-            serve(listener, service, async {
+            let scheme = if plaintext { "http" } else { "https" };
+            tracing::info!(did = %service.did(), addr = %listener.local_addr()?, %scheme, "serving Arrow Flight");
+            // Announce this endpoint to peers and record theirs (§9).
+            let discovery = Discovery::start(
+                &identity,
+                catalog,
+                DiscoveryConfig {
+                    listen: p2p_listen.parse()?,
+                    flight: EndpointResponse {
+                        scheme: scheme.to_string(),
+                        port: listener.local_addr()?.port(),
+                    },
+                    mdns: !no_mdns,
+                },
+            )
+            .await?;
+            for addr in dial {
+                discovery.dial(addr.parse()?).await?;
+            }
+            serve(listener, service, tls.as_ref(), async {
                 let _ = tokio::signal::ctrl_c().await;
                 tracing::info!("shutting down");
             })

@@ -28,6 +28,8 @@
 pub mod client;
 pub mod engine;
 pub mod protocol;
+pub mod tls;
 
 pub use client::{ChunkStream, PeerClient};
 pub use engine::{FlightEngine, RemoteSpaceConfig};
+pub use tls::{install_crypto_provider, DidCertVerifier};

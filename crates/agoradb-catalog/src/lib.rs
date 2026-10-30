@@ -18,6 +18,7 @@
 
 pub mod acl;
 pub mod catalog;
+pub mod peer;
 pub mod registry;
 pub mod replace;
 pub mod resolve;
@@ -26,6 +27,9 @@ pub mod ucan;
 
 pub use acl::{Grant, RowPolicy, ViewDef};
 pub use catalog::AgoraCatalog;
+pub use peer::Peer;
 pub use resolve::ResolvedTable;
 pub use space::{Location, LocationFormat, LocationId, Space};
-pub use ucan::{validate_peer_url, HeldToken, IssuedUcan, Revocation, UcanCapability};
+pub use ucan::{
+    is_plaintext_peer, validate_peer_url, HeldToken, IssuedUcan, Revocation, UcanCapability,
+};

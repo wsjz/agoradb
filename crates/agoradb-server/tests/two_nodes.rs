@@ -24,7 +24,7 @@ use agoradb_engine::{EngineError, QualifiedName, QueryEngine};
 use agoradb_identity::ucan::{token_id, Capability, UcanBuilder, ABILITY_QUERY};
 use agoradb_identity::{unix_now, unix_now_ms, AuthRequest, NodeIdentity};
 use agoradb_network::protocol::{digest, QueryTicket, HEADER_AUTH, HEADER_UCAN, METHOD_DO_GET};
-use agoradb_network::{FlightEngine, RemoteSpaceConfig};
+use agoradb_network::{install_crypto_provider, DidCertVerifier, FlightEngine, RemoteSpaceConfig};
 use agoradb_node::{AgoraSession, EngineRegistry, NodeConfig, SessionConfig};
 use arrow_flight::{FlightClient, Ticket};
 use common::{ints, strings, Node};
@@ -187,6 +187,7 @@ async fn delegated_tokens_act_for_the_delegator_and_revocation_propagates() {
             remote_space: "blog".to_string(),
             owner: a.identity.did().clone(),
             token: root.clone(),
+            allow_http: true,
         },
         c.identity.clone(),
     );
@@ -216,12 +217,19 @@ fn signed_client_headers(
 }
 
 async fn raw_do_get(
-    url: &str,
+    owner: &Node,
     auth: Option<&str>,
     token: Option<&str>,
     ticket: Vec<u8>,
 ) -> Result<usize, tonic::Code> {
-    let channel = tonic::transport::Endpoint::from_shared(url.to_string())
+    install_crypto_provider();
+    let pinned = DidCertVerifier::new(owner.identity.did().public_key().to_bytes());
+    let channel = tonic::transport::Endpoint::from_shared(owner.url().to_string())
+        .unwrap()
+        .tls_config_with_verifier(
+            tonic::transport::ClientTlsConfig::new().domain_name("agoradb.peer"),
+            pinned,
+        )
         .unwrap()
         .connect()
         .await
@@ -261,19 +269,19 @@ async fn requests_are_signed_bound_to_their_content_and_single_use() {
     let sql = ticket("SELECT id FROM blog.posts");
     let auth = signed_client_headers(&b.identity, &a, &sql, &token);
     assert_eq!(
-        raw_do_get(a.url(), Some(&auth), Some(&token), sql.clone()).await,
+        raw_do_get(&a, Some(&auth), Some(&token), sql.clone()).await,
         Ok(3)
     );
     // The same request again is a replay.
     assert_eq!(
-        raw_do_get(a.url(), Some(&auth), Some(&token), sql.clone()).await,
+        raw_do_get(&a, Some(&auth), Some(&token), sql.clone()).await,
         Err(tonic::Code::Unauthenticated)
     );
     // A signature over one query does not authorize another.
     let auth = signed_client_headers(&b.identity, &a, &sql, &token);
     assert_eq!(
         raw_do_get(
-            a.url(),
+            &a,
             Some(&auth),
             Some(&token),
             ticket("SELECT k, v FROM blog.secrets")
@@ -283,7 +291,7 @@ async fn requests_are_signed_bound_to_their_content_and_single_use() {
     );
     // Unsigned requests are refused.
     assert_eq!(
-        raw_do_get(a.url(), None, Some(&token), sql.clone()).await,
+        raw_do_get(&a, None, Some(&token), sql.clone()).await,
         Err(tonic::Code::Unauthenticated)
     );
     // A request signed for another node is refused.
@@ -294,7 +302,7 @@ async fn requests_are_signed_bound_to_their_content_and_single_use() {
         .to_header()
         .unwrap();
     assert_eq!(
-        raw_do_get(a.url(), Some(&misdirected), Some(&token), sql.clone()).await,
+        raw_do_get(&a, Some(&misdirected), Some(&token), sql.clone()).await,
         Err(tonic::Code::Unauthenticated)
     );
 
@@ -309,7 +317,7 @@ async fn requests_are_signed_bound_to_their_content_and_single_use() {
         let t = ticket(query);
         let auth = signed_client_headers(&b.identity, &a, &t, &token);
         assert_eq!(
-            raw_do_get(a.url(), Some(&auth), Some(&token), t).await,
+            raw_do_get(&a, Some(&auth), Some(&token), t).await,
             Err(tonic::Code::PermissionDenied),
             "{query}"
         );
@@ -321,7 +329,7 @@ async fn requests_are_signed_bound_to_their_content_and_single_use() {
         .unwrap();
     let auth = signed_client_headers(&b.identity, &a, &sql, &expired);
     assert_eq!(
-        raw_do_get(a.url(), Some(&auth), Some(&expired), sql.clone()).await,
+        raw_do_get(&a, Some(&auth), Some(&expired), sql.clone()).await,
         Err(tonic::Code::PermissionDenied)
     );
     // A token B signed for itself is not rooted at A.
@@ -331,7 +339,7 @@ async fn requests_are_signed_bound_to_their_content_and_single_use() {
         .unwrap();
     let auth = signed_client_headers(&b.identity, &a, &sql, &forged);
     assert_eq!(
-        raw_do_get(a.url(), Some(&auth), Some(&forged), sql).await,
+        raw_do_get(&a, Some(&auth), Some(&forged), sql).await,
         Err(tonic::Code::PermissionDenied)
     );
 }
@@ -368,6 +376,7 @@ async fn remote_spaces_are_never_served_onwards() {
             remote_space: "pub".to_string(),
             owner: b.identity.did().clone(),
             token: wildcard,
+            allow_http: true,
         },
         c.identity.clone(),
     );
@@ -401,8 +410,8 @@ async fn mounting_checks_the_token_and_peer_up_front() {
             "TOKEN",
         ),
         (
-            "CREATE SPACE pub WITH PEER = 'https://a:1', TOKEN = 'x.y.z'".to_string(),
-            "https",
+            "CREATE SPACE pub WITH PEER = 'ftp://a:1', TOKEN = 'x.y.z'".to_string(),
+            "https://host:port",
         ),
         (
             format!(
@@ -465,6 +474,7 @@ async fn mounting_checks_the_token_and_peer_up_front() {
             reopened.clone(),
             NodeConfig {
                 identity: Some(b.identity.clone()),
+                allow_http: true,
                 ..Default::default()
             },
         )

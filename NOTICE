@@ -68,3 +68,20 @@ dalek-cryptography (ed25519-dalek, curve25519-dalek)
 BLAKE3 (blake3)
   https://github.com/BLAKE3-team/BLAKE3  -  Apache License 2.0 (dual-licensed with CC0-1.0)
   Copyright 2019 Jack O'Connor and Samuel Neves
+
+rust-libp2p (libp2p and its libp2p-* crates; used for peer discovery)
+  https://github.com/libp2p/rust-libp2p  -  MIT License
+  Copyright 2017-2020 Parity Technologies (UK) Ltd.
+
+rustls (rustls, rustls-webpki)
+  https://github.com/rustls/rustls  -  Apache License 2.0 (also ISC, MIT)
+  rustls: Copyright (c) 2016 Joseph Birr-Pixton
+  rustls-webpki: Copyright 2015 Brian Smith
+
+rcgen (rcgen)
+  https://github.com/rustls/rcgen  -  MIT License (also Apache-2.0)
+  Copyright (c) 2019-2026 est31 and contributors
+
+ring (ring)
+  https://github.com/briansmith/ring  -  Apache License 2.0 and ISC (BoringSSL-derived parts)
+  Copyright 2015-2025 Brian Smith

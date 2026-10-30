@@ -12,6 +12,7 @@ blake3 = { workspace = true }
 bs58 = { workspace = true }
 ed25519-dalek = { workspace = true }
 getrandom = { workspace = true }
+rcgen = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

@@ -59,8 +59,10 @@ pub enum LocationFormat {
     SqliteFile { path: String },
     /// A Space on another node, served over Arrow Flight.
     Remote {
-        /// Flight endpoint, `http://host:port`.
-        peer: String,
+        /// Flight endpoint, `https://host:port`; `None` looks the owner's
+        /// endpoint up among the discovered peers on every connection.
+        #[serde(default)]
+        peer: Option<String>,
         /// The Space's name on the peer.
         space: String,
         /// DID of the owning node (root issuer of the UCAN).
@@ -69,8 +71,9 @@ pub enum LocationFormat {
     /// A local copy of a Space on another node (subscription, §5.3): the
     /// owner's snapshot files under `.agora/replicas/<location id>/`.
     Replica {
-        /// Flight endpoint, `http://host:port`.
-        peer: String,
+        /// Flight endpoint, as for [`LocationFormat::Remote`].
+        #[serde(default)]
+        peer: Option<String>,
         /// The Space's name on the peer.
         space: String,
         /// DID of the owning node (root issuer of the UCAN).
@@ -411,7 +414,7 @@ mod tests {
         let remote = Location {
             id: "pub".to_string(),
             format: LocationFormat::Remote {
-                peer: "http://a:50051".to_string(),
+                peer: Some("https://a:50051".to_string()),
                 space: "blog".to_string(),
                 owner: "did:key:z6Mk".to_string(),
             },
@@ -444,7 +447,7 @@ mod tests {
         let replica = Location {
             id: "copy".to_string(),
             format: LocationFormat::Replica {
-                peer: "http://a:50051".to_string(),
+                peer: Some("https://a:50051".to_string()),
                 space: "blog".to_string(),
                 owner: "did:key:z6Mk".to_string(),
             },

@@ -27,6 +27,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::acl::{Grant, RowPolicy, ViewDef};
 use crate::catalog::AgoraCatalog;
+use crate::peer::Peer;
 use crate::space::{validate_binding, Location, LocationFormat, LocationId, Space};
 use crate::ucan::{IssuedUcan, RemoteToken, Revocation};
 
@@ -39,6 +40,7 @@ const GRANTS_FILE: &str = "grants.json";
 const POLICIES_FILE: &str = "policies.json";
 const UCANS_FILE: &str = "ucans.json";
 const REVOCATIONS_FILE: &str = "revocations.json";
+const PEERS_FILE: &str = "peers.json";
 /// Held UCANs live apart from the other registries, readable by the owner only.
 const IDENTITY_DIR: &str = "identity";
 const REMOTE_TOKENS_FILE: &str = "remote_tokens.json";
@@ -70,6 +72,8 @@ pub(crate) struct Registry {
     pub(crate) revoked: BTreeMap<String, Revocation>,
     /// UCANs held for remote Spaces, keyed by Space name.
     pub(crate) tokens: BTreeMap<String, RemoteToken>,
+    /// Discovered peers, keyed by DID.
+    pub(crate) peers: BTreeMap<String, Peer>,
 }
 
 fn registry_err(context: &str, e: impl std::fmt::Display) -> CatalogError {
@@ -158,6 +162,7 @@ impl Registry {
         let revoked: Vec<Revocation> = read_items(&dir.join(REVOCATIONS_FILE), &mut h)?;
         let tokens: Vec<RemoteToken> =
             read_items(&dir.join(IDENTITY_DIR).join(REMOTE_TOKENS_FILE), &mut h)?;
+        let peers: Vec<Peer> = read_items(&dir.join(PEERS_FILE), &mut h)?;
         let registry = Self {
             spaces: spaces.into_iter().map(|s| (s.name.clone(), s)).collect(),
             locations: locations.into_iter().map(|l| (l.id.clone(), l)).collect(),
@@ -167,6 +172,7 @@ impl Registry {
             issued: issued.into_iter().map(|u| (u.id.clone(), u)).collect(),
             revoked: revoked.into_iter().map(|r| (r.id.clone(), r)).collect(),
             tokens: tokens.into_iter().map(|t| (t.space.clone(), t)).collect(),
+            peers: peers.into_iter().map(|p| (p.did.clone(), p)).collect(),
         };
         Ok((registry, h.finish()))
     }
@@ -201,6 +207,10 @@ impl Registry {
         write_items(
             &dir.join(REVOCATIONS_FILE),
             self.revoked.values().cloned().collect(),
+        )?;
+        write_items(
+            &dir.join(PEERS_FILE),
+            self.peers.values().cloned().collect(),
         )?;
         if !self.tokens.is_empty() || dir.join(IDENTITY_DIR).join(REMOTE_TOKENS_FILE).exists() {
             let identity = dir.join(IDENTITY_DIR);

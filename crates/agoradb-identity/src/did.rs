@@ -39,6 +39,13 @@ pub struct Did {
 
 impl Did {
     /// The DID of a public key.
+    /// The DID of a raw 32-byte Ed25519 public key.
+    pub fn from_public_key_bytes(key: &[u8; 32]) -> Result<Self, IdentityError> {
+        let key =
+            VerifyingKey::from_bytes(key).map_err(|e| IdentityError::InvalidKey(e.to_string()))?;
+        Ok(Self::from_public_key(&key))
+    }
+
     pub fn from_public_key(key: &VerifyingKey) -> Self {
         let mut bytes = Vec::with_capacity(34);
         bytes.extend_from_slice(&ED25519_MULTICODEC);

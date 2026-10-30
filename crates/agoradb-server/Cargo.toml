@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 agoradb-catalog = { path = "../agoradb-catalog" }
 agoradb-core = { path = "../agoradb-core" }
+agoradb-discovery = { path = "../agoradb-discovery" }
 agoradb-engine = { path = "../agoradb-engine" }
 agoradb-identity = { path = "../agoradb-identity" }
 agoradb-network = { path = "../agoradb-network" }

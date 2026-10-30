@@ -30,16 +30,32 @@ use bytes::Bytes;
 use futures::stream::BoxStream;
 use futures::{StreamExt, TryStreamExt};
 use tokio::sync::OnceCell;
-use tonic::transport::{Channel, Endpoint};
+use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
 use tonic::Code;
 
 use crate::protocol::{
     digest, FetchFileRequest, SnapshotRequest, SnapshotResponse, ACTION_FETCH_FILE,
     ACTION_SNAPSHOT, HEADER_AUTH, HEADER_UCAN, METHOD_FETCH_FILE, METHOD_SNAPSHOT,
 };
+use crate::tls::{install_crypto_provider, DidCertVerifier};
 
 /// How long to wait for a TCP connection to a peer.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// TLS server name sent to every peer; peers are identified by DID instead.
+const PEER_SERVER_NAME: &str = "agoradb.peer";
+
+/// `e` and its sources, so a TLS failure says why the peer was refused.
+fn error_chain(e: &dyn std::error::Error) -> String {
+    let mut text = e.to_string();
+    let mut source = e.source();
+    while let Some(cause) = source {
+        text.push_str(": ");
+        text.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    text
+}
 
 /// A stream of file chunks from [`PeerClient::fetch_file`].
 pub type ChunkStream = BoxStream<'static, Result<Bytes, EngineError>>;
@@ -51,6 +67,7 @@ pub struct PeerClient {
     owner: Did,
     token: String,
     identity: Arc<NodeIdentity>,
+    allow_http: bool,
     channel: OnceCell<Channel>,
 }
 
@@ -83,16 +100,24 @@ pub(crate) fn flight_to_engine(e: FlightError) -> EngineError {
 }
 
 impl PeerClient {
-    /// A client for the node `owner` at `peer` (`http://host:port`), signing
-    /// as `identity` and presenting `token`.
+    /// A client for the node `owner` at `peer` (`https://host:port`),
+    /// signing as `identity` and presenting `token`. Plaintext peers
+    /// (`http://`) are refused unless [`allow_http`](Self::allow_http) is set.
     pub fn new(peer: String, owner: Did, token: String, identity: Arc<NodeIdentity>) -> Self {
         Self {
             peer,
             owner,
             token,
             identity,
+            allow_http: false,
             channel: OnceCell::new(),
         }
+    }
+
+    /// Accept a plaintext (`http://`) peer.
+    pub fn allow_http(mut self, allow: bool) -> Self {
+        self.allow_http = allow;
+        self
     }
 
     /// The peer's Flight endpoint.
@@ -103,13 +128,28 @@ impl PeerClient {
     async fn channel(&self) -> Result<Channel, EngineError> {
         self.channel
             .get_or_try_init(|| async {
-                let endpoint = Endpoint::from_shared(self.peer.clone())
+                if self.peer.starts_with("http://") && !self.allow_http {
+                    return Err(EngineError::PermissionDenied(format!(
+                        "{} is plaintext and this node does not allow http peers",
+                        self.peer
+                    )));
+                }
+                let mut endpoint = Endpoint::from_shared(self.peer.clone())
                     .map_err(|e| EngineError::Remote(format!("invalid peer address: {e}")))?
                     .connect_timeout(CONNECT_TIMEOUT);
-                endpoint
-                    .connect()
-                    .await
-                    .map_err(|e| EngineError::Remote(format!("cannot reach {}: {e}", self.peer)))
+                if self.peer.starts_with("https://") {
+                    install_crypto_provider();
+                    // The name is not checked (the certificate is pinned to
+                    // the owner's DID); a fixed one avoids IPv6 literals.
+                    let tls = ClientTlsConfig::new().domain_name(PEER_SERVER_NAME);
+                    let pinned = DidCertVerifier::new(self.owner.public_key().to_bytes());
+                    endpoint = endpoint
+                        .tls_config_with_verifier(tls, pinned)
+                        .map_err(|e| EngineError::Remote(format!("TLS setup: {e}")))?;
+                }
+                endpoint.connect().await.map_err(|e| {
+                    EngineError::Remote(format!("cannot reach {}: {}", self.peer, error_chain(&e)))
+                })
             })
             .await
             .cloned()
@@ -173,6 +213,33 @@ impl PeerClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn client(peer: &str) -> PeerClient {
+        PeerClient::new(
+            peer.to_string(),
+            NodeIdentity::from_seed(&[1; 32]).did().clone(),
+            "header.payload.signature".to_string(),
+            Arc::new(NodeIdentity::from_seed(&[2; 32])),
+        )
+    }
+
+    #[tokio::test]
+    async fn plaintext_peers_need_allow_http() {
+        let refused = client("http://127.0.0.1:1").snapshot("blog").await;
+        assert!(
+            matches!(&refused, Err(EngineError::PermissionDenied(m)) if m.contains("plaintext")),
+            "{refused:?}"
+        );
+        // Allowed: it gets as far as connecting (nothing listens there).
+        let allowed = client("http://127.0.0.1:1")
+            .allow_http(true)
+            .snapshot("blog")
+            .await;
+        assert!(
+            matches!(allowed, Err(EngineError::Remote(_))),
+            "{allowed:?}"
+        );
+    }
 
     #[test]
     fn debug_never_prints_the_token() {

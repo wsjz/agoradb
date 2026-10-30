@@ -154,6 +154,10 @@ impl AgoraSession {
                 self.deny_principal("SHOW UCANS")?;
                 self.show_ucans()
             }
+            AgoraStatement::ShowPeers => {
+                self.deny_principal("SHOW PEERS")?;
+                self.show_peers()
+            }
             AgoraStatement::DropSpace(name) => {
                 self.deny_principal("DROP SPACE")?;
                 let space = self.space(&name)?;

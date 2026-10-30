@@ -35,6 +35,9 @@ pub enum IdentityError {
     #[error("authentication failed: {0}")]
     Auth(String),
 
+    #[error("TLS certificate: {0}")]
+    Tls(String),
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 }

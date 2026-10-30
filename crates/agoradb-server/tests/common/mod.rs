@@ -13,7 +13,8 @@
 // limitations under the License.
 
 //! Test nodes for the multi-node tests: each has its own root directory and
-//! identity, and can serve Arrow Flight on an ephemeral port.
+//! identity, and can serve Arrow Flight on an ephemeral port, over TLS
+//! unless a test asks for plaintext.
 
 // Each test binary uses a different subset of these helpers.
 #![allow(dead_code)]
@@ -41,7 +42,17 @@ pub struct Node {
 }
 
 impl Node {
+    /// A node that only reaches peers over TLS.
     pub fn new(seed: u8) -> Self {
+        Self::with_config(seed, false)
+    }
+
+    /// A node that also accepts plaintext (`http://`) peers.
+    pub fn allowing_http(seed: u8) -> Self {
+        Self::with_config(seed, true)
+    }
+
+    fn with_config(seed: u8, allow_http: bool) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let catalog = Arc::new(
             AgoraCatalog::open(FileIO::new_with_fs(), dir.path().to_str().unwrap()).unwrap(),
@@ -52,6 +63,7 @@ impl Node {
                 catalog.clone(),
                 NodeConfig {
                     identity: Some(identity.clone()),
+                    allow_http,
                     ..Default::default()
                 },
             )
@@ -69,14 +81,25 @@ impl Node {
         }
     }
 
-    /// Start serving Arrow Flight on an ephemeral port.
-    pub async fn serve(mut self) -> Self {
+    /// Start serving Arrow Flight over TLS on an ephemeral port.
+    pub async fn serve(self) -> Self {
+        self.serve_with(true).await
+    }
+
+    /// Start serving plaintext Arrow Flight on an ephemeral port.
+    pub async fn serve_plaintext(self) -> Self {
+        self.serve_with(false).await
+    }
+
+    async fn serve_with(mut self, tls: bool) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}", listener.local_addr().unwrap());
+        let scheme = if tls { "https" } else { "http" };
+        let url = format!("{scheme}://{}", listener.local_addr().unwrap());
+        let tls = tls.then(|| self.identity.tls_identity().unwrap());
         let service = AgoraFlightService::new(self.catalog.clone(), self.engines.clone()).unwrap();
         let (tx, rx) = oneshot::channel::<()>();
         let handle = tokio::spawn(async move {
-            serve(listener, service, async {
+            serve(listener, service, tls.as_ref(), async {
                 let _ = rx.await;
             })
             .await

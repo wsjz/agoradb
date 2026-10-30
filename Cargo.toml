@@ -45,14 +45,18 @@ duckdb = { version = "=1.10505.0" }
 rusqlite = { version = "0.40", features = ["bundled", "column_decltype"] }
 
 # Identity and networking
-ed25519-dalek = { version = "2.2", features = ["zeroize"] }
+ed25519-dalek = { version = "2.2", features = ["zeroize", "pkcs8"] }
 getrandom = "0.3"
 base64 = "0.22"
 bs58 = "0.5"
 blake3 = "1.8"
 zeroize = "1"
 arrow-flight = "58.4"
-tonic = "0.14"
+tonic = { version = "0.14.6", features = ["tls-ring"] }
+rcgen = { version = "0.14.10", default-features = false, features = ["crypto", "pem", "ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-webpki = { version = "0.103", default-features = false, features = ["alloc", "ring"] }
+libp2p = { version = "0.57.1", default-features = false, features = ["tokio", "tcp", "noise", "yamux", "mdns", "identify", "request-response", "json", "macros", "ed25519"] }
 clap = { version = "4", features = ["derive", "env"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 

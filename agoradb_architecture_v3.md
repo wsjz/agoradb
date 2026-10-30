@@ -164,7 +164,7 @@ Unchanged from v1 (Full / Edge / Browser), with one refinement: the node type no
 
 ### 3.4 Catalog
 
-Per-node registry with three tables: **Spaces**, **Locations**, **Peers**. Plus per-analytical-Space Iceberg metadata (unchanged). New in v3: `policies`, `views`, `engine` and `publish` are catalog entities, versioned with the Space.
+Per-node registry with three tables: **Spaces**, **Locations**, **Peers**. Peers (3.1c) records `DID → Flight endpoint` as found by discovery (§9), in `.agora/peers.json`, so every process of the node can resolve a remote Space's owner by DID. Plus per-analytical-Space Iceberg metadata (unchanged). New in v3: `policies`, `views`, `engine` and `publish` are catalog entities, versioned with the Space.
 
 ---
 
@@ -289,7 +289,7 @@ Decided per remote Space by the UCAN held:
 **Subscription** (3.1b):
 
 ```sql
-CREATE SPACE copy WITH PEER = 'http://a:7070', REMOTE = 'blog', TOKEN = '<ucan>', MODE = 'subscribe';
+CREATE SPACE copy WITH PEER = 'https://a:7070', REMOTE = 'blog', TOKEN = '<ucan>', MODE = 'subscribe';
 REFRESH SPACE copy;   -- one row per table: table, snapshot_id, files_fetched, bytes_fetched, status
 ```
 
@@ -467,6 +467,17 @@ The peer protocol over Arrow Flight (`agoradb-network::protocol`). Every call ca
 
 `space/read` includes `space/query`.
 
+**Transport (3.1c).** Nodes speak TLS by default. Each node presents a self-signed certificate for its own Ed25519 key, generated at start (`NodeIdentity::tls_identity`, rcgen); nothing is stored. A client knows the DID it expects, the root issuer of the token it presents, and accepts the server only if the certificate carries that DID's key. rustls (ring backend) checks that the handshake is signed with it. There is no CA and no host-name check. Plaintext `http://` is refused unless the node runs with `--allow-http` (`NodeConfig::allow_http`); `serve --plaintext` needs it too. Requests are signed either way.
+
+**Discovery (3.1c, `agoradb-discovery`).** libp2p is used only to find nodes; data stays on Arrow Flight.
+
+- The libp2p identity is the DID key, so a `PeerId` and a DID name the same public key. The swarm runs tcp, noise, yamux, mDNS, identify and `/agora/endpoint/1`.
+- After connecting, a node asks the other for its Flight scheme and port. The host is the address the connection came from. The result, `DID → scheme://ip:port`, goes into the Peers table (§3.4).
+- mDNS finds nodes on the local network; `serve --dial <multiaddr>` connects to a known one.
+- `CREATE SPACE ... WITH TOKEN = '...'` without `PEER` resolves the owner (the token's root issuer) in the Peers table, again on every connection, so an owner that moved is followed.
+- Crossing NATs (relay, DHT) is not covered.
+- mDNS needs multicast, and on macOS the application firewall must let `agoradb` receive it.
+
 ---
 
 ## 10. Browser Node
@@ -583,7 +594,8 @@ crates/
 ├── agoradb-federation      EngineSqlExecutor, AgoraRemoteTable, Coordinator                         [done]
 ├── agoradb-node            AgoraSession, EngineRegistry, routing, DDL/DML                           [done]
 ├── agoradb-identity        DID keys, UCAN issue/verify/revoke, peer FSM                             [3.1]
-├── agoradb-network         Peer protocol, PeerClient, FlightEngine; libp2p in 3.1c; tasks in 3.6    [3.1]
+├── agoradb-network         Peer protocol, PeerClient, FlightEngine, DID-pinned TLS; tasks in 3.6    [3.1]
+├── agoradb-discovery       libp2p discovery (mDNS, endpoint exchange) → Peers table                 [3.1]
 ├── agoradb-server          Arrow Flight service (queries, snapshots, files), agoradb binary         [3.1]
 ├── agoradb-connect         Connector trait, cursor store, built-in connectors (file import, flomo)  [3.5]
 └── agoradb-cli                                                                                      [later]
@@ -626,7 +638,7 @@ Roughly 1,100 of the current ~4,300 lines are engine-bridge code that goes away;
 | **3.0-B Federation** ✅ | DataFusion coordinator over `datafusion-federation` + `EngineSqlExecutor`; cross-Space join (Parquet ⋈ SQLite) locally; snapshot pinning | Two-Space join returns correct results; EXPLAIN shows two pushed-down SQL leaves |
 | **3.0-C Semantic** ✅ | Views, column grants and row policies as SQL rewrites; principals read-only and deny-by-default; enumeration resistance | Policy test suite: a restricted DID sees rewritten `*` and injected predicates inside the engine SQL |
 | **3.0-D Publish** ✅ | `PUBLISH SPACE` → `orders_published` analytical read-only Space; scheduled publisher | Publish → query via DuckDB matches SQLite source |
-| **3.1 Network** | DID/UCAN, Arrow Flight remote Spaces (3.1a ✅), snapshot subscription (3.1b ✅), libp2p discovery and TLS (3.1c), two Docker nodes (3.1d) | Two Docker nodes: UCAN-gated federated query; revocation cuts access |
+| **3.1 Network** | DID/UCAN, Arrow Flight remote Spaces (3.1a ✅), snapshot subscription (3.1b ✅), libp2p discovery and TLS (3.1c ✅), two Docker nodes (3.1d) | Two Docker nodes: UCAN-gated federated query; revocation cuts access |
 | **3.2 Browser** | WASM core + `HostEngine` bridge to duckdb-wasm / wa-sqlite | Browser node runs a local query and a federated query via a Full Node |
 | **3.3 Multimodal** | Lance Locations through DuckDB's `lance` extension (vector, full-text, large objects; version pinning and sync); DuckPGQ; FTS5/`sqlite-vec`; `Mode` capability checks | Vector + FTS query on a Lance Space and on a transactional Space; a subscribed Lance Space is searchable without rebuilding its index |
 | **3.4 Cloud drives** | opendal drive services behind feature flags; one writing node per drive Location; newest-complete-snapshot reads; bounded local cache; client-side encryption; transactional Spaces rejected on drive Locations | An analytical Space on a WebDAV Location is written by one node and read by another; a transactional Space on a drive Location is rejected at DDL; files on the drive cannot be read without the key |
@@ -681,6 +693,8 @@ No phase skipping (AGENT.md §4.1).
 | 2026-10-30 | Subscription copies only tables the subscriber may read in full; others are reported `restricted` and stay query-only | Copied files cannot be filtered by column grants or row policies; publishing a subset to its own Space is the way to share part of a table |
 | 2026-10-30 | Revoking a `space/read` token stops refreshes; copied files stay with the subscriber | Data shipping cannot take data back; stated rather than implied |
 | 2026-10-30 | A subscribed copy is a remote Space (read-only, never served onwards) bound to a replica Location and read by the local DuckDB; files are named by BLAKE3 hash and the manifest is swapped by rename | Reuses every remote-Space guard; hashes verify the download and keep owner paths private; a failed refresh never leaves a half copy |
+| 2026-10-30 | TLS between nodes with self-signed certificates pinned to the owner's DID; plaintext only with `--allow-http` | The DID is already the identity every request is signed with; pinning it needs no CA or host names, and an address that points at another node fails the handshake |
+| 2026-10-30 | libp2p only for discovery (mDNS + endpoint exchange), results kept in the catalog's Peers table; `PEER` optional | Keeps data on Flight; the libp2p key is the DID key, so nothing new has to be trusted; a table in the catalog serves both `agoradb serve` and `agoradb sql` |
 | 2026-10-30 | VFS `materialize()` moves from 3.1 to 3.4 | Subscription copies live on local disk; the VFS is first needed for cloud drives |
 | 2026-10-30 | Lance as a third Location format for vector, full-text and large-object data; it replaces DuckDB `vss` / `fts` for analytical Spaces | Lance indexes live in the dataset and sync with its versions, while extension indexes must be rebuilt on every subscriber; Lance versions are immutable files plus a manifest, which fits principle 4; Iceberg + Parquet stays for tables that are scanned and aggregated |
 

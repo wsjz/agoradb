@@ -137,6 +137,53 @@ impl NodeIdentity {
     pub fn sign(&self, message: &[u8]) -> [u8; 64] {
         self.signing.sign(message).to_bytes()
     }
+
+    /// A self-signed TLS certificate for this node's own Ed25519 key, with
+    /// its DID as subject. Peers accept it only if its key matches the DID
+    /// they expect (architecture v3 §9), so no CA or host name is involved.
+    /// Generated on demand; neither the certificate nor the key is stored.
+    pub fn tls_identity(&self) -> Result<TlsIdentity, IdentityError> {
+        use ed25519_dalek::pkcs8::EncodePrivateKey;
+        let tls = |e: &dyn fmt::Display| IdentityError::Tls(e.to_string());
+        let pkcs8 = self.signing.to_pkcs8_der().map_err(|e| tls(&e))?;
+        let key = rcgen::KeyPair::try_from(pkcs8.as_bytes()).map_err(|e| tls(&e))?;
+        let mut params =
+            rcgen::CertificateParams::new(Vec::<String>::new()).map_err(|e| tls(&e))?;
+        params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, self.did.as_str());
+        let cert = params.self_signed(&key).map_err(|e| tls(&e))?;
+        Ok(TlsIdentity {
+            cert_der: cert.der().to_vec(),
+            cert_pem: cert.pem(),
+            key_pem: Zeroizing::new(key.serialize_pem()),
+        })
+    }
+
+    /// Run `f` with the 32-byte secret seed, for deriving another key of the
+    /// same identity (the libp2p identity used by discovery). The seed is
+    /// not kept by this call; `f` must not keep it either.
+    pub fn with_seed<R>(&self, f: impl FnOnce(&[u8; 32]) -> R) -> R {
+        let seed = Zeroizing::new(self.signing.to_bytes());
+        f(&seed)
+    }
+}
+
+/// A node's TLS certificate and private key (see
+/// [`NodeIdentity::tls_identity`]). `Debug` never prints the key.
+pub struct TlsIdentity {
+    pub cert_der: Vec<u8>,
+    pub cert_pem: String,
+    pub key_pem: Zeroizing<String>,
+}
+
+impl fmt::Debug for TlsIdentity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TlsIdentity")
+            .field("cert_pem", &self.cert_pem)
+            .field("key_pem", &"<redacted>")
+            .finish()
+    }
 }
 
 /// Load the node identity: from [`ENV_NODE_KEY`] when set, otherwise from
@@ -189,6 +236,26 @@ fn check_private(_path: &Path) -> Result<(), IdentityError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tls_certificates_carry_the_node_key() {
+        let id = NodeIdentity::from_seed(&[7; 32]);
+        let tls = id.tls_identity().unwrap();
+        // An Ed25519 SubjectPublicKeyInfo: fixed 12-byte prefix, then the key.
+        let prefix = [
+            0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
+        ];
+        let mut spki = prefix.to_vec();
+        spki.extend_from_slice(id.did().public_key().as_bytes());
+        assert!(tls
+            .cert_der
+            .windows(spki.len())
+            .any(|w| w == spki.as_slice()));
+        assert!(tls.cert_pem.starts_with("-----BEGIN CERTIFICATE-----"));
+        assert!(tls.key_pem.starts_with("-----BEGIN PRIVATE KEY-----"));
+        assert!(!format!("{tls:?}").contains("PRIVATE KEY"));
+        assert_eq!(id.with_seed(|s| *s), [7; 32]);
+    }
 
     fn hex(s: &str) -> Vec<u8> {
         (0..s.len())

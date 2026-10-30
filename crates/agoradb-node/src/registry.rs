@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock, RwLock};
 
-use agoradb_catalog::{AgoraCatalog, LocationFormat, Space};
+use agoradb_catalog::{is_plaintext_peer, AgoraCatalog, LocationFormat, Space};
 use agoradb_core::{CatalogError, EngineKind};
 use agoradb_engine::QueryEngine;
 use agoradb_identity::{load_node_identity, Did, NodeIdentity};
@@ -38,6 +38,9 @@ pub struct NodeConfig {
     /// The node's signing identity. When unset it is loaded on first use
     /// from `AGORADB_NODE_KEY` or `<catalog root>/.agora/identity/`.
     pub identity: Option<Arc<NodeIdentity>>,
+    /// Accept plaintext (`http://`) peers. Off by default: peers are
+    /// reached over TLS with their certificate pinned to their DID.
+    pub allow_http: bool,
 }
 
 /// A remote Space's engine and the binding (peer, Space, owner, token id)
@@ -58,6 +61,7 @@ pub struct EngineRegistry {
     remote: RwLock<HashMap<String, RemoteEngine>>,
     identity: OnceLock<Arc<NodeIdentity>>,
     temp_dir: PathBuf,
+    allow_http: bool,
 }
 
 impl std::fmt::Debug for EngineRegistry {
@@ -96,7 +100,43 @@ impl EngineRegistry {
             remote: RwLock::new(HashMap::new()),
             identity,
             temp_dir,
+            allow_http: config.allow_http,
         })
+    }
+
+    /// Whether this node accepts plaintext (`http://`) peers.
+    pub fn allow_http(&self) -> bool {
+        self.allow_http
+    }
+
+    /// The Flight endpoint of the node `owner`: `peer` when the Space names
+    /// one, otherwise where discovery last saw `owner`. Plaintext endpoints
+    /// are refused unless [`NodeConfig::allow_http`] is set.
+    pub fn peer_endpoint(&self, peer: Option<&str>, owner: &str) -> Result<String, SessionError> {
+        let endpoint = match peer {
+            Some(peer) => peer.to_string(),
+            None => {
+                // Discovery records peers from the serving process.
+                self.catalog.refresh()?;
+                self.catalog
+                    .get_peer(owner)
+                    .map(|p| p.endpoint)
+                    .ok_or_else(|| {
+                        CatalogError::InvalidProperty(format!(
+                            "node {owner} has not been discovered: check that it is serving on \
+                             this network, or give its address with PEER = 'https://host:port'"
+                        ))
+                    })?
+            }
+        };
+        if is_plaintext_peer(&endpoint) && !self.allow_http {
+            return Err(CatalogError::InvalidProperty(format!(
+                "{endpoint} is plaintext; this node only reaches peers over https \
+                 (start it with --allow-http to accept http)"
+            ))
+            .into());
+        }
+        Ok(endpoint)
     }
 
     /// The node's identity, loaded on first use if it was not configured.
@@ -124,6 +164,8 @@ impl EngineRegistry {
             .into());
         };
         let token = self.catalog.remote_token(&space.name)?;
+        // Resolved on every bind: a discovered owner may have moved.
+        let peer = self.peer_endpoint(peer.as_deref(), owner)?;
         let binding = format!(
             "{peer}|{remote_space}|{owner}|{}",
             agoradb_identity::ucan::token_id(token.expose())
@@ -144,6 +186,7 @@ impl EngineRegistry {
                 remote_space: remote_space.clone(),
                 owner: Did::parse(owner)?,
                 token: token.expose().to_string(),
+                allow_http: self.allow_http,
             },
             self.identity()?,
         ));

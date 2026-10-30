@@ -100,17 +100,18 @@ pub fn is_token_id(id: &str) -> bool {
 
 /// Validate a peer's Flight endpoint and return it without a trailing `/`.
 ///
-/// Only `http://host[:port]` is accepted: 3.1a speaks plaintext gRPC (every
-/// request is signed, see architecture v3 §9), and anything beyond scheme,
-/// host and port — credentials, paths, queries — is rejected.
+/// `https://host[:port]` (TLS, the peer's certificate pinned to its DID) and
+/// `http://host[:port]` (plaintext, only where the node allows it, see
+/// [`is_plaintext_peer`]) are accepted; anything beyond scheme, host and
+/// port — credentials, paths, queries — is rejected.
 pub fn validate_peer_url(peer: &str) -> Result<String, CatalogError> {
     let invalid = |why: &str| CatalogError::InvalidProperty(format!("PEER '{peer}': {why}"));
-    let rest = if let Some(rest) = peer.strip_prefix("http://") {
-        rest
-    } else if peer.starts_with("https://") {
-        return Err(invalid("https is not supported yet; use http://host:port"));
+    let (scheme, rest) = if let Some(rest) = peer.strip_prefix("https://") {
+        ("https", rest)
+    } else if let Some(rest) = peer.strip_prefix("http://") {
+        ("http", rest)
     } else {
-        return Err(invalid("expected http://host:port"));
+        return Err(invalid("expected https://host:port"));
     };
     let authority = rest.strip_suffix('/').unwrap_or(rest);
     if authority.is_empty() {
@@ -159,7 +160,13 @@ pub fn validate_peer_url(peer: &str) -> Result<String, CatalogError> {
             return Err(invalid("invalid port"));
         }
     }
-    Ok(format!("http://{authority}"))
+    Ok(format!("{scheme}://{authority}"))
+}
+
+/// Whether a validated peer URL is plaintext (`http://`). Plaintext peers
+/// are refused unless the node allows them (`NodeConfig::allow_http`).
+pub fn is_plaintext_peer(peer: &str) -> bool {
+    peer.starts_with("http://")
 }
 
 impl AgoraCatalog {
@@ -212,14 +219,15 @@ impl AgoraCatalog {
     }
 
     /// Register a remote Space `name` backed by `space` on the node `owner`
-    /// reachable at `peer`, holding `token` to query it.
+    /// reachable at `peer` (`None`: wherever discovery last saw `owner`),
+    /// holding `token` to query it.
     ///
     /// The caller is expected to have checked the token (audience, issuer,
     /// capability, expiry); the catalog only stores it.
     pub fn create_remote_space(
         &self,
         name: &str,
-        peer: &str,
+        peer: Option<&str>,
         space: &str,
         owner: &str,
         token: HeldToken,
@@ -235,7 +243,7 @@ impl AgoraCatalog {
     pub fn create_replica_space(
         &self,
         name: &str,
-        peer: &str,
+        peer: Option<&str>,
         space: &str,
         owner: &str,
         token: HeldToken,
@@ -251,7 +259,7 @@ impl AgoraCatalog {
     fn create_peer_space(
         &self,
         name: &str,
-        peer: &str,
+        peer: Option<&str>,
         space: &str,
         owner: &str,
         token: HeldToken,
@@ -262,7 +270,7 @@ impl AgoraCatalog {
                 "remote space, name and owner must not be empty".to_string(),
             ));
         }
-        let peer = validate_peer_url(peer)?;
+        let peer = peer.map(validate_peer_url).transpose()?;
         let (engine, format) = match mode {
             RemoteMode::Query => (
                 EngineKind::Flight,
@@ -347,11 +355,17 @@ mod tests {
     }
 
     #[test]
-    fn peer_urls_are_restricted_to_http_host_port() {
+    fn peer_urls_are_restricted_to_scheme_host_port() {
         assert_eq!(
             validate_peer_url("http://node-a:50051/").unwrap(),
             "http://node-a:50051"
         );
+        assert_eq!(
+            validate_peer_url("https://node-a:50051").unwrap(),
+            "https://node-a:50051"
+        );
+        assert!(is_plaintext_peer("http://node-a:50051"));
+        assert!(!is_plaintext_peer("https://node-a:50051"));
         assert_eq!(
             validate_peer_url("http://127.0.0.1:1").unwrap(),
             "http://127.0.0.1:1"
@@ -362,7 +376,8 @@ mod tests {
         );
         for bad in [
             "node-a:50051",
-            "https://node-a:50051",
+            "https://",
+            "https://node-a:50051/path",
             "ftp://node-a",
             "http://",
             "http://user:pw@node-a:50051",

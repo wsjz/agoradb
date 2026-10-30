@@ -22,11 +22,12 @@
 //!                           LOCATION = '<location id>',
 //!                           ACCESS = 'writable' | 'readonly',
 //!                           STORAGE = 'disk']
-//! CREATE SPACE <name> WITH PEER = 'http://host:port', TOKEN = '<ucan>'
+//! CREATE SPACE <name> WITH TOKEN = '<ucan>' [, PEER = 'https://host:port']
 //!                          [, REMOTE = '<space on the peer>'] [, KIND = 'remote']
 //!                          [, MODE = 'query' | 'subscribe']
 //! DROP SPACE <name>
 //! REFRESH SPACE <name>
+//! SHOW PEERS
 //! SET SPACE [=] <name>
 //! PUBLISH SPACE <name> [TABLES (<table>, ...)] [TO <target space>]
 //! ```
@@ -66,6 +67,8 @@ pub enum AgoraStatement {
     RevokeUcan(String),
     /// `SHOW UCANS`: issued and revoked tokens.
     ShowUcans,
+    /// `SHOW PEERS`: nodes found by discovery.
+    ShowPeers,
     /// Any standard SQL statement.
     Sql(Box<Statement>),
 }
@@ -122,16 +125,16 @@ fn parse_one(stmt: &str) -> Result<AgoraStatement, SemanticError> {
         (Some("PUBLISH"), Some("SPACE")) => parse_publish(stmt),
         (Some("ISSUE"), Some("UCAN")) => Ok(AgoraStatement::IssueUcan(parse_issue_ucan(stmt)?)),
         (Some("REVOKE"), Some("UCAN")) => Ok(AgoraStatement::RevokeUcan(parse_revoke_ucan(stmt)?)),
-        (Some("SHOW"), Some(second @ ("IDENTITY" | "UCANS"))) => {
+        (Some("SHOW"), Some(second @ ("IDENTITY" | "UCANS" | "PEERS"))) => {
             if words.len() > 2 {
                 return Err(SemanticError::Parse(format!(
                     "SHOW {second}: unexpected input after {second}"
                 )));
             }
-            Ok(if second == "IDENTITY" {
-                AgoraStatement::ShowIdentity
-            } else {
-                AgoraStatement::ShowUcans
+            Ok(match second {
+                "IDENTITY" => AgoraStatement::ShowIdentity,
+                "UCANS" => AgoraStatement::ShowUcans,
+                _ => AgoraStatement::ShowPeers,
             })
         }
         (Some("SET"), Some("SPACE")) => {
@@ -226,9 +229,11 @@ fn parse_create_space(stmt: &str) -> Result<AgoraStatement, SemanticError> {
         || request.mode.is_some();
     let remote_kind = request.kind == Some(agoradb_core::SpaceKind::Remote);
     if remote_keys || remote_kind {
-        if request.peer.is_none() || request.token.is_none() {
+        if request.token.is_none() {
             return Err(SemanticError::InvalidProperty(
-                "a remote space needs PEER = 'http://host:port' and TOKEN = '<ucan>'".to_string(),
+                "a remote space needs TOKEN = '<ucan>' (and PEER = 'https://host:port' \
+                 unless its owner has been discovered)"
+                    .to_string(),
             ));
         }
         if request
@@ -444,7 +449,6 @@ mod tests {
 
         for bad in [
             "CREATE SPACE pub WITH PEER = 'http://a:1'",
-            "CREATE SPACE pub WITH TOKEN = 't'",
             "CREATE SPACE pub WITH KIND = 'remote'",
             "CREATE SPACE pub WITH PEER = 'http://a:1', TOKEN = 't', KIND = 'analytical'",
             "CREATE SPACE pub WITH PEER = 'http://a:1', TOKEN = 't', LOCATION = 'x'",
@@ -452,6 +456,25 @@ mod tests {
         ] {
             assert!(parse_single(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn test_parse_discovered_peers() {
+        // Without PEER the owner is looked up among discovered peers.
+        let req = create("CREATE SPACE pub WITH TOKEN = 't', REMOTE = 'blog'");
+        assert_eq!(req.kind, Some(SpaceKind::Remote));
+        assert_eq!(req.peer, None);
+        assert_eq!(
+            create("CREATE SPACE pub WITH PEER = 'https://a:1', TOKEN = 't'")
+                .peer
+                .as_deref(),
+            Some("https://a:1")
+        );
+        assert_eq!(
+            parse_single("show peers").unwrap(),
+            AgoraStatement::ShowPeers
+        );
+        assert!(parse_single("SHOW PEERS now").is_err());
     }
 
     #[test]

@@ -374,9 +374,11 @@ impl AgoraSession {
         let name = request.name.clone();
         let (peer, remote, token) = Self::peer_space_request(request)?;
         let owner = self.peer_space_owner(&token, &remote, ABILITY_READ)?;
+        self.engines()
+            .peer_endpoint(peer.as_deref(), owner.as_str())?;
         let space = self.catalog.create_replica_space(
             &name,
-            &peer,
+            peer.as_deref(),
             &remote,
             owner.as_str(),
             HeldToken::new(token),
@@ -411,11 +413,12 @@ impl AgoraSession {
         };
         let token = self.catalog.remote_token(name)?;
         let client = PeerClient::new(
-            peer.clone(),
+            self.engines().peer_endpoint(peer.as_deref(), owner)?,
             Did::parse(owner)?,
             token.expose().to_string(),
             self.engines().identity()?,
-        );
+        )
+        .allow_http(self.engines().allow_http());
         let dir = self.catalog.replica_dir(&location.id);
         let lock = refresh_lock(&dir);
         let _guard = lock.lock().await;

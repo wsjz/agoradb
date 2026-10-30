@@ -48,6 +48,8 @@ pub struct RemoteSpaceConfig {
     pub owner: Did,
     /// UCAN issued (or delegated) to this node.
     pub token: String,
+    /// Accept `peer` even if it is plaintext (`http://`).
+    pub allow_http: bool,
 }
 
 impl fmt::Debug for RemoteSpaceConfig {
@@ -89,7 +91,8 @@ impl FlightEngine {
             config.owner.clone(),
             config.token.clone(),
             identity,
-        );
+        )
+        .allow_http(config.allow_http);
         Self {
             config,
             instance_id,
@@ -241,6 +244,7 @@ mod tests {
                 remote_space: "blog".to_string(),
                 owner: owner.did().clone(),
                 token: "header.payload.signature".to_string(),
+                allow_http: true,
             },
             Arc::new(NodeIdentity::from_seed(&[2; 32])),
         )

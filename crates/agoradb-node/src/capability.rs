@@ -198,6 +198,29 @@ impl AgoraSession {
         )
     }
 
+    /// `SHOW PEERS`: nodes found by discovery and the endpoint each announced.
+    pub(crate) fn show_peers(&self) -> Result<QueryResult, SessionError> {
+        // Discovery records peers from the serving process.
+        self.catalog.refresh()?;
+        let peers = self.catalog.list_peers();
+        batch(
+            vec![
+                Field::new("did", DataType::Utf8, false),
+                Field::new("endpoint", DataType::Utf8, false),
+                Field::new("last_seen_ms", DataType::Int64, false),
+            ],
+            vec![
+                Arc::new(StringArray::from_iter_values(peers.iter().map(|p| &p.did))),
+                Arc::new(StringArray::from_iter_values(
+                    peers.iter().map(|p| &p.endpoint),
+                )),
+                Arc::new(Int64Array::from_iter_values(
+                    peers.iter().map(|p| p.last_seen_ms as i64),
+                )),
+            ],
+        )
+    }
+
     /// `CREATE SPACE <name> WITH PEER = ..., TOKEN = ...`: mount a Space of
     /// another node. The token must have been issued (or delegated) to this
     /// node and grant `space/query` on the remote Space; its root issuer is
@@ -209,9 +232,12 @@ impl AgoraSession {
         let name = request.name.clone();
         let (peer, remote, token) = Self::peer_space_request(request)?;
         let owner = self.peer_space_owner(&token, &remote, ABILITY_QUERY)?;
+        // Fail now on a plaintext address or an owner not discovered yet.
+        self.engines()
+            .peer_endpoint(peer.as_deref(), owner.as_str())?;
         self.catalog.create_remote_space(
             &name,
-            &peer,
+            peer.as_deref(),
             &remote,
             owner.as_str(),
             HeldToken::new(token),
@@ -219,12 +245,12 @@ impl AgoraSession {
         Ok(QueryResult::Empty)
     }
 
-    /// The peer, remote Space name (default: the local name) and token of a
-    /// `CREATE SPACE ... WITH PEER` request.
+    /// The peer (`None`: found by discovery), remote Space name (default:
+    /// the local name) and token of a `CREATE SPACE ... WITH TOKEN` request.
     pub(crate) fn peer_space_request(
         request: CreateSpaceRequest,
-    ) -> Result<(String, String, String), SessionError> {
-        let peer = validate_peer_url(request.peer.as_deref().unwrap_or_default())?;
+    ) -> Result<(Option<String>, String, String), SessionError> {
+        let peer = request.peer.as_deref().map(validate_peer_url).transpose()?;
         let token = request
             .token
             .ok_or_else(|| invalid("a remote space needs TOKEN = '<ucan>'"))?;
