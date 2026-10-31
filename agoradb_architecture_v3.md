@@ -490,16 +490,37 @@ The peer protocol over Arrow Flight (`agoradb-network::protocol`). Every call ca
 ## 10. Browser Node
 
 ```
- JS host                      WASM (Rust)
- ┌───────────────┐   IPC     ┌──────────────────────────────┐
- │ duckdb-wasm   │◄────────►│ HostEngine(duckdb)            │
- │ wa-sqlite/OPFS│◄────────►│ HostEngine(sqlite)            │
- │ libp2p-js /   │◄────────►│ catalog · identity · semantic │
- │ WebRTC        │          │ federation (DataFusion, lean) │
- └───────────────┘          └──────────────────────────────┘
+ JS host (web/)                       WASM (crates/agoradb-wasm)
+ ┌──────────────────────────┐  Arrow  ┌───────────────────────────────┐
+ │ duckdb-wasm (worker,     │◄───IPC──│ HostEngine                    │
+ │   database in OPFS)      │         │ BrowserNode: identity · Space │
+ │ IndexedDB (seed,registry)│◄─bytes──│   registry · semantic layer   │
+ │ WebRTC data channel (3.2b)│        │ federation coordinator (3.2b) │
+ └──────────────────────────┘         └───────────────────────────────┘
 ```
 
-DataFusion in WASM is built with `sql` only (no parquet, no object_store), because in v3 it never touches files — this is what makes the < 5MB target realistic. Heavy queries still delegate to a Full Node via `RemoteTableProvider` as in v1 §7.2. Lance Spaces are queried the same way, since DuckDB's `lance` extension is not published for WebAssembly (§7.6).
+**3.2a (done): local queries.**
+- **Rust core.** `agoradb-wasm` compiles the identity, statement parsing and semantic layer to WebAssembly.
+- **Engine.** The JavaScript host provides duckdb-wasm, running in a worker with its database file in OPFS.
+- **Spaces.** Each browser Space is a schema of that database (`EngineKind::Host`). Transactional Spaces, views and grants are not available in the browser yet: there is one owner and no peers to serve.
+- **How `HostEngine` works** (`host.rs`). It implements `QueryEngine` while holding only an id. `QueryEngine` and DataFusion need `Send` and JavaScript objects are not, so:
+  - the host object lives in a thread-local table;
+  - each call starts with `spawn_local`;
+  - its result returns over a oneshot channel;
+  - results cross as Arrow IPC streams.
+- **Persistence.** The host keeps the node's seed and its Space registry as bytes in IndexedDB. A same-origin script can read the seed; a non-extractable WebCrypto Ed25519 key is the planned replacement.
+- **JavaScript API.** `AgoraNode.open(engine, store)`, `node.did()`, `node.sql(text)` resolving to `{ ipc }` or `{ rowsAffected }`.
+- **Build** (`web/scripts/build.sh`). It runs cargo for `wasm32-unknown-unknown`, then `wasm-bindgen` (pinned to the crate's version), then esbuild for the page.
+  - DataFusion 54 turns on Arrow's zstd unconditionally, so a clang with a wasm32 backend is needed: Homebrew LLVM on macOS, the distribution clang on Linux.
+  - `datafusion-federation` 0.5.5 is patched (`third_party/`) so DataFusion's C-backed `compression` and `parquet` features stay off.
+- **Size.** The release `.wasm` is about 9.5 MB before the federation coordinator is added. The earlier < 5 MB target is not met and is now a measurement, not a requirement.
+- **Tests.** `web/tests` (Playwright, headless Chromium) runs local queries and checks that data, identity and registry survive a reload. `browser-e2e` runs them in CI.
+
+**3.2b (next): federated queries via a Full Node over a WebRTC data channel.**
+- **Pinning.** The browser pins the Full Node's DTLS certificate by its SHA-256 fingerprint. The node publishes a DID-signed access record (`{did, ip:port, fingerprint, expiry}`), which the browser verifies before dialing.
+- **Connection.** It uses "WebRTC-direct": the browser builds the SDP from the record, with no signaling server. The server is str0m, with a P-256 DTLS key kept in `.agora/identity/`.
+- **Requests.** They travel as envelopes carrying the same method, payload, UCAN and signed header as a Flight call, so the Full Node reuses its authentication, authorization and semantic layer.
+- **Lance.** Lance Spaces are also reached through a Full Node, since DuckDB's `lance` extension is not published for WebAssembly (§7.6).
 
 ---
 
@@ -604,6 +625,8 @@ crates/
 ├── agoradb-network         Peer protocol, PeerClient, FlightEngine, DID-pinned TLS; tasks in 3.6    [3.1]
 ├── agoradb-discovery       libp2p discovery (mDNS, endpoint exchange) → Peers table                 [3.1]
 ├── agoradb-server          Arrow Flight service (queries, snapshots, files), agoradb binary         [3.1]
+├── agoradb-protocol        Peer protocol types and request digest (native and browser)              [3.2]
+├── agoradb-wasm            Browser node: BrowserNode, HostEngine (duckdb-wasm), JS API              [3.2]
 ├── agoradb-connect         Connector trait, cursor store, built-in connectors (file import, flomo)  [3.5]
 └── agoradb-cli                                                                                      [later]
 ```
@@ -646,7 +669,7 @@ Roughly 1,100 of the current ~4,300 lines are engine-bridge code that goes away;
 | **3.0-C Semantic** ✅ | Views, column grants and row policies as SQL rewrites; principals read-only and deny-by-default; enumeration resistance | Policy test suite: a restricted DID sees rewritten `*` and injected predicates inside the engine SQL |
 | **3.0-D Publish** ✅ | `PUBLISH SPACE` → `orders_published` analytical read-only Space; scheduled publisher | Publish → query via DuckDB matches SQLite source |
 | **3.1 Network** ✅ | DID/UCAN, Arrow Flight remote Spaces (3.1a ✅), snapshot subscription (3.1b ✅), libp2p discovery and TLS (3.1c ✅), two Docker nodes plus an mDNS-only node, run in CI (3.1d ✅) | Two Docker nodes: UCAN-gated federated query; revocation cuts access |
-| **3.2 Browser** | WASM core + `HostEngine` bridge to duckdb-wasm / wa-sqlite | Browser node runs a local query and a federated query via a Full Node |
+| **3.2 Browser** | WASM core + `HostEngine` on duckdb-wasm (3.2a ✅); federated queries via a Full Node over WebRTC (3.2b); browser SQLite later | Browser node runs a local query and a federated query via a Full Node |
 | **3.3 Multimodal** | Lance Locations through DuckDB's `lance` extension (vector, full-text, large objects; version pinning and sync); DuckPGQ; FTS5/`sqlite-vec`; `Mode` capability checks | Vector + FTS query on a Lance Space and on a transactional Space; a subscribed Lance Space is searchable without rebuilding its index |
 | **3.4 Cloud drives** | opendal drive services behind feature flags; one writing node per drive Location; newest-complete-snapshot reads; bounded local cache; client-side encryption; transactional Spaces rejected on drive Locations | An analytical Space on a WebDAV Location is written by one node and read by another; a transactional Space on a drive Location is rejected at DDL; files on the drive cannot be read without the key |
 | **3.5 Connectors** | `Connector` contract; upsert and cursor in one SQLite transaction; scheduled and on-demand pulls; credentials from the OS keychain; file import and flomo connectors | flomo memos land in `flomo.memos`; a second pull touches only changed memos; an edited memo is updated, not duplicated; a failed pull leaves data and cursor unchanged |
@@ -702,6 +725,9 @@ No phase skipping (AGENT.md §4.1).
 | 2026-10-30 | A subscribed copy is a remote Space (read-only, never served onwards) bound to a replica Location and read by the local DuckDB; files are named by BLAKE3 hash and the manifest is swapped by rename | Reuses every remote-Space guard; hashes verify the download and keep owner paths private; a failed refresh never leaves a half copy |
 | 2026-10-30 | TLS between nodes with self-signed certificates pinned to the owner's DID; plaintext only with `--allow-http` | The DID is already the identity every request is signed with; pinning it needs no CA or host names, and an address that points at another node fails the handshake |
 | 2026-10-30 | libp2p only for discovery (mDNS + endpoint exchange), results kept in the catalog's Peers table; `PEER` optional | Keeps data on Flight; the libp2p key is the DID key, so nothing new has to be trusted; a table in the catalog serves both `agoradb serve` and `agoradb sql` |
+| 2026-10-31 | Browser node: duckdb-wasm only in 3.2 (SQLite later); `HostEngine` keeps an id, JS objects stay in a thread-local table, results cross as Arrow IPC | `QueryEngine` and DataFusion need `Send`; the id-plus-channel bridge keeps the trait unchanged instead of forking DataFusion |
+| 2026-10-31 | DataFusion without `compression` / `parquet`, `datafusion-federation` 0.5.5 patched to stop forcing them; Homebrew / distribution clang for the zstd that remains | The coordinator never reads files; 0.5.7 fixes this upstream but needs DataFusion 55 / Arrow 59, which DuckDB and Iceberg do not support yet |
+| 2026-10-31 | Browser ↔ Full Node over a WebRTC data channel, the DTLS fingerprint vouched for by a DID-signed record | Browsers cannot pin a certificate to a DID and Chrome rejects Ed25519 certificates; WebRTC lets the browser pin a fingerprint, works in every major browser, needs no 14-day rotation and brings ICE for later NAT traversal |
 | 2026-10-30 | The 3.1 exit run is three Docker nodes on GitHub Actions (`docker-e2e`), one of them found only by mDNS | Development machines may have no container runtime; CI runs it on every push, and the Docker bridge network gives mDNS the multicast a firewalled laptop may block |
 | 2026-10-30 | VFS `materialize()` moves from 3.1 to 3.4 | Subscription copies live on local disk; the VFS is first needed for cloud drives |
 | 2026-10-30 | Lance as a third Location format for vector, full-text and large-object data; it replaces DuckDB `vss` / `fts` for analytical Spaces | Lance indexes live in the dataset and sync with its versions, while extension indexes must be rebuilt on every subscriber; Lance versions are immutable files plus a manifest, which fits principle 4; Iceberg + Parquet stays for tables that are scanned and aggregated |

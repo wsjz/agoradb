@@ -7,7 +7,6 @@ authors.workspace = true
 description = "Federation coordinator for AgoraDB: DataFusion merging engine results"
 
 [dependencies]
-agoradb-catalog = { path = "../agoradb-catalog" }
 agoradb-core = { path = "../agoradb-core" }
 agoradb-engine = { path = "../agoradb-engine" }
 arrow-array = { workspace = true }
@@ -20,5 +19,4 @@ datafusion-federation = { workspace = true }
 futures = { workspace = true }
 sqlparser = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true }
 tracing = { workspace = true }

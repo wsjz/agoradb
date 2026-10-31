@@ -42,7 +42,9 @@ pub use capabilities::Capabilities;
 pub use error::EngineError;
 pub use name::QualifiedName;
 pub use source::TableSource;
-pub use stream::{BatchSink, BlockingWorker, RecordBatchStream};
+pub use stream::RecordBatchStream;
+#[cfg(feature = "blocking")]
+pub use stream::{BatchSink, BlockingWorker};
 pub use value::Value;
 
 /// The SQL dialect an engine speaks; the federation layer uses it to unparse

@@ -20,7 +20,9 @@
 //! The seed is zeroized on drop and never formatted by `Debug`.
 
 use std::fmt;
+#[cfg(feature = "fs")]
 use std::io::Write;
+#[cfg(feature = "fs")]
 use std::path::Path;
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -87,6 +89,7 @@ impl NodeIdentity {
     /// Creation is atomic: the key is written to a private temporary file
     /// and linked into place only if `path` still does not exist, so two
     /// processes starting on the same directory end up with the same key.
+    #[cfg(feature = "fs")]
     pub fn load_or_create(path: &Path) -> Result<Self, IdentityError> {
         if path.exists() {
             return Self::load(path);
@@ -122,6 +125,7 @@ impl NodeIdentity {
         }
     }
 
+    #[cfg(feature = "fs")]
     fn load(path: &Path) -> Result<Self, IdentityError> {
         check_private(path)?;
         let encoded = Zeroizing::new(std::fs::read_to_string(path)?);
@@ -142,6 +146,7 @@ impl NodeIdentity {
     /// its DID as subject. Peers accept it only if its key matches the DID
     /// they expect (architecture v3 §9), so no CA or host name is involved.
     /// Generated on demand; neither the certificate nor the key is stored.
+    #[cfg(feature = "tls")]
     pub fn tls_identity(&self) -> Result<TlsIdentity, IdentityError> {
         use ed25519_dalek::pkcs8::EncodePrivateKey;
         let tls = |e: &dyn fmt::Display| IdentityError::Tls(e.to_string());
@@ -188,6 +193,7 @@ impl fmt::Debug for TlsIdentity {
 
 /// Load the node identity: from [`ENV_NODE_KEY`] when set, otherwise from
 /// `<root>/.agora/identity/node_ed25519` (created on first use).
+#[cfg(feature = "fs")]
 pub fn load_node_identity(root: &Path) -> Result<NodeIdentity, IdentityError> {
     match std::env::var(ENV_NODE_KEY) {
         Ok(encoded) if !encoded.trim().is_empty() => {
@@ -200,7 +206,7 @@ pub fn load_node_identity(root: &Path) -> Result<NodeIdentity, IdentityError> {
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(feature = "fs", unix))]
 fn create_private(path: &Path) -> Result<std::fs::File, IdentityError> {
     use std::os::unix::fs::OpenOptionsExt;
     Ok(std::fs::OpenOptions::new()
@@ -210,7 +216,7 @@ fn create_private(path: &Path) -> Result<std::fs::File, IdentityError> {
         .open(path)?)
 }
 
-#[cfg(not(unix))]
+#[cfg(all(feature = "fs", not(unix)))]
 fn create_private(path: &Path) -> Result<std::fs::File, IdentityError> {
     Ok(std::fs::OpenOptions::new()
         .write(true)
@@ -218,7 +224,7 @@ fn create_private(path: &Path) -> Result<std::fs::File, IdentityError> {
         .open(path)?)
 }
 
-#[cfg(unix)]
+#[cfg(all(feature = "fs", unix))]
 fn check_private(path: &Path) -> Result<(), IdentityError> {
     use std::os::unix::fs::PermissionsExt;
     let mode = std::fs::metadata(path)?.permissions().mode();
@@ -228,7 +234,7 @@ fn check_private(path: &Path) -> Result<(), IdentityError> {
     Ok(())
 }
 
-#[cfg(not(unix))]
+#[cfg(all(feature = "fs", not(unix)))]
 fn check_private(_path: &Path) -> Result<(), IdentityError> {
     Ok(())
 }
@@ -238,6 +244,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(feature = "tls")]
     fn tls_certificates_carry_the_node_key() {
         let id = NodeIdentity::from_seed(&[7; 32]);
         let tls = id.tls_identity().unwrap();
@@ -294,6 +301,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "fs")]
     fn key_file_is_created_private_and_reloaded() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("identity").join(NODE_KEY_FILE);
@@ -315,6 +323,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "fs")]
     fn concurrent_creation_agrees_on_one_key() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(NODE_KEY_FILE);

@@ -31,7 +31,9 @@ pub mod ucan;
 pub use auth::{request_digest, AuthRequest};
 pub use did::Did;
 pub use error::IdentityError;
-pub use keys::{load_node_identity, NodeIdentity, TlsIdentity, ENV_NODE_KEY};
+#[cfg(feature = "fs")]
+pub use keys::load_node_identity;
+pub use keys::{NodeIdentity, TlsIdentity, ENV_NODE_KEY};
 pub use ucan::{Capability, Ucan, UcanBuilder, UcanError, Verified, VerifyOptions};
 
 /// Seconds since the Unix epoch.
@@ -41,8 +43,14 @@ pub fn unix_now() -> u64 {
 
 /// Milliseconds since the Unix epoch.
 pub fn unix_now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    // `std::time::SystemTime::now` panics in the browser; web-time reads
+    // the JavaScript clock there and is `std` elsewhere.
+    #[cfg(not(target_arch = "wasm32"))]
+    use std::time::{SystemTime, UNIX_EPOCH};
+    #[cfg(target_arch = "wasm32")]
+    use web_time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
 }

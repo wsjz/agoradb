@@ -31,7 +31,7 @@ AgoraDB 负责"谁能看什么、数据从哪来、存在哪、查询和任务�
 - **内存格式**: Apache Arrow
 - **网络传输**: Arrow Flight (gRPC)，TLS 证书绑定节点 DID；libp2p 只用于节点发现（mDNS）
 - **密码学**: ed25519-dalek + Blake3（3.1）
-- **浏览器端**: wasm-bindgen + duckdb-wasm / wa-sqlite（3.2）
+- **浏览器端**: `agoradb-wasm`（wasm-bindgen）+ duckdb-wasm（OPFS）+ IndexedDB；构建见 `web/scripts/build.sh`（需要能编译 wasm32 的 clang，macOS 用 Homebrew LLVM）
 
 ### 架构分层（自底向上）
 
@@ -144,7 +144,7 @@ v3 路线图（详见 `agoradb_architecture_v3.md` §14）：
 | 3.0-C 语义层 | 视图、列授权与行策略（SQL 改写）、principal 只读 + 默认拒绝、枚举抵抗 | ✅ |
 | 3.0-D 发布 | `PUBLISH SPACE`：SQLite → Iceberg 快照（覆盖式）、定时发布 | ✅ |
 | 3.1 网络 | DID/UCAN、Arrow Flight 远端表、libp2p 发现、快照订阅 | ✅（3.1a 远程查询、3.1b 快照订阅、3.1c 节点发现与加密传输、3.1d 三个 Docker 节点在 CI 跑通） |
-| 3.2 浏览器 | WASM 核心 + 宿主引擎桥 (duckdb-wasm / wa-sqlite) | 待开始 |
+| 3.2 浏览器 | WASM 核心 + 宿主引擎桥（duckdb-wasm）；经 Full Node 的联邦查询走 WebRTC 数据通道 | 进行中：3.2a 本地查询 ✅；3.2b WebRTC 与联邦查询待做 |
 | 3.3 多模态 | Lance Location（经 DuckDB `lance` 扩展：向量、全文、大对象）、DuckPGQ、SQLite FTS5/sqlite-vec | 待开始 |
 | 3.4 网盘 | opendal 网盘服务（WebDAV、Google Drive、Dropbox、OneDrive 等）、同步文件夹、客户端加密；SQLite 不放网盘 | 待开始 |
 | 3.5 数据接入 | `Connector` 合约、按来源主键 upsert + 游标同事务提交、定时拉取；首批：文件导入、flomo | 待开始 |
@@ -241,14 +241,18 @@ agoradb/
 │   ├── agoradb-identity/       # DID、UCAN 签发 / 委托 / 撤销、请求签名
 │   ├── agoradb-network/        # 节点间协议、PeerClient、FlightEngine
 │   ├── agoradb-discovery/      # libp2p 节点发现（mDNS、交换 Flight 端点），写入 Peers 表
+│   ├── agoradb-protocol/       # 节点间协议类型与请求摘要（原生和浏览器共用）
+│   ├── agoradb-wasm/           # 浏览器节点：BrowserNode、HostEngine（duckdb-wasm）、JS 接口
 │   └── agoradb-server/         # Arrow Flight 服务、agoradb 命令行
 ├── tests/                      # agoradb-tests（TPC-H Q1–Q5）+ tools/data-gen + e2e/（Docker 节点端到端脚本）
 ├── docker/                     # 节点镜像（agoradb.Dockerfile）与三节点 compose
-├── .github/workflows/          # docker-e2e：三个 Docker 节点跑网络阶段端到端
+├── web/                        # 浏览器节点的 JS 宿主（duckdb-wasm、IndexedDB）、页面与 Playwright 测试
+├── third_party/                # 打了补丁的第三方代码（datafusion-federation，见 README）
+├── .github/workflows/          # docker-e2e（三个 Docker 节点）、browser-e2e（无头 Chromium 跑浏览器节点）
 └── docs/                       # 用户和开发者文档（gitignored）
 ```
 
-计划中：`agoradb-wasm`（3.2），`agoradb-connect`（3.5），`agoradb-cli`。
+计划中：`agoradb-webrtc`（3.2b），`agoradb-connect`（3.5），`agoradb-cli`。
 
 ---
 
@@ -317,6 +321,7 @@ agoradb/
 - `cargo doc --no-deps`（确保无断链）
 - 许可证头检查（通过 `apache-skywalking-eyes` 或类似工具）
 - 依赖许可证审计 (`cargo deny check licenses`)
+- 浏览器节点：`.github/workflows/browser-e2e.yml`，构建 wasm 后用 Playwright 在无头 Chromium 里跑 `web/tests`
 - 网络端到端：`.github/workflows/docker-e2e.yml`，三个 Docker 节点跑 `tests/e2e/docker_nodes.sh`（推送 `feat/**`、`ci/**` 时触发）
 
 ---
@@ -393,6 +398,7 @@ agoradb/
 | 2026-06-08 | 执行内核迁移到 DataFusion（v2） | 放弃自研优化器/执行器 |
 | 2026-09-27 | 转型为去中心化本地联邦查询语义层（v3）：计算交给 DuckDB/SQLite，DataFusion 只做联邦合并 | 自研 OLAP 超出团队范围；差异化在主权、联邦与 P2P，而非算子 |
 | 2026-10-30 | 定位改为 AI Native 的多模态私域数据中心（通常使用个人资源、支持受信的数据交换）：新增网盘接入（3.4）、数据接入（3.5）、算力共享（3.6），v3 各层不变；数据交换和算力共享同一信任机制、不同授权 | 数据和算力留在个人手里，个人之间互相调用而不交给大平台；架构见 `agoradb_architecture_v3.md` §1、§7.5、§11、§12 |
+| 2026-10-31 | 3.2a 浏览器节点：duckdb-wasm 作本地引擎（SQLite 以后再做）；`HostEngine` 只存 id、JS 对象放线程本地表、结果用 Arrow IPC；DataFusion 去掉 compression/parquet 并给 datafusion-federation 0.5.5 打补丁；浏览器连 Full Node 定为 WebRTC 数据通道（3.2b） | 不改 `QueryEngine` 和 DataFusion；0.5.7 才修掉强制默认功能但要 DataFusion 55；浏览器无法按 DID 校验证书，WebRTC 能锁定 DID 签名过的指纹。见架构 §10 |
 | 2026-10-30 | 3.1d：网络阶段的完成标准在 GitHub Actions 上用三个 Docker 节点验证（其中一个只靠 mDNS 发现） | 本机没有容器环境；CI 每次推送都跑，Docker 桥接网络也能验证本机防火墙挡住的 mDNS |
 | 2026-10-30 | 3.1c：节点间默认 TLS，证书由节点 DID 密钥自签并按 DID 校验；明文 http 需 `--allow-http`；libp2p 只做发现，结果写入目录的 Peers 表，`PEER` 可不写 | DID 本来就是请求签名的身份，按它校验证书不需要 CA 和域名；发现结果放目录里，`serve` 和 `sql` 两个进程都能用。见架构 §3.4、§9 |
 | 2026-10-30 | 3.1b 快照订阅：只复制对方能看整张表的表，其余标 `restricted` 只能远程查；撤销只停止后续同步，已复制的文件收不回；VFS 接入推迟到 3.4 | 文件无法按列授权和行策略过滤；数据一旦复制就无法收回，写明而不是默认。见架构 §5.3、§9 |

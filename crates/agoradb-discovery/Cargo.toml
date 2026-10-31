@@ -13,7 +13,7 @@ futures = { workspace = true }
 libp2p = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
 tracing = { workspace = true }
 zeroize = { workspace = true }
 

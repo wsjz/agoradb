@@ -17,6 +17,6 @@ arrow = { workspace = true }
 arrow-array = { workspace = true }
 arrow-schema = { workspace = true }
 iceberg = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
 clap = { version = "4", features = ["derive"] }
 rand = { version = "0.8", features = ["small_rng"] }

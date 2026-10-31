@@ -27,7 +27,9 @@
 
 pub mod client;
 pub mod engine;
-pub mod protocol;
+/// The peer protocol types (moved to `agoradb-protocol`, which the browser
+/// build shares).
+pub use agoradb_protocol as protocol;
 pub mod tls;
 
 pub use client::{ChunkStream, PeerClient};

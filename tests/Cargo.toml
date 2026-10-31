@@ -11,4 +11,4 @@ agoradb-core = { path = "../crates/agoradb-core" }
 agoradb-node = { path = "../crates/agoradb-node" }
 arrow-array = { workspace = true }
 iceberg = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["full"] }

@@ -6,6 +6,12 @@ license.workspace = true
 authors.workspace = true
 description = "Pluggable query-engine abstraction for AgoraDB"
 
+[features]
+# BlockingWorker: drive blocking drivers (DuckDB, SQLite) on tokio's
+# blocking pool. Off in the browser build.
+default = ["blocking"]
+blocking = ["dep:tokio-stream", "tokio/rt"]
+
 [dependencies]
 agoradb-core = { path = "../agoradb-core" }
 arrow-array = { workspace = true }
@@ -14,8 +20,9 @@ async-trait = { workspace = true }
 bitflags = { workspace = true }
 futures = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true }
-tokio-stream = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
+tokio-stream = { workspace = true, optional = true }
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["full"] }
 tokio-test = { workspace = true }

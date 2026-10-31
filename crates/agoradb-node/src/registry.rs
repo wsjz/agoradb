@@ -266,6 +266,7 @@ impl EngineRegistry {
             EngineKind::DuckDb => self.duckdb(),
             EngineKind::Sqlite => self.sqlite_for(space),
             EngineKind::Flight => self.remote_for(space),
+            EngineKind::Host => Err(SessionError::EngineNotRegistered(EngineKind::Host)),
         }
     }
 }

@@ -5,3 +5,8 @@ docs
 .claude
 .DS_Store
 tests/agora-local/
+web/node_modules/
+web/pkg/
+web/dist/
+web/test-results/
+web/playwright-report/

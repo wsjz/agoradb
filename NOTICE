@@ -12,7 +12,8 @@ AgoraDB depends on the following third-party projects. Their licenses are
 checked on every change with `cargo deny check licenses` (see deny.toml).
 The complete, exact dependency set is recorded in Cargo.lock.
 
-Apache Arrow (arrow, arrow-array, arrow-schema, arrow-select, arrow-cast, arrow-ipc, arrow-flight, parquet)
+Apache Arrow (arrow, arrow-array, arrow-schema, arrow-select, arrow-cast, arrow-ipc, arrow-flight, parquet;
+  apache-arrow for JavaScript in web/)
   https://arrow.apache.org/  -  Apache License 2.0
   Copyright The Apache Software Foundation
 
@@ -30,6 +31,9 @@ Apache OpenDAL (opendal)
 
 datafusion-federation
   https://github.com/datafusion-contrib/datafusion-federation  -  Apache License 2.0
+  Version 0.5.5 is vendored in third_party/datafusion-federation and modified
+  by The AgoraDB Authors: its manifest declares DataFusion with
+  `default-features = false` (see third_party/README.md).
 
 sqlparser-rs (sqlparser)
   https://github.com/apache/datafusion-sqlparser-rs  -  Apache License 2.0
@@ -85,3 +89,15 @@ rcgen (rcgen)
 ring (ring)
   https://github.com/briansmith/ring  -  Apache License 2.0 and ISC (BoringSSL-derived parts)
   Copyright 2015-2025 Brian Smith
+
+wasm-bindgen (wasm-bindgen, wasm-bindgen-futures, js-sys; the browser node)
+  https://github.com/wasm-bindgen/wasm-bindgen  -  MIT License (also Apache-2.0)
+  Copyright (c) 2014 Alex Crichton
+
+web-time (web-time; the clock in the browser node)
+  https://github.com/daxpedda/web-time  -  MIT License (also Apache-2.0)
+  Copyright (c) 2023 dAxpeDDa
+
+DuckDB-Wasm (@duckdb/duckdb-wasm, JavaScript, loaded by web/)
+  https://github.com/duckdb/duckdb-wasm  -  MIT License
+  Copyright 2018-2025 Stichting DuckDB Foundation

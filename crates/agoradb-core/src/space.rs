@@ -110,6 +110,9 @@ pub enum EngineKind {
     Sqlite,
     /// Another node, reached over Arrow Flight (remote Spaces).
     Flight,
+    /// An engine provided by the host the node is embedded in: duckdb-wasm
+    /// in the browser node (architecture v3 §10). Native nodes have none.
+    Host,
 }
 
 impl fmt::Display for EngineKind {
@@ -118,6 +121,7 @@ impl fmt::Display for EngineKind {
             EngineKind::DuckDb => f.write_str("duckdb"),
             EngineKind::Sqlite => f.write_str("sqlite"),
             EngineKind::Flight => f.write_str("flight"),
+            EngineKind::Host => f.write_str("host"),
         }
     }
 }

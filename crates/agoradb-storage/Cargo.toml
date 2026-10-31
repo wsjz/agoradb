@@ -15,7 +15,7 @@ bytes = { workspace = true }
 futures = { workspace = true }
 iceberg = { workspace = true }
 parquet = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
 uuid = { workspace = true }
 
 [dev-dependencies]

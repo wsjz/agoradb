@@ -10,7 +10,7 @@ agoradb-core = { path = "../agoradb-core" }
 arrow-schema = { workspace = true }
 iceberg = { workspace = true }
 tracing = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
 async-trait = { workspace = true }
 futures = { workspace = true }
 serde = { workspace = true }

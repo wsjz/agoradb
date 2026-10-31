@@ -7,7 +7,7 @@ authors.workspace = true
 
 [dependencies]
 opendal = { version = "0.52", features = ["services-fs", "services-s3"] }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
 iceberg = { workspace = true }
 serde = { workspace = true }
 typetag = "0.2"

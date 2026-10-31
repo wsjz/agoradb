@@ -10,6 +10,7 @@ description = "AgoraDB peer protocol over Arrow Flight: request signing and the 
 agoradb-core = { path = "../agoradb-core" }
 agoradb-engine = { path = "../agoradb-engine" }
 agoradb-identity = { path = "../agoradb-identity" }
+agoradb-protocol = { path = "../agoradb-protocol" }
 arrow-array = { workspace = true }
 arrow-flight = { workspace = true }
 arrow-ipc = { workspace = true }
@@ -24,6 +25,6 @@ rustls-webpki = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
 tonic = { workspace = true }
 tracing = { workspace = true }
