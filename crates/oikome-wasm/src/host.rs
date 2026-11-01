@@ -13,7 +13,7 @@
 // limitations under the License.
 
 //! [`HostEngine`]: the engine the JavaScript host provides (duckdb-wasm, see
-//! `web/src/host.js`) as a [`QueryEngine`] (architecture v3 §10).
+//! `packages/node/src/host.js`) as a [`QueryEngine`] (architecture v3 §10).
 //!
 //! `QueryEngine` and DataFusion require `Send`, but JavaScript objects are
 //! not. So the engine holds only an id: the host object lives in a

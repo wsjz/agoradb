@@ -16,7 +16,7 @@
 //!
 //! The Rust core — identity, statement parsing and the semantic layer — is
 //! compiled to WebAssembly; the engine is provided by the JavaScript host
-//! (duckdb-wasm, data in OPFS). See `web/` for the host and the build.
+//! (duckdb-wasm, data in OPFS). See `packages/node` for the host and the build.
 //!
 //! * [`node`]: statement handling, tested natively against DuckDB.
 //! * [`remote`]: Spaces of Full Nodes, reached over a [`Transport`].

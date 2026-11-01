@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! [`HostTransport`]: the host's WebRTC transport (`web/src/transport.js`)
+//! [`HostTransport`]: the host's WebRTC transport (`packages/node/src/transport.js`)
 //! as a [`Transport`], bridged like [`HostEngine`](crate::host::HostEngine):
 //! the JavaScript object stays in a thread-local table and each call comes
 //! back over a oneshot channel.

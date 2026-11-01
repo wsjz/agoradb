@@ -13,7 +13,7 @@ checked on every change with `cargo deny check licenses` (see deny.toml).
 The complete, exact dependency set is recorded in Cargo.lock.
 
 Apache Arrow (arrow, arrow-array, arrow-schema, arrow-select, arrow-cast, arrow-ipc, arrow-flight, parquet;
-  apache-arrow for JavaScript in web/)
+  apache-arrow for JavaScript in packages/node and e2e)
   https://arrow.apache.org/  -  Apache License 2.0
   Copyright The Apache Software Foundation
 
@@ -137,6 +137,6 @@ DuckDB extensions sqlite, lance and duckpgq (downloaded by `oikome extensions
   https://github.com/cwida/duckpgq-extension  -  MIT License
   Copyright 2018-2025 Stichting DuckDB Foundation
 
-DuckDB-Wasm (@duckdb/duckdb-wasm, JavaScript, loaded by web/)
+DuckDB-Wasm (@duckdb/duckdb-wasm, JavaScript, loaded by packages/node)
   https://github.com/duckdb/duckdb-wasm  -  MIT License
   Copyright 2018-2025 Stichting DuckDB Foundation

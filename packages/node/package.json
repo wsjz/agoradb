@@ -1,0 +1,21 @@
+{
+  "name": "@oikome/node",
+  "version": "0.0.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "description": "Oikome browser node: the JavaScript host (duckdb-wasm, IndexedDB, WebRTC) around crates/oikome-wasm",
+  "type": "module",
+  "exports": {
+    "./host": "./src/host.js",
+    "./store": "./src/store.js",
+    "./transport": "./src/transport.js",
+    "./wasm": "./pkg/oikome_wasm.js"
+  },
+  "scripts": {
+    "build": "bash scripts/build.sh"
+  },
+  "dependencies": {
+    "@duckdb/duckdb-wasm": "1.32.0",
+    "apache-arrow": "17.0.0"
+  }
+}

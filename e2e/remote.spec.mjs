@@ -18,17 +18,19 @@
 // table with the node's table. A tampered record, a wrong fingerprint and
 // a revoked token are each refused.
 //
-// OIKOME_BIN: the native binary (default ../target/debug/oikome). It
-// loads the prebuilt libduckdb cargo downloaded into target/duckdb-download.
+// OIKOME_BIN: the native binary (default <target>/debug/oikome, where
+// <target> is CARGO_TARGET_DIR or the repository's target/). It loads the
+// prebuilt libduckdb cargo downloaded into <target>/duckdb-download.
 
 import { execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, test } from "@playwright/test";
 
-const TARGET = fileURLToPath(new URL("../../target/", import.meta.url));
+const REPO = fileURLToPath(new URL("..", import.meta.url));
+const TARGET = resolve(REPO, process.env.CARGO_TARGET_DIR ?? "target");
 const BIN = process.env.OIKOME_BIN ?? join(TARGET, "debug", "oikome");
 /** Directories under target/duckdb-download/<target>/<version> with libduckdb. */
 function libDirs() {
