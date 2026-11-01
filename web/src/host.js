@@ -1,4 +1,4 @@
-// Copyright 2025 The AgoraDB Authors
+// Copyright 2025 The Oikome Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -13,7 +13,7 @@
 // limitations under the License.
 
 // The browser node's engine: duckdb-wasm in a worker, its database in OPFS.
-// This is the `HostEngineAdapter` crates/agoradb-wasm/src/host.rs calls;
+// This is the `HostEngineAdapter` crates/oikome-wasm/src/host.rs calls;
 // every result crosses to Rust as an Arrow IPC stream.
 
 import * as duckdb from "@duckdb/duckdb-wasm";
@@ -37,7 +37,7 @@ function quoteIdent(name) {
 }
 
 /** Open duckdb-wasm on `opfs://<file>` and return the engine adapter. */
-export async function createEngine(file = "agora.duckdb") {
+export async function createEngine(file = "oikome.duckdb") {
   const bundle = await duckdb.selectBundle(BUNDLES);
   const worker = new Worker(bundle.mainWorker);
   const db = new duckdb.AsyncDuckDB(new duckdb.VoidLogger(), worker);

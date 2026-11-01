@@ -1,0 +1,35 @@
+[package]
+name = "oikome-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Oikome browser node: the Rust core as WebAssembly, with duckdb-wasm provided by the JavaScript host"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+oikome-core = { path = "../oikome-core" }
+oikome-engine = { path = "../oikome-engine", default-features = false }
+oikome-identity = { path = "../oikome-identity", default-features = false }
+oikome-semantic = { path = "../oikome-semantic" }
+arrow-array = { workspace = true }
+arrow-ipc = { workspace = true }
+arrow-schema = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sqlparser = { workspace = true }
+thiserror = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = { workspace = true }
+wasm-bindgen = { workspace = true }
+wasm-bindgen-futures = { workspace = true }
+
+[dev-dependencies]
+# Native tests stand in for duckdb-wasm with the native DuckDB engine.
+oikome-engine-duckdb = { path = "../oikome-engine-duckdb" }
+tokio = { workspace = true, features = ["full"] }

@@ -1,4 +1,4 @@
-// Copyright 2025 The AgoraDB Authors
+// Copyright 2025 The Oikome Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -23,12 +23,12 @@ async function ready(page) {
   expect(error, "boot error").toBeUndefined();
 }
 
-const sql = (page, text) => page.evaluate((t) => window.agora.sql(t), text);
+const sql = (page, text) => page.evaluate((t) => window.oikome.sql(t), text);
 
 test("local queries on duckdb-wasm survive a reload", async ({ page }) => {
   await page.goto("/");
   await ready(page);
-  const did = await page.evaluate(() => window.agora.did());
+  const did = await page.evaluate(() => window.oikome.did());
   expect(did).toMatch(/^did:key:z6Mk/);
 
   await sql(page, "CREATE SPACE notes");
@@ -46,7 +46,7 @@ test("local queries on duckdb-wasm survive a reload", async ({ page }) => {
   await page.reload();
   await ready(page);
   // Same key, same registry (default Space included), same data.
-  expect(await page.evaluate(() => window.agora.did())).toBe(did);
+  expect(await page.evaluate(() => window.oikome.did())).toBe(did);
   expect(await sql(page, "SELECT count(*) AS n FROM items")).toEqual([{ n: 3 }]);
 });
 

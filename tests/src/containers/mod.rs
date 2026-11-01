@@ -1,4 +1,4 @@
-// Copyright 2025 The AgoraDB Authors
+// Copyright 2025 The Oikome Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -22,4 +22,4 @@
 //! - Multi-node cluster test scenarios
 //!
 //! For now, all integration tests run against local pre-generated data
-//! in `tests/agora-local/`.
+//! in `tests/oikome-local/`.

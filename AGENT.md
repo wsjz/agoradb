@@ -1,6 +1,6 @@
-# AGENT.zh.md — Agora DB 开发协作协议
+# AGENT.zh.md — Oikome 开发协作协议
 
-> **目的**: 定义人类开发者与 AI Agent 在 Agora DB 项目中的协作规则。
+> **目的**: 定义人类开发者与 AI Agent 在 Oikome 项目中的协作规则。
 > **文档语言**: 所有协作文档（本文件、开发计划、Issue、PR 描述）使用 **中文**。
 > **代码语言**: 所有源代码、注释和标识符使用 **英文**。
 > **许可证**: Apache-2.0（为后续 Apache 基金会捐赠做准备）。
@@ -9,7 +9,7 @@
 
 ## 1. 项目概览
 
-Agora DB 是一个 **AI Native 的多模态私域数据中心**，通常使用个人资源，支持受信的数据交换。
+Oikome 是一个 **AI Native 的多模态私域数据中心**，通常使用个人资源，支持受信的数据交换。
 
 - **私域**：数据归所有者（个人、家庭或小团队），存在自己控制的存储上（本地硬盘、NAS、网盘），由数据接入从各个 App 接进来。
 - **多模态**：文本、图片、音频、文件、向量和表格一样是一等数据。
@@ -21,17 +21,17 @@ Agora DB 是一个 **AI Native 的多模态私域数据中心**，通常使用�
 
 底层是一个**去中心化的本地联邦查询语义层** —— 嵌入式、主权化、原生 P2P。
 
-AgoraDB 负责"谁能看什么、数据从哪来、存在哪、查询和任务发到哪"，**不负责"怎么算"**：计算交给可插拔的嵌入式引擎（分析型 DuckDB、事务型 SQLite，浏览器端由 JS 宿主提供），DataFusion 只作为联邦协调器合并多个引擎的 Arrow 结果。规范见 `agoradb_architecture_v3.md`。
+Oikome 负责"谁能看什么、数据从哪来、存在哪、查询和任务发到哪"，**不负责"怎么算"**：计算交给可插拔的嵌入式引擎（分析型 DuckDB、事务型 SQLite，浏览器端由 JS 宿主提供），DataFusion 只作为联邦协调器合并多个引擎的 Arrow 结果。规范见 `oikome_architecture_v3.md`。
 
 - **核心语言**: Rust（WASM 可编译、内存安全）
 - **计算引擎**: DuckDB（分析型 Space）、SQLite（事务型 Space）
 - **联邦协调**: Apache DataFusion + `datafusion-federation`（仅合并，不读文件）
-- **目录系统**: Apache Iceberg（分析型 Space）+ `.agora/` 下的 Space/Location 注册表
+- **目录系统**: Apache Iceberg（分析型 Space）+ `.oikome/` 下的 Space/Location 注册表
 - **存储格式**: Apache Parquet（分析型、P2P 同步单元）、SQLite 文件（事务型）、Lance（向量 / 全文 / 大对象，3.3）
 - **内存格式**: Apache Arrow
 - **网络传输**: Arrow Flight (gRPC)，TLS 证书绑定节点 DID；libp2p 只用于节点发现（mDNS）
 - **密码学**: ed25519-dalek + Blake3（3.1）
-- **浏览器端**: `agoradb-wasm`（wasm-bindgen）+ duckdb-wasm（OPFS）+ IndexedDB；构建见 `web/scripts/build.sh`（需要能编译 wasm32 的 clang，macOS 用 Homebrew LLVM）
+- **浏览器端**: `oikome-wasm`（wasm-bindgen）+ duckdb-wasm（OPFS）+ IndexedDB；构建见 `web/scripts/build.sh`（需要能编译 wasm32 的 clang，macOS 用 Homebrew LLVM）
 
 ### 架构分层（自底向上）
 
@@ -74,11 +74,11 @@ L5: 接口层 (SQL API, HTTP, WASM, CLI, MCP) + 数据接入 (Connector: App 官
 每次开发会话开始前，Agent **必须**：
 
 1. 读取 `AGENT.md`（本文件）。
-2. 读取 `agoradb_architecture_v3.md` 获取架构上下文（v1/v2 仅作历史参考，冲突时以 v3 为准）。
+2. 读取 `oikome_architecture_v3.md` 获取架构上下文（v1/v2 仅作历史参考，冲突时以 v3 为准）。
 3. 检查当前 git 分支和状态。
 4. 审阅本次会话的任何待办任务/计划。
 
-**本地工具链**：`rust-toolchain.toml` 固定 stable；首次构建 `agoradb-engine-duckdb` 会从源码编译 DuckDB（约 7 分钟），之后走增量缓存。
+**本地工具链**：`rust-toolchain.toml` 固定 stable；首次构建 `oikome-engine-duckdb` 会从源码编译 DuckDB（约 7 分钟），之后走增量缓存。
 
 ---
 
@@ -91,7 +91,7 @@ L5: 接口层 (SQL API, HTTP, WASM, CLI, MCP) + 数据接入 (Connector: App 官
 每个源文件都必须包含标准的 Apache-2.0 头：
 
 ```rust
-// Copyright 2025 The AgoraDB Authors
+// Copyright 2025 The Oikome Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -135,7 +135,7 @@ L5: 接口层 (SQL API, HTTP, WASM, CLI, MCP) + 数据接入 (Connector: App 官
 
 项目遵循严格的分阶段路线图：
 
-v3 路线图（详见 `agoradb_architecture_v3.md` §14）：
+v3 路线图（详见 `oikome_architecture_v3.md` §14）：
 
 | 阶段 | 目标 | 状态 |
 |-------|------|----------|
@@ -157,7 +157,7 @@ v3 路线图（详见 `agoradb_architecture_v3.md` §14）：
 每个任务的执行流程：
 
 1. **读取 AGENT.md**（本文件）。
-2. **读取相关架构章节** 于 `agoradb_architecture_v3.md`。
+2. **读取相关架构章节** 于 `oikome_architecture_v3.md`。
 3. **沟通与设计** —— **开发代码前必须与用户充分沟通设计方案，经用户确认后方可进入实现阶段。禁止未经确认直接编码。**
 4. **制定计划** —— 如果任务跨多个文件或较为复杂，使用 Plan Mode 制定详细实现计划并获得用户批准。
 5. **先写测试** —— TDD 优先，尤其针对存储和查询引擎。
@@ -199,7 +199,7 @@ Claude Code 提供多种 skills 用于规范开发流程。以下规范按强制
 
 #### 不适用（NOT APPLICABLE）
 
-以下 skills 与 Agora DB 项目无关，**禁止**使用：
+以下 skills 与 Oikome 项目无关，**禁止**使用：
 
 - 前端/UI 类：`frontend-design`, `impeccable`, `design-taste-frontend`, `baseline-ui`, `high-end-visual-design`, `minimalist-ui`, `industrial-brutalist-ui`, `ui-ux-pro-max`, `fixing-accessibility`, `fixing-metadata`, `fixing-motion-performance`, `gpt-taste`, `image-to-code`, `imagegen-frontend-web`, `imagegen-frontend-mobile`, `redesign-existing-projects`, `stitch-design-taste`, `brandkit`
 - Figma 类：`figma:figma-use`, `figma:figma-generate-design`, `figma:figma-generate-diagram`, `figma:figma-generate-library`, `figma:figma-implement-design`, `figma:figma-code-connect`, `figma:figma-create-design-system-rules`, `figma:figma-use-figjam`
@@ -219,40 +219,40 @@ Claude Code 提供多种 skills 用于规范开发流程。以下规范按强制
 ### 4.4 模块组织
 
 ```
-agoradb/
+oikome/
 ├── Cargo.toml                  # 工作区根；所有共享依赖版本在 [workspace.dependencies] 统一锁定
 ├── Cargo.lock                  # 已提交（duckdb 精确锁版）
 ├── rust-toolchain.toml         # stable + rustfmt + clippy
 ├── deny.toml                   # cargo-deny 许可证白名单
 ├── LICENSE / NOTICE            # Apache-2.0 / 依赖归属
 ├── AGENT.md                    # 本文件
-├── agoradb_architecture_v3.md  # 规范架构（v1/v2 为历史）
+├── oikome_architecture_v3.md  # 规范架构（v1/v2 为历史）
 ├── crates/
-│   ├── agoradb-core/           # 错误、SpaceUri、SpaceKind/EngineKind/AccessMode
-│   ├── agoradb-vfs/            # OpenDAL VFS（3.4 接入）
-│   ├── agoradb-catalog/        # Iceberg Catalog + Space/Location 注册表 + 快照解析
-│   ├── agoradb-storage/        # Parquet 写路径、Compaction
-│   ├── agoradb-engine/         # QueryEngine trait、TableSource、BlockingWorker
-│   ├── agoradb-engine-duckdb/  # 分析型引擎（bundled DuckDB）
-│   ├── agoradb-engine-sqlite/  # 事务型引擎（SQLite 行 → Arrow）
-│   ├── agoradb-semantic/       # Agora 语句解析、语句分类、视图展开与权限改写
-│   ├── agoradb-federation/     # DataFusion 协调器、EngineSqlExecutor
-│   ├── agoradb-node/           # AgoraSession、EngineRegistry、路由、订阅副本
-│   ├── agoradb-identity/       # DID、UCAN 签发 / 委托 / 撤销、请求签名
-│   ├── agoradb-network/        # 节点间协议、PeerClient、FlightEngine
-│   ├── agoradb-discovery/      # libp2p 节点发现（mDNS、交换 Flight 端点），写入 Peers 表
-│   ├── agoradb-protocol/       # 节点间协议类型与请求摘要（原生和浏览器共用）
-│   ├── agoradb-wasm/           # 浏览器节点：BrowserNode、HostEngine（duckdb-wasm）、JS 接口
-│   └── agoradb-server/         # Arrow Flight 服务、agoradb 命令行
-├── tests/                      # agoradb-tests（TPC-H Q1–Q5）+ tools/data-gen + e2e/（Docker 节点端到端脚本）
-├── docker/                     # 节点镜像（agoradb.Dockerfile）与三节点 compose
+│   ├── oikome-core/           # 错误、SpaceUri、SpaceKind/EngineKind/AccessMode
+│   ├── oikome-vfs/            # OpenDAL VFS（3.4 接入）
+│   ├── oikome-catalog/        # Iceberg Catalog + Space/Location 注册表 + 快照解析
+│   ├── oikome-storage/        # Parquet 写路径、Compaction
+│   ├── oikome-engine/         # QueryEngine trait、TableSource、BlockingWorker
+│   ├── oikome-engine-duckdb/  # 分析型引擎（bundled DuckDB）
+│   ├── oikome-engine-sqlite/  # 事务型引擎（SQLite 行 → Arrow）
+│   ├── oikome-semantic/       # Oikome 语句解析、语句分类、视图展开与权限改写
+│   ├── oikome-federation/     # DataFusion 协调器、EngineSqlExecutor
+│   ├── oikome-node/           # OikomeSession、EngineRegistry、路由、订阅副本
+│   ├── oikome-identity/       # DID、UCAN 签发 / 委托 / 撤销、请求签名
+│   ├── oikome-network/        # 节点间协议、PeerClient、FlightEngine
+│   ├── oikome-discovery/      # libp2p 节点发现（mDNS、交换 Flight 端点），写入 Peers 表
+│   ├── oikome-protocol/       # 节点间协议类型与请求摘要（原生和浏览器共用）
+│   ├── oikome-wasm/           # 浏览器节点：BrowserNode、HostEngine（duckdb-wasm）、JS 接口
+│   └── oikome-server/         # Arrow Flight 服务、oikome 命令行
+├── tests/                      # oikome-tests（TPC-H Q1–Q5）+ tools/data-gen + e2e/（Docker 节点端到端脚本）
+├── docker/                     # 节点镜像（oikome.Dockerfile）与三节点 compose
 ├── web/                        # 浏览器节点的 JS 宿主（duckdb-wasm、IndexedDB）、页面与 Playwright 测试
 ├── third_party/                # 打了补丁的第三方代码（datafusion-federation，见 README）
 ├── .github/workflows/          # docker-e2e（三个 Docker 节点）、browser-e2e（无头 Chromium 跑浏览器节点）
 └── docs/                       # 用户和开发者文档（gitignored）
 ```
 
-计划中：`agoradb-webrtc`（3.2b），`agoradb-connect`（3.5），`agoradb-cli`。
+计划中：`oikome-webrtc`（3.2b），`oikome-connect`（3.5），`oikome-cli`。
 
 ---
 
@@ -262,7 +262,7 @@ agoradb/
 
 | 项目 | 规范 | 示例 |
 |------|------------|---------|
-| Crate 名称 | `kebab-case`，前缀 `agoradb-` | `agoradb-catalog` |
+| Crate 名称 | `kebab-case`，前缀 `oikome-` | `oikome-catalog` |
 | 模块名称 | `snake_case` | `iceberg_catalog` |
 | 类型名称 | `PascalCase` | `SchemaRegistry` |
 | 函数名称 | `snake_case` | `commit_snapshot` |
@@ -309,7 +309,7 @@ agoradb/
 ### 6.2 测试数据
 
 - 单元测试使用确定性合成数据。
-- TPC-H 集成测试使用 SF 0.001，数据由 `cargo run -p test-data-gen -- --scale-factor 0.001 --force` 生成到 `tests/agora-local`（gitignored，不提交）。
+- TPC-H 集成测试使用 SF 0.001，数据由 `cargo run -p test-data-gen -- --scale-factor 0.001 --force` 生成到 `tests/oikome-local`（gitignored，不提交）。
 - 需要网络的测试（如 DuckDB `sqlite` 扩展）标记 `#[ignore]`，用 `--features sqlite-scanner-tests -- --ignored` 单独运行。
 - 测试中禁止使用真实用户数据。
 
@@ -360,7 +360,7 @@ agoradb/
 
 ### 8.2 架构文档
 
-- `agoradb_architecture_v3.md` 是规范原文；v1、v2 仅作历史参考。
+- `oikome_architecture_v3.md` 是规范原文；v1、v2 仅作历史参考。
 - 任何架构偏离必须记录并获得批准。
 - 开发实践变更时更新 `AGENT.md`。
 
@@ -397,7 +397,7 @@ agoradb/
 | 2025-05-30 | 初始 AGENT.md 创建 | 为分阶段实现建立开发协议 |
 | 2026-06-08 | 执行内核迁移到 DataFusion（v2） | 放弃自研优化器/执行器 |
 | 2026-09-27 | 转型为去中心化本地联邦查询语义层（v3）：计算交给 DuckDB/SQLite，DataFusion 只做联邦合并 | 自研 OLAP 超出团队范围；差异化在主权、联邦与 P2P，而非算子 |
-| 2026-10-30 | 定位改为 AI Native 的多模态私域数据中心（通常使用个人资源、支持受信的数据交换）：新增网盘接入（3.4）、数据接入（3.5）、算力共享（3.6），v3 各层不变；数据交换和算力共享同一信任机制、不同授权 | 数据和算力留在个人手里，个人之间互相调用而不交给大平台；架构见 `agoradb_architecture_v3.md` §1、§7.5、§11、§12 |
+| 2026-10-30 | 定位改为 AI Native 的多模态私域数据中心（通常使用个人资源、支持受信的数据交换）：新增网盘接入（3.4）、数据接入（3.5）、算力共享（3.6），v3 各层不变；数据交换和算力共享同一信任机制、不同授权 | 数据和算力留在个人手里，个人之间互相调用而不交给大平台；架构见 `oikome_architecture_v3.md` §1、§7.5、§11、§12 |
 | 2026-10-31 | 3.2a 浏览器节点：duckdb-wasm 作本地引擎（SQLite 以后再做）；`HostEngine` 只存 id、JS 对象放线程本地表、结果用 Arrow IPC；DataFusion 去掉 compression/parquet 并给 datafusion-federation 0.5.5 打补丁；浏览器连 Full Node 定为 WebRTC 数据通道（3.2b） | 不改 `QueryEngine` 和 DataFusion；0.5.7 才修掉强制默认功能但要 DataFusion 55；浏览器无法按 DID 校验证书，WebRTC 能锁定 DID 签名过的指纹。见架构 §10 |
 | 2026-10-30 | 3.1d：网络阶段的完成标准在 GitHub Actions 上用三个 Docker 节点验证（其中一个只靠 mDNS 发现） | 本机没有容器环境；CI 每次推送都跑，Docker 桥接网络也能验证本机防火墙挡住的 mDNS |
 | 2026-10-30 | 3.1c：节点间默认 TLS，证书由节点 DID 密钥自签并按 DID 校验；明文 http 需 `--allow-http`；libp2p 只做发现，结果写入目录的 Peers 表，`PEER` 可不写 | DID 本来就是请求签名的身份，按它校验证书不需要 CA 和域名；发现结果放目录里，`serve` 和 `sql` 两个进程都能用。见架构 §3.4、§9 |

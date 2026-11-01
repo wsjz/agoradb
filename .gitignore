@@ -4,7 +4,7 @@ target/
 docs
 .claude
 .DS_Store
-tests/agora-local/
+tests/oikome-local/
 web/node_modules/
 web/pkg/
 web/dist/

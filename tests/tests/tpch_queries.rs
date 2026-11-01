@@ -1,4 +1,4 @@
-// Copyright 2025 The AgoraDB Authors
+// Copyright 2025 The Oikome Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,22 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! TPC-H Q1–Q5 against the pre-generated dataset in `tests/agora-local`
-//! (SF 0.001), executed by DuckDB through [`AgoraSession`].
+//! TPC-H Q1–Q5 against the pre-generated dataset in `tests/oikome-local`
+//! (SF 0.001), executed by DuckDB through [`OikomeSession`].
 //!
 //! Generate the data first with the command in
-//! [`agoradb_tests::framework::catalog::GENERATE_CMD`].
+//! [`oikome_tests::framework::catalog::GENERATE_CMD`].
 
 use std::sync::Arc;
 
-use agoradb_node::{AgoraSession, EngineRegistry, NodeConfig, QueryResult, SessionConfig};
-use agoradb_tests::framework::catalog::{setup_catalog, TPCH_SPACE};
 use arrow_array::{Array, Int64Array, StringArray};
+use oikome_node::{EngineRegistry, NodeConfig, OikomeSession, QueryResult, SessionConfig};
+use oikome_tests::framework::catalog::{setup_catalog, TPCH_SPACE};
 
-async fn session() -> AgoraSession {
+async fn session() -> OikomeSession {
     let catalog = setup_catalog().await;
     let engines = Arc::new(EngineRegistry::new(catalog.clone(), NodeConfig::default()).unwrap());
-    AgoraSession::new(
+    OikomeSession::new(
         catalog,
         engines,
         SessionConfig {

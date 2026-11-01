@@ -11,7 +11,7 @@ DUCKDB_DOWNLOAD_LIB = "1"
 [build]
 rustflags = ["-C", "symbol-mangling-version=v0"]
 
-# Browser build (crates/agoradb-wasm). Target rustflags replace the [build]
+# Browser build (crates/oikome-wasm). Target rustflags replace the [build]
 # ones, so the mangling flag is repeated. getrandom 0.3 needs this cfg as
 # well as its `wasm_js` feature to read crypto.getRandomValues.
 [target.wasm32-unknown-unknown]

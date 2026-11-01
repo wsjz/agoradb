@@ -1,0 +1,41 @@
+[package]
+name = "oikome-node"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Oikome node runtime: session, engine registry and statement routing"
+
+[features]
+default = ["engine-duckdb", "engine-sqlite"]
+engine-duckdb = ["dep:oikome-engine-duckdb"]
+engine-sqlite = ["dep:oikome-engine-sqlite"]
+
+[dependencies]
+oikome-core = { path = "../oikome-core" }
+oikome-catalog = { path = "../oikome-catalog" }
+oikome-engine = { path = "../oikome-engine" }
+oikome-engine-duckdb = { path = "../oikome-engine-duckdb", optional = true }
+oikome-engine-sqlite = { path = "../oikome-engine-sqlite", optional = true }
+oikome-federation = { path = "../oikome-federation" }
+oikome-identity = { path = "../oikome-identity" }
+oikome-network = { path = "../oikome-network" }
+oikome-semantic = { path = "../oikome-semantic" }
+oikome-storage = { path = "../oikome-storage" }
+arrow-array = { workspace = true }
+arrow-cast = { workspace = true }
+arrow-schema = { workspace = true }
+arrow-select = { workspace = true }
+blake3 = { workspace = true }
+futures = { workspace = true }
+iceberg = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sqlparser = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+tracing = { workspace = true }
+
+[dev-dependencies]
+bytes = { workspace = true }
+tempfile = { workspace = true }

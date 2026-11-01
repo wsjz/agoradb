@@ -44,322 +44,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "agoradb-catalog"
-version = "0.1.0"
-dependencies = [
- "agoradb-core",
- "agoradb-storage",
- "arrow-array",
- "arrow-schema",
- "async-trait",
- "futures",
- "iceberg",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tokio-test",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "agoradb-core"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "thiserror 1.0.69",
-]
-
-[[package]]
-name = "agoradb-discovery"
-version = "0.1.0"
-dependencies = [
- "agoradb-catalog",
- "agoradb-identity",
- "futures",
- "iceberg",
- "libp2p",
- "serde",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
- "zeroize",
-]
-
-[[package]]
-name = "agoradb-engine"
-version = "0.1.0"
-dependencies = [
- "agoradb-core",
- "arrow-array",
- "arrow-schema",
- "async-trait",
- "bitflags 2.13.2",
- "futures",
- "thiserror 1.0.69",
- "tokio",
- "tokio-stream",
- "tokio-test",
-]
-
-[[package]]
-name = "agoradb-engine-duckdb"
-version = "0.1.0"
-dependencies = [
- "agoradb-core",
- "agoradb-engine",
- "arrow-array",
- "arrow-schema",
- "async-trait",
- "duckdb",
- "futures",
- "parquet",
- "rusqlite",
- "tempfile",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "agoradb-engine-sqlite"
-version = "0.1.0"
-dependencies = [
- "agoradb-core",
- "agoradb-engine",
- "arrow-array",
- "arrow-schema",
- "async-trait",
- "futures",
- "rusqlite",
- "tempfile",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "agoradb-federation"
-version = "0.1.0"
-dependencies = [
- "agoradb-core",
- "agoradb-engine",
- "arrow-array",
- "arrow-cast",
- "arrow-schema",
- "arrow-select",
- "async-trait",
- "datafusion",
- "datafusion-federation",
- "futures",
- "sqlparser",
- "thiserror 1.0.69",
- "tracing",
-]
-
-[[package]]
-name = "agoradb-identity"
-version = "0.1.0"
-dependencies = [
- "base64 0.22.1",
- "blake3",
- "bs58",
- "ed25519-dalek 2.2.0",
- "getrandom 0.3.4",
- "rcgen 0.14.10",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 1.0.69",
- "web-time",
- "zeroize",
-]
-
-[[package]]
-name = "agoradb-network"
-version = "0.1.0"
-dependencies = [
- "agoradb-core",
- "agoradb-engine",
- "agoradb-identity",
- "agoradb-protocol",
- "arrow-array",
- "arrow-flight",
- "arrow-ipc",
- "arrow-schema",
- "async-trait",
- "base64 0.22.1",
- "blake3",
- "bytes",
- "futures",
- "rustls",
- "rustls-webpki",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "tokio",
- "tonic",
- "tracing",
-]
-
-[[package]]
-name = "agoradb-node"
-version = "0.1.0"
-dependencies = [
- "agoradb-catalog",
- "agoradb-core",
- "agoradb-engine",
- "agoradb-engine-duckdb",
- "agoradb-engine-sqlite",
- "agoradb-federation",
- "agoradb-identity",
- "agoradb-network",
- "agoradb-semantic",
- "agoradb-storage",
- "arrow-array",
- "arrow-cast",
- "arrow-schema",
- "arrow-select",
- "blake3",
- "bytes",
- "futures",
- "iceberg",
- "serde",
- "serde_json",
- "sqlparser",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "agoradb-protocol"
-version = "0.1.0"
-dependencies = [
- "agoradb-identity",
- "arrow-ipc",
- "arrow-schema",
- "base64 0.22.1",
- "blake3",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "agoradb-semantic"
-version = "0.1.0"
-dependencies = [
- "agoradb-core",
- "sqlparser",
- "thiserror 1.0.69",
-]
-
-[[package]]
-name = "agoradb-server"
-version = "0.1.0"
-dependencies = [
- "agoradb-catalog",
- "agoradb-core",
- "agoradb-discovery",
- "agoradb-engine",
- "agoradb-identity",
- "agoradb-network",
- "agoradb-node",
- "agoradb-semantic",
- "arrow-array",
- "arrow-cast",
- "arrow-flight",
- "arrow-ipc",
- "arrow-schema",
- "blake3",
- "clap",
- "futures",
- "iceberg",
- "serde_json",
- "tempfile",
- "tokio",
- "tonic",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "agoradb-storage"
-version = "0.1.0"
-dependencies = [
- "agoradb-catalog",
- "agoradb-core",
- "arrow-array",
- "arrow-schema",
- "arrow-select",
- "bytes",
- "futures",
- "iceberg",
- "parquet",
- "tempfile",
- "tokio",
- "tokio-test",
- "uuid",
-]
-
-[[package]]
-name = "agoradb-tests"
-version = "0.1.0"
-dependencies = [
- "agoradb-catalog",
- "agoradb-core",
- "agoradb-node",
- "arrow-array",
- "iceberg",
- "tokio",
-]
-
-[[package]]
-name = "agoradb-vfs"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "bytes",
- "futures",
- "iceberg",
- "opendal",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tokio-test",
- "typetag",
-]
-
-[[package]]
-name = "agoradb-wasm"
-version = "0.1.0"
-dependencies = [
- "agoradb-core",
- "agoradb-engine",
- "agoradb-engine-duckdb",
- "agoradb-identity",
- "agoradb-semantic",
- "arrow-array",
- "arrow-ipc",
- "arrow-schema",
- "async-trait",
- "futures",
- "js-sys",
- "serde",
- "serde_json",
- "sqlparser",
- "thiserror 1.0.69",
- "tokio",
- "wasm-bindgen",
- "wasm-bindgen-futures",
-]
-
-[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4726,6 +4410,322 @@ dependencies = [
 ]
 
 [[package]]
+name = "oikome-catalog"
+version = "0.1.0"
+dependencies = [
+ "arrow-array",
+ "arrow-schema",
+ "async-trait",
+ "futures",
+ "iceberg",
+ "oikome-core",
+ "oikome-storage",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-test",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "oikome-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "oikome-discovery"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "iceberg",
+ "libp2p",
+ "oikome-catalog",
+ "oikome-identity",
+ "serde",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "zeroize",
+]
+
+[[package]]
+name = "oikome-engine"
+version = "0.1.0"
+dependencies = [
+ "arrow-array",
+ "arrow-schema",
+ "async-trait",
+ "bitflags 2.13.2",
+ "futures",
+ "oikome-core",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-stream",
+ "tokio-test",
+]
+
+[[package]]
+name = "oikome-engine-duckdb"
+version = "0.1.0"
+dependencies = [
+ "arrow-array",
+ "arrow-schema",
+ "async-trait",
+ "duckdb",
+ "futures",
+ "oikome-core",
+ "oikome-engine",
+ "parquet",
+ "rusqlite",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "oikome-engine-sqlite"
+version = "0.1.0"
+dependencies = [
+ "arrow-array",
+ "arrow-schema",
+ "async-trait",
+ "futures",
+ "oikome-core",
+ "oikome-engine",
+ "rusqlite",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "oikome-federation"
+version = "0.1.0"
+dependencies = [
+ "arrow-array",
+ "arrow-cast",
+ "arrow-schema",
+ "arrow-select",
+ "async-trait",
+ "datafusion",
+ "datafusion-federation",
+ "futures",
+ "oikome-core",
+ "oikome-engine",
+ "sqlparser",
+ "thiserror 1.0.69",
+ "tracing",
+]
+
+[[package]]
+name = "oikome-identity"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "blake3",
+ "bs58",
+ "ed25519-dalek 2.2.0",
+ "getrandom 0.3.4",
+ "rcgen 0.14.10",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "web-time",
+ "zeroize",
+]
+
+[[package]]
+name = "oikome-network"
+version = "0.1.0"
+dependencies = [
+ "arrow-array",
+ "arrow-flight",
+ "arrow-ipc",
+ "arrow-schema",
+ "async-trait",
+ "base64 0.22.1",
+ "blake3",
+ "bytes",
+ "futures",
+ "oikome-core",
+ "oikome-engine",
+ "oikome-identity",
+ "oikome-protocol",
+ "rustls",
+ "rustls-webpki",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tonic",
+ "tracing",
+]
+
+[[package]]
+name = "oikome-node"
+version = "0.1.0"
+dependencies = [
+ "arrow-array",
+ "arrow-cast",
+ "arrow-schema",
+ "arrow-select",
+ "blake3",
+ "bytes",
+ "futures",
+ "iceberg",
+ "oikome-catalog",
+ "oikome-core",
+ "oikome-engine",
+ "oikome-engine-duckdb",
+ "oikome-engine-sqlite",
+ "oikome-federation",
+ "oikome-identity",
+ "oikome-network",
+ "oikome-semantic",
+ "oikome-storage",
+ "serde",
+ "serde_json",
+ "sqlparser",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "oikome-protocol"
+version = "0.1.0"
+dependencies = [
+ "arrow-ipc",
+ "arrow-schema",
+ "base64 0.22.1",
+ "blake3",
+ "oikome-identity",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "oikome-semantic"
+version = "0.1.0"
+dependencies = [
+ "oikome-core",
+ "sqlparser",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "oikome-server"
+version = "0.1.0"
+dependencies = [
+ "arrow-array",
+ "arrow-cast",
+ "arrow-flight",
+ "arrow-ipc",
+ "arrow-schema",
+ "blake3",
+ "clap",
+ "futures",
+ "iceberg",
+ "oikome-catalog",
+ "oikome-core",
+ "oikome-discovery",
+ "oikome-engine",
+ "oikome-identity",
+ "oikome-network",
+ "oikome-node",
+ "oikome-semantic",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tonic",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "oikome-storage"
+version = "0.1.0"
+dependencies = [
+ "arrow-array",
+ "arrow-schema",
+ "arrow-select",
+ "bytes",
+ "futures",
+ "iceberg",
+ "oikome-catalog",
+ "oikome-core",
+ "parquet",
+ "tempfile",
+ "tokio",
+ "tokio-test",
+ "uuid",
+]
+
+[[package]]
+name = "oikome-tests"
+version = "0.1.0"
+dependencies = [
+ "arrow-array",
+ "iceberg",
+ "oikome-catalog",
+ "oikome-core",
+ "oikome-node",
+ "tokio",
+]
+
+[[package]]
+name = "oikome-vfs"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "futures",
+ "iceberg",
+ "opendal",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-test",
+ "typetag",
+]
+
+[[package]]
+name = "oikome-wasm"
+version = "0.1.0"
+dependencies = [
+ "arrow-array",
+ "arrow-ipc",
+ "arrow-schema",
+ "async-trait",
+ "futures",
+ "js-sys",
+ "oikome-core",
+ "oikome-engine",
+ "oikome-engine-duckdb",
+ "oikome-identity",
+ "oikome-semantic",
+ "serde",
+ "serde_json",
+ "sqlparser",
+ "thiserror 1.0.69",
+ "tokio",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+]
+
+[[package]]
 name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6254,14 +6254,14 @@ dependencies = [
 name = "test-data-gen"
 version = "0.1.0"
 dependencies = [
- "agoradb-catalog",
- "agoradb-core",
- "agoradb-storage",
  "arrow",
  "arrow-array",
  "arrow-schema",
  "clap",
  "iceberg",
+ "oikome-catalog",
+ "oikome-core",
+ "oikome-storage",
  "rand 0.8.8",
  "tokio",
 ]

@@ -1,8 +1,8 @@
-# AgoraDB test image: builds the workspace and runs the full test suite,
+# Oikome test image: builds the workspace and runs the full test suite,
 # including TPC-H Q1-Q5 against freshly generated SF 0.001 data.
 #
-#   docker build -t agoradb-tests .
-#   docker run --rm agoradb-tests
+#   docker build -t oikome-tests .
+#   docker run --rm oikome-tests
 
 # Stage 1: Builder
 FROM rust:latest AS builder

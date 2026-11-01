@@ -10,9 +10,9 @@ name = "generate-test-data"
 path = "src/main.rs"
 
 [dependencies]
-agoradb-catalog = { path = "../../../crates/agoradb-catalog" }
-agoradb-storage = { path = "../../../crates/agoradb-storage" }
-agoradb-core = { path = "../../../crates/agoradb-core" }
+oikome-catalog = { path = "../../../crates/oikome-catalog" }
+oikome-storage = { path = "../../../crates/oikome-storage" }
+oikome-core = { path = "../../../crates/oikome-core" }
 arrow = { workspace = true }
 arrow-array = { workspace = true }
 arrow-schema = { workspace = true }

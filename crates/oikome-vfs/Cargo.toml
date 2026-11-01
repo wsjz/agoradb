@@ -1,0 +1,21 @@
+[package]
+name = "oikome-vfs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+opendal = { version = "0.52", features = ["services-fs", "services-s3"] }
+tokio = { workspace = true, features = ["full"] }
+iceberg = { workspace = true }
+serde = { workspace = true }
+typetag = "0.2"
+bytes = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio-test = { workspace = true }

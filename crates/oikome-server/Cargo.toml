@@ -1,0 +1,38 @@
+[package]
+name = "oikome-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Oikome node server: the Arrow Flight endpoint peers query, and the oikome binary"
+
+[[bin]]
+name = "oikome"
+path = "src/main.rs"
+
+[dependencies]
+oikome-catalog = { path = "../oikome-catalog" }
+oikome-core = { path = "../oikome-core" }
+oikome-discovery = { path = "../oikome-discovery" }
+oikome-engine = { path = "../oikome-engine" }
+oikome-identity = { path = "../oikome-identity" }
+oikome-network = { path = "../oikome-network" }
+oikome-node = { path = "../oikome-node" }
+oikome-semantic = { path = "../oikome-semantic" }
+arrow-cast = { workspace = true }
+arrow-flight = { workspace = true }
+arrow-ipc = { workspace = true }
+arrow-schema = { workspace = true }
+blake3 = { workspace = true }
+clap = { workspace = true }
+futures = { workspace = true }
+iceberg = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+tonic = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+arrow-array = { workspace = true }
+tempfile = { workspace = true }

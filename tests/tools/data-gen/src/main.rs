@@ -1,4 +1,4 @@
-// Copyright 2025 The AgoraDB Authors
+// Copyright 2025 The Oikome Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Deterministic TPC-H test data generator for AgoraDB.
+//! Deterministic TPC-H test data generator for Oikome.
 //!
 //! Produces bit-identical Parquet files and Iceberg metadata for
 //! local integration tests. Run before executing tests that depend
@@ -22,9 +22,6 @@
 //! cargo run -p test-data-gen --bin generate-test-data
 //! ```
 
-use agoradb_catalog::AgoraCatalog;
-use agoradb_core::CreateSpaceRequest;
-use agoradb_storage::StorageEngine;
 use arrow::array::{Date32Array, Decimal128Array, Int32Array, Int64Array, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow_array::RecordBatch;
@@ -33,6 +30,9 @@ use clap::Parser;
 use iceberg::arrow::arrow_schema_to_schema_auto_assign_ids;
 use iceberg::io::FileIO;
 use iceberg::{Catalog, NamespaceIdent, TableCreation, TableIdent};
+use oikome_catalog::OikomeCatalog;
+use oikome_core::CreateSpaceRequest;
+use oikome_storage::StorageEngine;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::path::PathBuf;
@@ -42,14 +42,14 @@ const BATCH_SIZE: usize = 1024;
 
 #[derive(Parser, Debug)]
 #[command(name = "generate-test-data")]
-#[command(about = "Generate deterministic TPC-H test data for AgoraDB integration tests")]
+#[command(about = "Generate deterministic TPC-H test data for Oikome integration tests")]
 struct Args {
     /// Scale factor (0.001, 0.01, 0.1, 1.0)
     #[arg(short, long, default_value = "0.1")]
     scale_factor: f64,
 
     /// Output directory for generated data
-    #[arg(short, long, default_value = "tests/agora-local")]
+    #[arg(short, long, default_value = "tests/oikome-local")]
     output_dir: PathBuf,
 
     /// Force regeneration even if output directory exists
@@ -63,7 +63,7 @@ struct Args {
 
 /// Everything a table generator needs to create and fill one table.
 struct GenContext {
-    catalog: Arc<AgoraCatalog>,
+    catalog: Arc<OikomeCatalog>,
     file_io: FileIO,
     namespace: NamespaceIdent,
     temp_dir: PathBuf,
@@ -84,10 +84,10 @@ async fn generate(args: Args) {
     };
 
     // The output directory is dedicated to test data, so --force resets both
-    // the Space's data and the Space registry (.agora) so the Space can be
+    // the Space's data and the Space registry (.oikome) so the Space can be
     // re-registered from scratch.
     let space_dir = output_dir.join(&args.space);
-    let registry_dir = output_dir.join(".agora");
+    let registry_dir = output_dir.join(".oikome");
     if args.force {
         for dir in [&space_dir, &registry_dir] {
             if dir.exists() {
@@ -124,7 +124,7 @@ async fn generate(args: Args) {
     // Set up catalog
     let root_path = output_dir.to_str().unwrap().to_string();
     let file_io = FileIO::new_with_fs();
-    let catalog = Arc::new(AgoraCatalog::new(file_io.clone(), &root_path));
+    let catalog = Arc::new(OikomeCatalog::new(file_io.clone(), &root_path));
 
     // Register the analytical Space; this also creates its Iceberg namespace.
     let space = catalog

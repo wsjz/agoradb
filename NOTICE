@@ -1,14 +1,14 @@
-AgoraDB
-Copyright 2025 The AgoraDB Authors
+Oikome
+Copyright 2025 The Oikome Authors
 
-This product includes software developed by The AgoraDB Authors,
+This product includes software developed by The Oikome Authors,
 licensed under the Apache License, Version 2.0 (see LICENSE).
 
 -------------------------------------------------------------------------------
 Third-party components
 -------------------------------------------------------------------------------
 
-AgoraDB depends on the following third-party projects. Their licenses are
+Oikome depends on the following third-party projects. Their licenses are
 checked on every change with `cargo deny check licenses` (see deny.toml).
 The complete, exact dependency set is recorded in Cargo.lock.
 
@@ -32,7 +32,7 @@ Apache OpenDAL (opendal)
 datafusion-federation
   https://github.com/datafusion-contrib/datafusion-federation  -  Apache License 2.0
   Version 0.5.5 is vendored in third_party/datafusion-federation and modified
-  by The AgoraDB Authors: its manifest declares DataFusion with
+  by The Oikome Authors: its manifest declares DataFusion with
   `default-features = false` (see third_party/README.md).
 
 sqlparser-rs (sqlparser)
@@ -66,8 +66,8 @@ Tonic (tonic)
 
 dalek-cryptography (ed25519-dalek, curve25519-dalek)
   https://github.com/dalek-cryptography/curve25519-dalek  -  BSD 3-Clause License
-  ed25519-dalek: Copyright (c) 2017-2019 isis agora lovecruft
-  curve25519-dalek: Copyright (c) 2016-2021 isis agora lovecruft, Henry de Valence
+  ed25519-dalek: Copyright (c) 2017-2019 isis oikome lovecruft
+  curve25519-dalek: Copyright (c) 2016-2021 isis oikome lovecruft, Henry de Valence
 
 BLAKE3 (blake3)
   https://github.com/BLAKE3-team/BLAKE3  -  Apache License 2.0 (dual-licensed with CC0-1.0)

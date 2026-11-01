@@ -1,25 +1,25 @@
-# AgoraDB Integration Tests
+# Oikome Integration Tests
 
-This crate (`agoradb-tests`) runs system-level tests against a fixed,
+This crate (`oikome-tests`) runs system-level tests against a fixed,
 deterministically generated TPC-H dataset. Queries go through
-`AgoraSession`, which pushes them down to DuckDB.
+`OikomeSession`, which pushes them down to DuckDB.
 
 ## Directory Layout
 
 ```
 tests/
-├── Cargo.toml                  # agoradb-tests crate
+├── Cargo.toml                  # oikome-tests crate
 ├── src/
 │   ├── lib.rs
 │   └── framework/
 │       └── catalog.rs          # setup_catalog(), TPCH_SPACE, GENERATE_CMD
 ├── tests/
-│   └── tpch_queries.rs         # TPC-H Q1–Q5 via AgoraSession (DuckDB)
+│   └── tpch_queries.rs         # TPC-H Q1–Q5 via OikomeSession (DuckDB)
 ├── sql-tests/                  # Reserved for convention-based SQL tests
 ├── tools/
 │   └── data-gen/               # Test data generator (test-data-gen crate)
-└── agora-local/                # Generated test data (gitignored)
-    ├── .agora/
+└── oikome-local/                # Generated test data (gitignored)
+    ├── .oikome/
     │   ├── spaces.json         # Space registry: analytical Space "tpch"
     │   └── locations.json
     └── tpch/                   # Iceberg namespace of Space "tpch"
@@ -41,10 +41,10 @@ cargo run -p test-data-gen --bin generate-test-data -- --scale-factor 0.001 --fo
 cargo run -p test-data-gen --bin generate-test-data -- --scale-factor 0.1 --force
 
 # Custom output directory / Space name
-cargo run -p test-data-gen --bin generate-test-data -- --output-dir /tmp/agora-test --space tpch
+cargo run -p test-data-gen --bin generate-test-data -- --output-dir /tmp/oikome-test --space tpch
 ```
 
-`--force` deletes both the Space's data and the `.agora/` registry in the
+`--force` deletes both the Space's data and the `.oikome/` registry in the
 output directory; without it the generator refuses to overwrite existing data.
 
 ## Scale Factor Reference
@@ -66,7 +66,7 @@ produces the same rows on every machine.
 ## Running Integration Tests
 
 ```bash
-cargo test -p agoradb-tests
+cargo test -p oikome-tests
 ```
 
 Tests address tables as `tpch.<table>` or, with the session's default Space
@@ -77,5 +77,5 @@ set to `tpch`, as bare `<table>`.
 The data files are plain Parquet:
 
 ```bash
-duckdb -c "SELECT count(*) FROM 'tests/agora-local/tpch/lineitem/data/*.parquet'"
+duckdb -c "SELECT count(*) FROM 'tests/oikome-local/tpch/lineitem/data/*.parquet'"
 ```

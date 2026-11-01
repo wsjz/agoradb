@@ -1,0 +1,22 @@
+[package]
+name = "oikome-discovery"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Oikome peer discovery on the local network (libp2p mDNS), recording each peer's Flight endpoint by DID"
+
+[dependencies]
+oikome-catalog = { path = "../oikome-catalog" }
+oikome-identity = { path = "../oikome-identity" }
+futures = { workspace = true }
+libp2p = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+tracing = { workspace = true }
+zeroize = { workspace = true }
+
+[dev-dependencies]
+iceberg = { workspace = true }
+tempfile = { workspace = true }

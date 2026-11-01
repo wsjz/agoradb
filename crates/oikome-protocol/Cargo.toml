@@ -1,0 +1,18 @@
+[package]
+name = "oikome-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Oikome peer protocol: request and response types and the signed request digest, shared by native and browser nodes"
+
+[dependencies]
+oikome-identity = { path = "../oikome-identity", default-features = false }
+arrow-ipc = { workspace = true }
+arrow-schema = { workspace = true }
+base64 = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+blake3 = { workspace = true }
+serde_json = { workspace = true }

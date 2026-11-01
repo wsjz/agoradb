@@ -1,4 +1,4 @@
-# Network phase (3.1) end to end: three AgoraDB nodes in Docker
+# Network phase (3.1) end to end: three Oikome nodes in Docker
 # (docker/compose.yml), driven by tests/e2e/docker_nodes.sh.
 name: docker-e2e
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Copyright 2025 The AgoraDB Authors
+# Copyright 2025 The Oikome Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -46,13 +46,13 @@ fail() {
 
 # Run SQL as the owner of a node; prints rows as tab-separated values.
 sql() {
-    "${COMPOSE[@]}" exec -T "$1" agoradb sql --raw "$2"
+    "${COMPOSE[@]}" exec -T "$1" oikome sql --raw "$2"
 }
 
 # Run SQL that must fail; prints the error.
 sql_err() {
     local out
-    if out=$("${COMPOSE[@]}" exec -T "$1" agoradb sql --raw "$2" 2>&1); then
+    if out=$("${COMPOSE[@]}" exec -T "$1" oikome sql --raw "$2" 2>&1); then
         fail "expected an error from $1: $2 (got: $out)"
     fi
     printf '%s' "$out"
@@ -107,8 +107,8 @@ wait_for "node-a serves Flight and runs discovery" 120 logs_contain node-a "disc
 wait_for "node-b is up" 120 logs_contain node-b "discovery started"
 wait_for "node-c is up" 120 logs_contain node-c "discovery started"
 
-DID_A=$("${COMPOSE[@]}" exec -T node-a agoradb identity)
-DID_B=$("${COMPOSE[@]}" exec -T node-b agoradb identity)
+DID_A=$("${COMPOSE[@]}" exec -T node-a oikome identity)
+DID_B=$("${COMPOSE[@]}" exec -T node-b oikome identity)
 ENDPOINT_A="https://172.28.0.10:50051"
 echo "node-a: $DID_A"
 echo "node-b: $DID_B"

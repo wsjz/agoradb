@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Copyright 2025 The AgoraDB Authors
+# Copyright 2025 The Oikome Authors
 # SPDX-License-Identifier: Apache-2.0
 #
-# Build the browser node: crates/agoradb-wasm to WebAssembly, its JS glue
+# Build the browser node: crates/oikome-wasm to WebAssembly, its JS glue
 # into web/pkg, and the host page into web/dist.
 #
 # DataFusion pulls in zstd (C), so a clang with a wasm32 backend is needed:
@@ -25,8 +25,8 @@ if [[ -z ${CC_wasm32_unknown_unknown:-} ]]; then
 fi
 
 PROFILE=${PROFILE:-release}
-(cd "$ROOT" && cargo build -p agoradb-wasm --target wasm32-unknown-unknown --profile "$PROFILE")
+(cd "$ROOT" && cargo build -p oikome-wasm --target wasm32-unknown-unknown --profile "$PROFILE")
 wasm-bindgen --target web --out-dir "$WEB/pkg" \
-    "$ROOT/target/wasm32-unknown-unknown/$PROFILE/agoradb_wasm.wasm"
+    "$ROOT/target/wasm32-unknown-unknown/$PROFILE/oikome_wasm.wasm"
 npx esbuild src/main.js --bundle --format=esm --outfile=dist/app.js --log-level=warning
-ls -l pkg/agoradb_wasm_bg.wasm dist/app.js
+ls -l pkg/oikome_wasm_bg.wasm dist/app.js

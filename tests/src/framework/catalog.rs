@@ -1,4 +1,4 @@
-// Copyright 2025 The AgoraDB Authors
+// Copyright 2025 The Oikome Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,8 +14,8 @@
 
 //! Catalog helper for integration tests.
 
-use agoradb_catalog::AgoraCatalog;
 use iceberg::io::FileIO;
+use oikome_catalog::OikomeCatalog;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -29,13 +29,13 @@ pub const GENERATE_CMD: &str =
 /// Path to the pre-generated test data directory.
 pub fn test_data_dir() -> PathBuf {
     // tests/ is a workspace member, so CARGO_MANIFEST_DIR points to tests/
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("agora-local")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("oikome-local")
 }
 
-/// Load the pre-generated AgoraCatalog from `tests/agora-local/`.
+/// Load the pre-generated OikomeCatalog from `tests/oikome-local/`.
 ///
 /// Panics with a helpful message if the test data has not been generated yet.
-pub async fn setup_catalog() -> Arc<AgoraCatalog> {
+pub async fn setup_catalog() -> Arc<OikomeCatalog> {
     let root = test_data_dir();
     assert!(
         root.exists(),
@@ -44,7 +44,7 @@ pub async fn setup_catalog() -> Arc<AgoraCatalog> {
     );
 
     let root_path = root.to_str().unwrap().to_string();
-    let catalog = AgoraCatalog::open(FileIO::new_with_fs(), &root_path)
+    let catalog = OikomeCatalog::open(FileIO::new_with_fs(), &root_path)
         .unwrap_or_else(|e| panic!("cannot open test catalog: {e}"));
     assert!(
         catalog.get_space(TPCH_SPACE).is_ok(),

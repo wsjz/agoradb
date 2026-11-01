@@ -1,4 +1,4 @@
-// Copyright 2025 The AgoraDB Authors
+// Copyright 2025 The Oikome Authors
 // SPDX-License-Identifier: Apache-2.0
 //
 // Serve web/ for the Playwright tests: static files only, with the MIME

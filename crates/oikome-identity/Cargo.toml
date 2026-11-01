@@ -1,0 +1,35 @@
+[package]
+name = "oikome-identity"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Node identity (did:key), UCAN capabilities and peer authentication for Oikome"
+
+[features]
+# Key files on disk (`NodeIdentity::load_or_create`, `load_node_identity`).
+default = ["fs", "tls"]
+fs = []
+# Self-signed TLS certificates (`NodeIdentity::tls_identity`; rcgen, ring).
+tls = ["dep:rcgen"]
+
+[dependencies]
+base64 = { workspace = true }
+blake3 = { workspace = true }
+bs58 = { workspace = true }
+ed25519-dalek = { workspace = true }
+getrandom = { workspace = true }
+rcgen = { workspace = true, optional = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+zeroize = { workspace = true }
+
+# In the browser: getrandom from `crypto.getRandomValues` (with the
+# `getrandom_backend` cfg in .cargo/config.toml), the clock from JavaScript.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { workspace = true, features = ["wasm_js"] }
+web-time = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

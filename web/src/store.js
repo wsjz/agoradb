@@ -1,4 +1,4 @@
-// Copyright 2025 The AgoraDB Authors
+// Copyright 2025 The Oikome Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -13,7 +13,7 @@
 // limitations under the License.
 
 // Byte storage for the browser node (its seed and registry), in IndexedDB.
-// This is the `HostStore` crates/agoradb-wasm/src/bindings.rs calls.
+// This is the `HostStore` crates/oikome-wasm/src/bindings.rs calls.
 
 const STORE = "kv";
 
@@ -25,7 +25,7 @@ function request(req) {
 }
 
 /** Open (or create) the IndexedDB database `name`. */
-export async function openStore(name = "agoradb") {
+export async function openStore(name = "oikome") {
   const open = indexedDB.open(name, 1);
   open.onupgradeneeded = () => open.result.createObjectStore(STORE);
   const db = await request(open);

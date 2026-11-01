@@ -1,4 +1,4 @@
-# Browser node (3.2): crates/agoradb-wasm built to WebAssembly, run in
+# Browser node (3.2): crates/oikome-wasm built to WebAssembly, run in
 # headless Chromium with duckdb-wasm by the Playwright tests in web/tests.
 name: browser-e2e
 

@@ -1,0 +1,22 @@
+[package]
+name = "oikome-federation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Federation coordinator for Oikome: DataFusion merging engine results"
+
+[dependencies]
+oikome-core = { path = "../oikome-core" }
+oikome-engine = { path = "../oikome-engine" }
+arrow-array = { workspace = true }
+arrow-cast = { workspace = true }
+arrow-schema = { workspace = true }
+arrow-select = { workspace = true }
+async-trait = { workspace = true }
+datafusion = { workspace = true }
+datafusion-federation = { workspace = true }
+futures = { workspace = true }
+sqlparser = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

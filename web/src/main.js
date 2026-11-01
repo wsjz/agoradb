@@ -1,4 +1,4 @@
-// Copyright 2025 The AgoraDB Authors
+// Copyright 2025 The Oikome Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,11 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Boot the browser node and expose it as `window.agora` (used by the page
+// Boot the browser node and expose it as `window.oikome` (used by the page
 // and the Playwright tests).
 
 import { tableFromIPC } from "apache-arrow";
-import init, { AgoraNode } from "../pkg/agoradb_wasm.js";
+import init, { OikomeNode } from "../pkg/oikome_wasm.js";
 import { createEngine } from "./host.js";
 import { openStore } from "./store.js";
 
@@ -32,9 +32,9 @@ function rows(ipc) {
 }
 
 async function boot() {
-  await init({ module_or_path: new URL("../pkg/agoradb_wasm_bg.wasm", import.meta.url) });
-  const node = await AgoraNode.open(await createEngine(), await openStore());
-  window.agora = {
+  await init({ module_or_path: new URL("../pkg/oikome_wasm_bg.wasm", import.meta.url) });
+  const node = await OikomeNode.open(await createEngine(), await openStore());
+  window.oikome = {
     did: () => node.did(),
     async sql(text) {
       const result = await node.sql(text);

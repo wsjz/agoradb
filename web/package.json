@@ -1,8 +1,8 @@
 {
-  "name": "agoradb-web",
+  "name": "oikome-web",
   "private": true,
   "license": "Apache-2.0",
-  "description": "AgoraDB browser node: the JavaScript host (duckdb-wasm, IndexedDB) around crates/agoradb-wasm",
+  "description": "Oikome browser node: the JavaScript host (duckdb-wasm, IndexedDB) around crates/oikome-wasm",
   "type": "module",
   "scripts": {
     "build": "bash scripts/build.sh",
