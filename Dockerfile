@@ -17,6 +17,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY Cargo.toml Cargo.lock rust-toolchain.toml rustfmt.toml .clippy.toml ./
 COPY .cargo ./.cargo
 COPY crates ./crates
+# Vendored crates patched in through [patch.crates-io] (third_party/README.md).
+COPY third_party ./third_party
 COPY tests ./tests
 
 # Build every test binary.
