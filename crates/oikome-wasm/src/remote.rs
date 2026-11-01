@@ -42,7 +42,7 @@ use oikome_protocol::{
 use serde::{Deserialize, Serialize};
 
 /// Carries one call to a node and returns its reply. The host implements
-/// it over an `RTCPeerConnection` (`web/src/transport.js`): one data
+/// it over an `RTCPeerConnection` (`packages/node/src/transport.js`): one data
 /// channel per node, the browser accepting only a DTLS certificate with
 /// `fingerprint`.
 #[async_trait]

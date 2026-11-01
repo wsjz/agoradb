@@ -13,13 +13,14 @@
 // limitations under the License.
 
 // Boot the browser node and expose it as `window.oikome` (used by the page
-// and the Playwright tests).
+// and the Playwright tests). Bundled into dist/app.js; serve.mjs serves the
+// wasm-bindgen output of packages/node at /pkg/.
 
+import { createEngine } from "@oikome/node/host";
+import { openStore } from "@oikome/node/store";
+import { createTransport } from "@oikome/node/transport";
+import init, { OikomeNode } from "@oikome/node/wasm";
 import { tableFromIPC } from "apache-arrow";
-import init, { OikomeNode } from "../pkg/oikome_wasm.js";
-import { createEngine } from "./host.js";
-import { openStore } from "./store.js";
-import { createTransport } from "./transport.js";
 
 /** Rows of an Arrow IPC stream as plain objects (BigInt as Number). */
 function rows(ipc) {

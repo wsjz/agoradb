@@ -1,0 +1,21 @@
+{
+  "name": "@oikome/e2e",
+  "version": "0.0.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "description": "Oikome end-to-end tests: the browser node in headless Chromium, alone and against a Full Node",
+  "type": "module",
+  "scripts": {
+    "build": "esbuild harness/main.js --bundle --format=esm --outfile=harness/dist/app.js --log-level=warning",
+    "serve": "node serve.mjs",
+    "test": "playwright test"
+  },
+  "dependencies": {
+    "@oikome/node": "0.0.0",
+    "apache-arrow": "17.0.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.64.1",
+    "esbuild": "0.28.2"
+  }
+}

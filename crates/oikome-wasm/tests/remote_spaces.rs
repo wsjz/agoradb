@@ -15,7 +15,7 @@
 //! The browser node mounting a Full Node's Space and joining it with a
 //! local one (3.2 exit criteria), run natively: DuckDB stands in for
 //! duckdb-wasm, and the transport hands each envelope straight to the Full
-//! Node's service. `web/tests` runs the same over a real WebRTC channel.
+//! Node's service. `e2e/` runs the same over a real WebRTC channel.
 
 use std::net::SocketAddr;
 use std::sync::Arc;

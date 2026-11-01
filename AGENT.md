@@ -31,7 +31,7 @@ Oikome 负责"谁能看什么、数据从哪来、存在哪、查询和任务发
 - **内存格式**: Apache Arrow
 - **网络传输**: Arrow Flight (gRPC)，TLS 证书绑定节点 DID；libp2p 只用于节点发现（mDNS）；浏览器经 WebRTC 数据通道连 Full Node（str0m，DTLS 指纹由 DID 签名的接入记录担保）
 - **密码学**: ed25519-dalek + Blake3（3.1）
-- **浏览器端**: `oikome-wasm`（wasm-bindgen）+ duckdb-wasm（OPFS）+ IndexedDB + WebRTC（`web/src/transport.js`）；联邦查询在浏览器里单任务执行（`Coordinator::single_task`）；构建见 `web/scripts/build.sh`（`wasm` profile；需要能编译 wasm32 的 clang，macOS 用 Homebrew LLVM）
+- **浏览器端**: `oikome-wasm`（wasm-bindgen）+ duckdb-wasm（OPFS）+ IndexedDB + WebRTC（`packages/node/src/transport.js`）；联邦查询在浏览器里单任务执行（`Coordinator::single_task`）；构建见 `packages/node/scripts/build.sh`（仓库根目录 `npm run build`）（`wasm` profile；需要能编译 wasm32 的 clang，macOS 用 Homebrew LLVM）
 
 ### 架构分层（自底向上）
 
@@ -154,12 +154,14 @@ v3 路线图（详见 `oikome_architecture_v3.md` §14）：
 
 | 里程碑 | 目标 | 前置 | 状态 |
 |-------|------|------|----------|
-| M1a 目录拆分 | `web/` 拆到 `packages/node` 和 `e2e/`，根目录 `package.json` 用 npm workspaces；browser-e2e 原样通过 | 3.2 | 待开始 |
-| M1b 页面 | `packages/ui`、`packages/screens`、`packages/client`、`apps/web`：9 个页面先用假数据，桌面和手机两套布局 | M1a | 待开始 |
-| M1c 能用 | `oikome-api`、`oikome serve --web`、`packages/api`；首次启动与恢复密钥、资料库、分享与收回、手机配对、访问记录、高级 SQL 接上真实数据 | 3.0–3.2、M1b | 待开始 |
+| M1a 目录拆分 | `web/` 拆到 `packages/node` 和 `e2e/`，根目录 `package.json` 用 npm workspaces；browser-e2e 原样通过 | 3.2 | ✅ |
+| M1b 接口 | `oikome-api`（M1 页面要用的主人操作：身份与恢复密钥、资料库、分享与收回、手机配对、访问记录、SQL）、`oikome serve --web`、`packages/api`、`packages/client`（HTTP 实现） | 3.0–3.2、M1a | 待开始 |
+| M1c 能用 | `packages/ui`、`packages/screens`、`apps/web`：M1 范围的页面（首次启动与恢复密钥、资料库、分享与联系人、手机配对、访问记录、高级 SQL、设置），桌面和手机两套布局 | M1b | 待开始 |
 | M2 能接 | 接入页与同步状态、首页看板、内置卡片、看板插件 v1（`plugin-sdk`、数据契约、插件授权）、参考插件 | 3.5、M1c | 待开始 |
 | M3 能找 | 全文和语义搜索、照片和笔记视图、AI 助手页、`oikome-mcp` | 3.3、M2 | 待开始 |
 | M4 能扩 | 借用算力、第三方接入插件、插件目录；网盘存储待定 | 3.4、3.6、M3 | 待开始 |
+
+用户端测试一律连本地节点（临时数据目录，经命令行或接口写入测试数据），不做假数据层，也不做 mock 客户端；所以先做接口（M1b）再做页面（M1c），接入、首页看板、AI 助手等页面随 M2、M3 做。
 
 **规则**: 禁止跳阶段。每个阶段的退出标准必须达成后才能进入下一阶段。
 
@@ -258,7 +260,10 @@ oikome/
 │   └── oikome-server/         # Arrow Flight 服务、oikome 命令行
 ├── tests/                      # oikome-tests（TPC-H Q1–Q5）+ tools/data-gen + e2e/（Docker 节点端到端脚本）
 ├── docker/                     # 节点镜像（oikome.Dockerfile）与三节点 compose
-├── web/                        # 浏览器节点的 JS 宿主（duckdb-wasm、IndexedDB、WebRTC）、页面与 Playwright 测试
+├── package.json                # npm workspaces：packages/*、e2e
+├── packages/
+│   └── node/                   # 浏览器节点的 JS 宿主（duckdb-wasm、IndexedDB、WebRTC）和 wasm 构建脚本（@oikome/node）
+├── e2e/                        # Playwright 测试与浏览器节点测试页 harness/（@oikome/e2e）
 ├── third_party/                # 打了补丁的第三方代码（datafusion-federation，见 README）
 ├── .github/workflows/          # docker-e2e（三个 Docker 节点）、browser-e2e（无头 Chromium 跑浏览器节点）
 └── docs/                       # 用户和开发者文档（gitignored）
@@ -267,9 +272,9 @@ oikome/
 计划中：`oikome-connect`（3.5），`oikome-cli`。
 
 用户端计划中（目录等对应工作开始时才建，结构见架构 §13.3）：
-- crate：`oikome-api`（M1c）、`oikome-mcp`（M3）。
-- 根目录：`package.json`（npm workspaces，M1a）、`apps/`（web 在 M1b；desktop、mobile 以后）、`packages/`（node 在 M1a；screens、ui、client 在 M1b；api 在 M1c；plugin-sdk 在 M2）、`plugins/`（M2）、`design/`（以后）、`e2e/`（M1a）。
-- M1a 时 `web/` 拆到 `packages/node` 和 `e2e/`，之后不再有 `web/`。
+- crate：`oikome-api`（M1b）、`oikome-mcp`（M3）。
+- 根目录：`apps/`（web 在 M1c；desktop、mobile 以后）、`packages/` 其余的包（api、client 在 M1b；screens、ui 在 M1c；plugin-sdk 在 M2）、`plugins/`（M2）、`design/`（以后）。`apps/*`、`plugins/*` 建了再加进 workspaces。
+- M1a 已把 `web/` 拆到 `packages/node` 和 `e2e/`，根目录加了 `package.json`。
 
 ---
 
@@ -320,7 +325,7 @@ oikome/
 集成测试         → 跨 crate，真实 I/O（临时文件）
 基准测试         → criterion.rs，追踪性能回归
 一致性测试       → TPC-H 查询验证 SQL 正确性
-端到端测试       → 基于 Docker 的多节点场景
+端到端测试       → 基于 Docker 的多节点场景；浏览器节点和用户端用 Playwright（e2e/）
 ```
 
 ### 6.2 测试数据
@@ -328,6 +333,7 @@ oikome/
 - 单元测试使用确定性合成数据。
 - TPC-H 集成测试使用 SF 0.001，数据由 `cargo run -p test-data-gen -- --scale-factor 0.001 --force` 生成到 `tests/oikome-local`（gitignored，不提交）。
 - 需要网络的测试（如 DuckDB `sqlite` 扩展）标记 `#[ignore]`，用 `--features sqlite-scanner-tests -- --ignored` 单独运行。
+- 用户端（网页、桌面、手机）测试连本地节点：e2e 用临时数据目录起 `oikome serve`，经命令行或接口写入测试数据；不做假数据层和 mock `NodeClient`。
 - 测试中禁止使用真实用户数据。
 
 ### 6.3 CI 要求
@@ -338,7 +344,7 @@ oikome/
 - `cargo doc --no-deps`（确保无断链）
 - 许可证头检查（通过 `apache-skywalking-eyes` 或类似工具）
 - 依赖许可证审计 (`cargo deny check licenses`)
-- 浏览器节点：`.github/workflows/browser-e2e.yml`，构建 wasm 和 `oikome` 后用 Playwright 在无头 Chromium 里跑 `web/tests`（其中 `remote.spec.mjs` 自己起 `oikome serve --webrtc-listen`）
+- 浏览器节点：`.github/workflows/browser-e2e.yml`，构建 wasm 和 `oikome` 后用 Playwright 在无头 Chromium 里跑 `e2e/`（其中 `remote.spec.mjs` 自己起 `oikome serve --webrtc-listen`）
 - 网络端到端：`.github/workflows/docker-e2e.yml`，三个 Docker 节点跑 `tests/e2e/docker_nodes.sh`（推送 `feat/**`、`ci/**` 时触发）
 
 ---
@@ -425,6 +431,8 @@ oikome/
 | 2026-10-30 | 3.1b 快照订阅：只复制对方能看整张表的表，其余标 `restricted` 只能远程查；撤销只停止后续同步，已复制的文件收不回；VFS 接入推迟到 3.4 | 文件无法按列授权和行策略过滤；数据一旦复制就无法收回，写明而不是默认。见架构 §5.3、§9 |
 | 2026-10-30 | Lance 作为第三种 Location 格式，用于向量、全文和大对象；分析型 Space 不再用 DuckDB vss/fts | Lance 的索引存在数据集里、随版本同步，订阅方不用重建；表格数据仍用 Iceberg + Parquet。见 §7.6 |
 | 2026-11-01 | 用户端：只服务主人的个人私域数据中心，不做运维和开发者页面，成员以后做，界面统一英文（以后 i18n）；根目录新增 `apps/`（各端薄外壳）、`packages/`（共享 TypeScript）、`plugins/`、`design/`、`e2e/`，根目录 `package.json` 用 npm workspaces；目录等对应工作开始时才建；新 crate `oikome-api`（不含传输层，调用者分主人和 principal），HTTP 由 `oikome serve --web` 提供，桌面端进程内调用，以后 `oikome-mcp` 只暴露 principal 能做的操作；桌面和手机以后用 Tauri；存储位置只给本地文件夹和 NAS，网盘做存储位置待定 | 网页、桌面、手机是同一层的端，页面放共享包里各端复用；同一套处理逻辑服务所有端，AI 助手碰不到主人才有的命令；产品原则是数据不出家门，和把数据放在网盘服务商那里冲突，架构 §7.5 和 3.4 先不动，等决定。见架构 §13.3、§13.4、§14.1 |
+| 2026-11-01 | M1a：`web/` 拆到 `packages/node`（`@oikome/node`，导出 host、store、transport、wasm）和 `e2e/`（`@oikome/e2e`，测试页在 `harness/`）；根目录 npm workspaces 先只含 `packages/*` 和 `e2e`，`apps/*`、`plugins/*` 建了再加；测试服务器按 URL 前缀映射目录（`/pkg/`、`/node_modules/`、`/`），越界路径拒绝；wasm 构建和 remote 测试跟随 `CARGO_TARGET_DIR` | 只搬位置、不改行为，browser-e2e 的断言不变；外部依赖版本和 lockfile 里的完全一样。见架构 §13.3 |
+| 2026-11-01 | 用户端测试连本地节点（临时数据目录、经命令行或接口写入测试数据），不做假数据和 mock 客户端；M1 改为先做接口（M1b）再做页面（M1c），各页面随有数据的里程碑做 | 只有一条测试链路，不用先测假数据再换真实数据测一遍；页面从一开始就走真实接口，不会和接口对不上。见架构 §14.1 |
 
 ---
 

@@ -104,7 +104,7 @@ tokio-test = "0.4"
 [patch.crates-io]
 datafusion-federation = { path = "third_party/datafusion-federation" }
 
-# The browser node's WebAssembly (web/scripts/build.sh): smallest code,
+# The browser node's WebAssembly (packages/node/scripts/build.sh): smallest code,
 # no symbol names. Native release builds are unaffected.
 [profile.wasm]
 inherits = "release"

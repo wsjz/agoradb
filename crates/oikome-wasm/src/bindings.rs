@@ -45,7 +45,7 @@ const REGISTRY_KEY: &str = "oikome.registry";
 
 #[wasm_bindgen]
 extern "C" {
-    /// Byte storage of the host (IndexedDB in `web/src/store.js`).
+    /// Byte storage of the host (IndexedDB in `packages/node/src/store.js`).
     pub type HostStore;
 
     #[wasm_bindgen(method, catch)]

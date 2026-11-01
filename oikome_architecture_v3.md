@@ -536,7 +536,7 @@ The peer protocol over Arrow Flight (`oikome-network::protocol`). Every call car
 ## 10. Browser Node
 
 ```
- JS host (web/)                       WASM (crates/oikome-wasm)                Full Node
+ JS host (packages/node)              WASM (crates/oikome-wasm)                Full Node
  ┌──────────────────────────┐  Arrow  ┌───────────────────────────────┐
  │ duckdb-wasm (worker,     │◄───IPC──│ HostEngine                    │
  │   database in OPFS)      │         │ BrowserNode: identity · Space │
@@ -560,10 +560,10 @@ The peer protocol over Arrow Flight (`oikome-network::protocol`). Every call car
   - results cross as Arrow IPC streams.
 - **Persistence.** The host keeps the node's seed and its Space registry as bytes in IndexedDB. A same-origin script can read the seed; a non-extractable WebCrypto Ed25519 key is the planned replacement.
 - **JavaScript API.** `OikomeNode.open(engine, store, transport)` (the transport arrived in 3.2b), `node.did()`, `node.sql(text)` resolving to `{ ipc }` or `{ rowsAffected }`.
-- **Build** (`web/scripts/build.sh`). It runs cargo for `wasm32-unknown-unknown`, then `wasm-bindgen` (pinned to the crate's version), then esbuild for the page.
+- **Build** (`npm run build` at the repository root). `packages/node/scripts/build.sh` runs cargo for `wasm32-unknown-unknown`, then `wasm-bindgen` (pinned to the crate's version); `e2e` then bundles the test page with esbuild.
   - DataFusion 54 turns on Arrow's zstd unconditionally, so a clang with a wasm32 backend is needed: Homebrew LLVM on macOS, the distribution clang on Linux.
   - `datafusion-federation` 0.5.5 is patched (`third_party/`) so DataFusion's C-backed `compression` and `parquet` features stay off.
-- **Tests.** `web/tests` (Playwright, headless Chromium) runs local queries and checks that data, identity and registry survive a reload. `browser-e2e` runs them in CI.
+- **Tests.** `e2e/` (Playwright, headless Chromium) runs local queries and checks that data, identity and registry survive a reload. `browser-e2e` runs them in CI.
 
 **3.2b (done): federated queries via a Full Node over a WebRTC data channel.**
 - **Full Node side** (`oikome-webrtc`; `oikome serve --webrtc-listen <udp> [--webrtc-advertise <ip>]`).
@@ -580,7 +580,7 @@ The peer protocol over Arrow Flight (`oikome-network::protocol`). Every call car
   - the token was issued (or delegated) to the browser's DID and grants `space/query` on `blog`.
   
   The registry in IndexedDB keeps the record and the token, as it keeps the seed. Remote Spaces are read-only and queried in place; `MODE = 'subscribe'` is not available in the browser.
-- **Connection** (`web/src/transport.js`). The browser builds the node's SDP answer from the record: ICE-lite, passive DTLS, the record's fingerprint, one negotiated data channel. A certificate with another fingerprint fails the DTLS handshake. One channel per node is opened on first use and reused.
+- **Connection** (`packages/node/src/transport.js`). The browser builds the node's SDP answer from the record: ICE-lite, passive DTLS, the record's fingerprint, one negotiated data channel. A certificate with another fingerprint fails the DTLS handshake. One channel per node is opened on first use and reused.
 - **Requests.** Each call is an envelope `{method, payload, ucan, auth}`, the same fields as an Arrow Flight call.
   - The Full Node serves it with the same authentication (signature, replay window), authorization (UCAN, revocation) and semantic layer (`OikomeFlightService::serve_envelope`).
   - The reply is a status and a body: an Arrow IPC stream for `do_get` and `get_schema`, JSON for `list_tables`.
@@ -590,10 +590,10 @@ The peer protocol over Arrow Flight (`oikome-network::protocol`). Every call car
   - DataFusion runs partitions in spawned Tokio tasks, and the browser has no Tokio runtime. The coordinator plans with one target partition, and `MergePartitionsExec` replaces `CoalescePartitionsExec`: it polls every partition from one task (a `UNION` still has one partition per input). A native test runs such plans without a runtime.
   - DataFusion stamps every plan with `chrono::Utc::now()`, so chrono's `wasmbind` feature is on to read the JavaScript clock.
   - Queries over local Spaces only still go straight to duckdb-wasm.
-- **Size.** 32.7 MB with the `wasm` profile `web/scripts/build.sh` uses (`opt-level = "s"`, LTO, stripped); 132 MB with the plain release profile. Before the coordinator it was about 9.5 MB. Size is a measurement, not a requirement.
+- **Size.** 32.7 MB with the `wasm` profile `packages/node/scripts/build.sh` uses (`opt-level = "s"`, LTO, stripped); 132 MB with the plain release profile. Before the coordinator it was about 9.5 MB. Size is a measurement, not a requirement.
 - **Tests.**
   - Native: `oikome-webrtc` dials its server with a native str0m client (a wrong fingerprint never connects); `oikome-server` serves envelopes; `oikome-wasm/tests/remote_spaces.rs` runs the browser node on DuckDB against a Full Node's service.
-  - Browser: `web/tests/remote.spec.mjs` starts `oikome serve --webrtc-listen` and, over a real WebRTC channel, joins a duckdb-wasm table with the node's table. It also checks that a mount survives a reload, that revocation cuts access, and that a tampered record and a wrong fingerprint are refused.
+  - Browser: `e2e/remote.spec.mjs` starts `oikome serve --webrtc-listen` and, over a real WebRTC channel, joins a duckdb-wasm table with the node's table. It also checks that a mount survives a reload, that revocation cuts access, and that a tampered record and a wrong fingerprint are refused.
 - **Not covered yet.** The browser must reach the published UDP address directly (same network, or a public address): no STUN or TURN. Browsers do not serve each other.
 - **Lance.** Lance Spaces are also reached through a Full Node, since DuckDB's `lance` extension is not published for WebAssembly (§7.6).
 
@@ -704,12 +704,12 @@ crates/
 ├── oikome-webrtc          WebRTC endpoint for browsers (str0m): sessions, DTLS certificate         [3.2]
 ├── oikome-wasm            Browser node: BrowserNode, HostEngine (duckdb-wasm), RemoteEngine, JS API [3.2]
 ├── oikome-connect         Connector trait, cursor store, built-in connectors (file import, flomo)  [3.5]
-├── oikome-api             API for clients, plugins and MCP; caller is Owner or Principal (§13.4)   [M1c]
+├── oikome-api             API for clients, plugins and MCP; caller is Owner or Principal (§13.4)   [M1b]
 ├── oikome-mcp             MCP adapter: principal operations only; bridges to the running node      [M3]
 └── oikome-cli                                                                                      [later]
 ```
 
-Tags `M1c` and `M3` refer to the apps track (§14).
+Tags `M1b` and `M3` refer to the apps track (§14.1).
 
 `oikome-query` was deleted; its `CREATE SPACE` parser moved to `oikome-semantic`.
 
@@ -747,37 +747,41 @@ The apps that people use (web now; desktop and phone later) live in this reposit
 ```
 oikome/
 ├── Cargo.toml        Rust workspace: crates/*, tests, tests/tools/data-gen; apps/desktop/src-tauri later
-├── package.json      npm workspaces: apps/*, packages/*, plugins/*                                  [M1a]
-├── crates/           Rust core; adds oikome-api [M1c] and oikome-mcp [M3]
+├── package.json      npm workspaces: packages/*, e2e; apps/* and plugins/* join when created        [M1a ✅]
+├── crates/           Rust core; adds oikome-api [M1b] and oikome-mcp [M3]
 ├── apps/             one thin shell per client: entry, platform glue, packaging; no screens
-│   ├── web/          served by `oikome serve --web`; in a phone browser it runs the browser node    [M1b]
+│   ├── web/          served by `oikome serve --web`; in a phone browser it runs the browser node    [M1c]
 │   ├── desktop/      Tauri; runs a Full Node in process                                             [later]
 │   │   └── src-tauri/
 │   └── mobile/       Tauri 2 mobile; reaches the owner's node over WebRTC, as a phone browser does  [later]
 ├── packages/         TypeScript shared by every client
-│   ├── screens/      every screen and feature, desktop and phone layouts, UI strings                [M1b]
-│   ├── ui/           design system: tokens and components                                           [M1b]
+│   ├── screens/      every screen and feature, desktop and phone layouts, UI strings                [M1c]
+│   ├── ui/           design system: tokens and components                                           [M1c]
 │   ├── client/       NodeClient interface, data hooks, HTTP and browser-node implementations        [M1b]
-│   ├── node/         browser-node runtime (today's web/src and web/scripts/build.sh)                [M1a]
-│   ├── api/          TypeScript types generated from oikome-api                                     [M1c]
+│   ├── node/         browser-node runtime: host, store, transport, wasm build                       [M1a ✅]
+│   ├── api/          TypeScript types generated from oikome-api                                     [M1b]
 │   └── plugin-sdk/   message bridge and theme tokens for plugin authors                             [M2]
 ├── plugins/          official reference plugins: recent-notes, storage, smart-home, on-this-day     [M2]
 ├── design/           PRODUCT.md, DESIGN.md, design.json                                             [later]
-└── e2e/              Playwright: today's web/tests and the browser-node test page, then per client  [M1a]
+└── e2e/              Playwright: browser-node tests and test page (harness/); later per client      [M1a ✅]
 ```
 
 - **Three layers.** `crates/` owns data and permissions. `packages/` owns screens and client logic. `apps/` owns how a client starts, reaches a node and is packaged.
 - **Screens live in `packages/screens`, not in an app**, so desktop and mobile reuse them instead of extracting them from the web app later.
-- **`web/` stays until M1a**, which moves it without changing behavior; §10's paths change with it:
+- **M1a moved `web/`** without changing behavior:
 
-| Now | After M1a |
-|-----|-----------|
+| Before M1a | Now |
+|------------|-----|
 | `web/src/host.js`, `store.js`, `transport.js` | `packages/node/src/` |
 | `web/scripts/build.sh` | `packages/node/scripts/build.sh` |
 | `web/index.html`, `web/src/main.js` (test page that exposes `window.oikome`) | `e2e/harness/` |
 | `web/tests/`, `web/playwright.config.mjs` | `e2e/` |
 | `web/package.json`, `web/package-lock.json` | `packages/node/package.json`; root `package.json` and `package-lock.json` (workspaces) |
 | `web/` entries in `.gitignore`, paths in `browser-e2e.yml` | the new paths |
+
+- **Packages.** `@oikome/node` exports `host`, `store`, `transport` and `wasm` (the wasm-bindgen output in `pkg/`). `@oikome/e2e` holds the tests; its test page imports `@oikome/node`.
+- **Commands** at the repository root: `npm ci`; `npm run build` (the wasm, then the test page); `npm test` (Playwright). The build and `remote.spec.mjs` follow `CARGO_TARGET_DIR`.
+- **Test server** (`e2e/serve.mjs`). It maps URL prefixes to directories: `/pkg/` to `packages/node/pkg`, `/node_modules/` to `node_modules` (duckdb-wasm's bundles) and `/` to `e2e/harness`. A path that leaves its directory is refused.
 
 ### 13.4 Apps and the API Layer
 
@@ -786,7 +790,7 @@ oikome/
        │ HTTP                        │ in-process call                  │ MCP (stdio or HTTP)
  oikome-server --web                 │                              oikome-mcp            [M3]
        └─────────────────────────────┼──────────────────────────────────┘
-                               oikome-api                                                 [M1c]
+                               oikome-api                                                 [M1b]
                 request and response types · handlers · caller identity
                                      │
                 oikome-node · oikome-semantic · …   (grants and policies enforced here)
@@ -800,7 +804,7 @@ oikome/
   - `serve` prints a one-time token; the page exchanges it for an HttpOnly, SameSite=Strict session cookie.
   - Requests whose `Host` or `Origin` is not the served address are refused, which covers DNS rebinding and cross-site requests.
 - **Desktop** (later) links `oikome-api` into its Tauri process and runs the Full Node there. Tauri commands call the handlers directly, so no port is opened.
-- **`packages/api`** is generated from `oikome-api`'s types. The generator is chosen in M1c; its license is checked by `cargo deny`.
+- **`packages/api`** is generated from `oikome-api`'s types. The generator is chosen in M1b; its license is checked by `cargo deny`.
 - **`oikome-mcp`** (M3) exposes Principal operations only: list the Spaces it may read, then search and query within its grants. It never exposes Owner commands.
   - Grants for AI tools are managed on the app's AI Assistants screen.
   - `oikome mcp`, when started by an AI client, is a thin bridge: it reaches the running node with that assistant's UCAN. It does not open the data directory, where it would contend for DuckDB and SQLite file locks.
@@ -816,7 +820,7 @@ How each client reaches data (screens depend only on `NodeClient`):
 | Desktop app (later) | Tauri window | In-process calls to `oikome-api` | Desktop |
 | Phone app (later) | Tauri 2 mobile | WebRTC with a UCAN, as the phone browser | Phone |
 
-Which Owner operations a paired device may perform is settled in M1c.
+Which Owner operations a paired device may perform is settled in M1b.
 
 **Scope of the apps.**
 - They serve the owner's personal data center: onboarding, Spaces, sources, sharing, AI assistants, plugins and settings. Node operations (engines, logs, peers' internals) stay in the CLI. Members and family roles come later.
@@ -849,12 +853,14 @@ The user-facing apps (§13.3, §13.4) run beside the core phases. They do not bl
 
 | Milestone | Goal | Gate | Exit criterion |
 |-----------|------|------|----------------|
-| **M1a Layout** | `web/` split into `packages/node` and `e2e/`; root `package.json` with npm workspaces | 3.2 ✅ | `browser-e2e` passes from the new paths with no change to the tests' assertions |
-| **M1b Screens** | `packages/ui`, `packages/screens`, `packages/client` and `apps/web`: the nine screens on fake data, desktop and phone layouts | M1a | Every screen renders at desktop and phone widths in e2e; no text pair fails its WCAG contrast ratio |
-| **M1c Usable** | `oikome-api`, `oikome serve --web`, `packages/api`. Real data for onboarding and the recovery key, Spaces, sharing and revoking with contacts, phone pairing, the access log and the advanced SQL view | 3.0–3.2 ✅, M1b | From an empty data directory, in e2e on CI: onboarding; a Space browsed; the Space shared with a contact and revoked, after which the contact's query fails; a phone browser paired that then queries over WebRTC. A request without the session cookie or with a foreign `Origin` is refused |
+| **M1a Layout** ✅ | `web/` split into `packages/node` and `e2e/`; root `package.json` with npm workspaces | 3.2 ✅ | `browser-e2e` passes from the new paths with no change to the tests' assertions |
+| **M1b API** | `oikome-api` with the Owner operations M1's screens need (identity and recovery key, Spaces, sharing and revoking with contacts, phone pairing, access log, SQL); `oikome serve --web`; `packages/api`; `packages/client` with its HTTP implementation | 3.0–3.2 ✅, M1a | e2e starts `oikome serve --web` on an empty temporary data directory and, through `packages/client`, creates a Space, writes and reads rows, shares the Space with a contact and revokes it, after which the contact's query fails. A request without the session cookie or with a foreign `Origin` is refused |
+| **M1c Usable** | `packages/ui`, `packages/screens` and `apps/web`: the M1 screens (onboarding and the recovery key, Spaces, sharing and contacts, phone pairing, access log, advanced SQL, settings), desktop and phone layouts | M1b | In e2e on CI, against a local node started from an empty data directory: onboarding; a Space browsed; the Space shared with a contact and revoked; a phone browser paired that then queries over WebRTC. Each M1 screen renders at desktop and phone widths; no text pair fails its WCAG contrast ratio |
 | **M2 Connect** | Sources screen and sync status, Home dashboard, built-in cards, dashboard plugins v1 (`plugin-sdk`, data contract, plugin grants), reference plugins | 3.5, M1c | A connector's data appears on Home; a plugin reads only what its grant allows and cannot reach the network |
 | **M3 Find** | Full-text and semantic search, photo and note views, AI Assistants screen, `oikome-mcp` | 3.3 ✅, M2 | An MCP client lists and searches only the Spaces granted to it; revoking the grant in the app cuts it off; Owner commands are not offered over MCP |
 | **M4 Extend** | Borrowed compute, third-party connector plugins, plugin directory; cloud-drive storage only if §7.5 is confirmed (§13.4) | 3.4, 3.6, M3 | Set when M4 starts |
+
+**Tests use a local node.** e2e starts `oikome serve` on a temporary data directory and writes its test data through the CLI or the API. There is no fake-data layer and no mock `NodeClient`. The API comes before the screens, and each screen arrives with the milestone whose data it shows: Sources and Home in M2, search and AI Assistants in M3.
 
 ---
 
@@ -932,6 +938,7 @@ The user-facing apps (§13.3, §13.4) run beside the core phases. They do not bl
 | 2026-11-01 | `oikome-api`: one transport-free API with the caller as Owner or Principal; HTTP in `oikome-server --web`, desktop in process, MCP in `oikome-mcp` exposing Principal operations only; `packages/api` generated from it | One set of handlers for every client; the name covers plugins and MCP, not just Oikome's own apps, while the peer protocol keeps its own crates; an AI tool can never reach Owner commands |
 | 2026-11-01 | Desktop and phone apps on Tauri (later) | Its backend is Rust and links our crates directly, so the desktop app is a Full Node with a UI and no command line; Tauri 2 also targets iOS and Android; Apache-2.0 / MIT |
 | 2026-11-01 | The apps offer local folders and NAS as storage; cloud drives as Locations stay undecided, with §7.5 and phase 3.4 unchanged until then | The product rule is that data stays at home, which conflicts with keeping it on a drive provider's servers; browsing existing drive files and serving WebDAV are planned separately |
+| 2026-11-01 | App tests run against a local node (temporary data directory, test data written through the CLI or the API); no fake data and no mock `NodeClient`. So the API (M1b) comes before the screens (M1c), and each screen arrives with the milestone whose data it shows | One test chain instead of a fake one followed by a real one; screens exercise the real API from the start, and there are no fixtures to drift from it |
 | 2026-11-01 | Visual design: Apple-style minimal, low-chroma cream palette, one crimson primary action per view, blue only for links and focus | Calm and familiar for ordinary users; color marks the one thing to do instead of decorating; every text pair is checked against WCAG contrast |
 
 ---

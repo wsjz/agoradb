@@ -1,5 +1,5 @@
 # Browser node (3.2): crates/oikome-wasm built to WebAssembly, run in
-# headless Chromium with duckdb-wasm by the Playwright tests in web/tests,
+# headless Chromium with duckdb-wasm by the Playwright tests in e2e/,
 # against a Full Node (the native oikome binary) for the WebRTC tests.
 name: browser-e2e
 
@@ -33,26 +33,24 @@ jobs:
           # DataFusion compiles zstd (C) for wasm32: clang and llvm-ar.
           sudo apt-get update && sudo apt-get install -y --no-install-recommends clang llvm
 
-      - name: Install web dependencies
-        working-directory: web
+      - name: Install JavaScript dependencies
         run: npm ci
 
-      - name: Build the browser node
-        working-directory: web
+      - name: Build the browser node and the test page
         env:
           CC_wasm32_unknown_unknown: clang
           AR_wasm32_unknown_unknown: llvm-ar
-        run: bash scripts/build.sh
+        run: npm run build
 
       - name: Build the Full Node
         run: cargo build --locked -p oikome-server --bin oikome
 
       - name: Install Chromium
-        working-directory: web
+        working-directory: e2e
         run: npx playwright install --with-deps chromium
 
       - name: Browser tests
-        working-directory: web
+        working-directory: e2e
         env:
           CI: "1"
         run: npx playwright test
@@ -63,5 +61,5 @@ jobs:
         with:
           name: playwright-report
           path: |
-            web/playwright-report/
-            web/test-results/
+            e2e/playwright-report/
+            e2e/test-results/

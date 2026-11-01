@@ -14,7 +14,7 @@
 
 //! The browser transport (architecture v3 §10): a WebRTC data channel to a
 //! Full Node, shared by the node (`oikome-webrtc`) and the browser
-//! (`oikome-wasm`, `web/src/transport.js`).
+//! (`oikome-wasm`, `packages/node/src/transport.js`).
 //!
 //! * [`AccessRecord`]: where a node accepts WebRTC and the fingerprint of
 //!   its DTLS certificate, signed with its DID. The browser pins that

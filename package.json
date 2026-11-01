@@ -1,0 +1,14 @@
+{
+  "name": "oikome",
+  "private": true,
+  "license": "Apache-2.0",
+  "description": "Oikome's JavaScript workspaces: the browser-node runtime and the end-to-end tests",
+  "workspaces": [
+    "packages/*",
+    "e2e"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces",
+    "test": "npm test --workspace @oikome/e2e"
+  }
+}
