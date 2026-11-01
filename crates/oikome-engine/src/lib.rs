@@ -124,6 +124,20 @@ pub trait QueryEngine: Send + Sync + fmt::Debug {
         ))
     }
 
+    /// Make sure the engine can do `needs`, loading what that takes (a
+    /// DuckDB extension, say). The default only checks
+    /// [`Self::capabilities`].
+    async fn enable(&self, needs: Capabilities) -> Result<(), EngineError> {
+        if self.capabilities().contains(needs) {
+            Ok(())
+        } else {
+            Err(EngineError::Unsupported(
+                self.kind(),
+                format!("{:?}", needs.difference(self.capabilities())),
+            ))
+        }
+    }
+
     /// Remove a Space attached with [`Self::attach_space`]. Unknown names
     /// are ignored.
     async fn detach_space(&self, space: &str) -> Result<(), EngineError> {

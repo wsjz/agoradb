@@ -27,6 +27,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::acl::{Grant, RowPolicy, ViewDef};
 use crate::catalog::OikomeCatalog;
+use crate::graph::GraphDef;
 use crate::peer::Peer;
 use crate::space::{validate_binding, Location, LocationFormat, LocationId, Space};
 use crate::ucan::{IssuedUcan, RemoteToken, Revocation};
@@ -36,6 +37,7 @@ pub const OIKOME_DIR: &str = ".oikome";
 const SPACES_FILE: &str = "spaces.json";
 const LOCATIONS_FILE: &str = "locations.json";
 const VIEWS_FILE: &str = "views.json";
+const GRAPHS_FILE: &str = "graphs.json";
 const GRANTS_FILE: &str = "grants.json";
 const POLICIES_FILE: &str = "policies.json";
 const UCANS_FILE: &str = "ucans.json";
@@ -62,6 +64,8 @@ pub(crate) struct Registry {
     pub(crate) locations: BTreeMap<LocationId, Location>,
     /// Keyed by `(space, view)`.
     pub(crate) views: BTreeMap<(String, String), ViewDef>,
+    /// Property graphs, keyed by `(space, graph)`.
+    pub(crate) graphs: BTreeMap<(String, String), GraphDef>,
     /// Keyed by `(principal, space, relation)`.
     pub(crate) grants: BTreeMap<(String, String, String), Grant>,
     /// Keyed by `(space, relation, policy name)`.
@@ -156,6 +160,7 @@ impl Registry {
         let spaces: Vec<Space> = read_items(&dir.join(SPACES_FILE), &mut h)?;
         let locations: Vec<Location> = read_items(&dir.join(LOCATIONS_FILE), &mut h)?;
         let views: Vec<ViewDef> = read_items(&dir.join(VIEWS_FILE), &mut h)?;
+        let graphs: Vec<GraphDef> = read_items(&dir.join(GRAPHS_FILE), &mut h)?;
         let grants: Vec<Grant> = read_items(&dir.join(GRANTS_FILE), &mut h)?;
         let policies: Vec<RowPolicy> = read_items(&dir.join(POLICIES_FILE), &mut h)?;
         let issued: Vec<IssuedUcan> = read_items(&dir.join(UCANS_FILE), &mut h)?;
@@ -167,6 +172,7 @@ impl Registry {
             spaces: spaces.into_iter().map(|s| (s.name.clone(), s)).collect(),
             locations: locations.into_iter().map(|l| (l.id.clone(), l)).collect(),
             views: views.into_iter().map(|v| (v.key(), v)).collect(),
+            graphs: graphs.into_iter().map(|g| (g.key(), g)).collect(),
             grants: grants.into_iter().map(|g| (g.key(), g)).collect(),
             policies: policies.into_iter().map(|p| (p.key(), p)).collect(),
             issued: issued.into_iter().map(|u| (u.id.clone(), u)).collect(),
@@ -191,6 +197,10 @@ impl Registry {
         write_items(
             &dir.join(VIEWS_FILE),
             self.views.values().cloned().collect(),
+        )?;
+        write_items(
+            &dir.join(GRAPHS_FILE),
+            self.graphs.values().cloned().collect(),
         )?;
         write_items(
             &dir.join(GRANTS_FILE),
@@ -371,6 +381,7 @@ impl OikomeCatalog {
                 }
             }
             reg.views.retain(|(s, _), _| s != name);
+            reg.graphs.retain(|(s, _), _| s != name);
             reg.grants.retain(|(_, s, _), _| s != name);
             reg.policies.retain(|(s, _, _), _| s != name);
             // Another node's Space: forget its Location with the token. The

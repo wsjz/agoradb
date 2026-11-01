@@ -16,7 +16,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use oikome_catalog::{is_plaintext_peer, LocationFormat, OikomeCatalog, Space};
 use oikome_core::{CatalogError, EngineKind};
@@ -62,6 +62,9 @@ pub struct EngineRegistry {
     identity: OnceLock<Arc<NodeIdentity>>,
     temp_dir: PathBuf,
     allow_http: bool,
+    /// Property graphs created in the DuckDB of this process: DuckDB name
+    /// → the statement that created it (§8).
+    graphs: Mutex<HashMap<String, String>>,
 }
 
 impl std::fmt::Debug for EngineRegistry {
@@ -101,7 +104,26 @@ impl EngineRegistry {
             identity,
             temp_dir,
             allow_http: config.allow_http,
+            graphs: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// Whether the DuckDB of this process has graph `name` as `sql` creates it.
+    pub(crate) fn has_graph(&self, name: &str, sql: &str) -> bool {
+        self.graphs
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(name)
+            .is_some_and(|s| s == sql)
+    }
+
+    /// Record (with `Some`) or forget a graph of the DuckDB of this process.
+    pub(crate) fn set_graph(&self, name: &str, sql: Option<String>) {
+        let mut graphs = self.graphs.lock().unwrap_or_else(|p| p.into_inner());
+        match sql {
+            Some(sql) => graphs.insert(name.to_string(), sql),
+            None => graphs.remove(name),
+        };
     }
 
     /// Whether this node accepts plaintext (`http://`) peers.

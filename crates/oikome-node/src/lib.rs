@@ -31,6 +31,7 @@ pub mod capability;
 mod ddl;
 mod dml;
 pub mod error;
+mod graph;
 mod lance;
 pub mod publish;
 pub mod registry;

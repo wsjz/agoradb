@@ -172,6 +172,15 @@ impl OikomeSession {
                 self.deny_principal("CREATE VIRTUAL TABLE")?;
                 self.create_virtual_table(request).await
             }
+            OikomeStatement::CreatePropertyGraph(request) => {
+                self.deny_principal("CREATE PROPERTY GRAPH")?;
+                self.create_property_graph(request).await
+            }
+            OikomeStatement::DropPropertyGraph(request) => {
+                self.deny_principal("DROP PROPERTY GRAPH")?;
+                self.drop_property_graph(request).await
+            }
+            OikomeStatement::GraphQuery(query) => self.graph_query(query).await,
             OikomeStatement::DropSpace(name) => {
                 self.deny_principal("DROP SPACE")?;
                 let space = self.space(&name)?;

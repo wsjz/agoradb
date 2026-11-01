@@ -16,8 +16,8 @@
 # End-to-end check of the network phase (3.1) on the three nodes of
 # docker/compose.yml: discovery, TLS pinned to DIDs, a UCAN-gated federated
 # query, subscription, revocation cutting access, Lance search on a Space
-# and on a subscribed copy of it, and FTS5 / sqlite-vec search on a
-# transactional Space. Every step prints what
+# and on a subscribed copy of it, FTS5 / sqlite-vec search on a
+# transactional Space, and a DuckPGQ graph query. Every step prints what
 # was expected and what happened; the first mismatch fails the run.
 #
 #   E2E_BUILD=1     build the image first (default)
@@ -187,6 +187,16 @@ check "full-text search on node-b" "$(printf '1\n3')" \
     "$(sql node-b "SELECT rowid FROM orders.notes WHERE notes MATCH 'apple' ORDER BY bm25(notes)")"
 check "vector search on node-b" "$(printf '1\n3')" \
     "$(sql node-b "SELECT rowid FROM orders.embeddings WHERE embedding MATCH '[1, 0, 0, 0]' AND k = 2 ORDER BY distance")"
+
+echo "== DuckPGQ (3.3): a shortest path in node-a's Lance Space"
+sql node-a "CREATE SPACE social WITH FORMAT = 'lance'" >/dev/null
+sql node-a "CREATE TABLE social.people (id BIGINT, name VARCHAR)" >/dev/null
+sql node-a "INSERT INTO social.people VALUES (1, 'alice'), (2, 'bob'), (3, 'carol'), (4, 'dave')" >/dev/null
+sql node-a "CREATE TABLE social.knows (src BIGINT, dst BIGINT)" >/dev/null
+sql node-a "INSERT INTO social.knows VALUES (1, 2), (2, 3), (3, 4), (1, 3)" >/dev/null
+sql node-a "CREATE PROPERTY GRAPH social.friends VERTEX TABLES (people LABEL person) EDGE TABLES (knows SOURCE KEY (src) REFERENCES people (id) DESTINATION KEY (dst) REFERENCES people (id) LABEL knows)" >/dev/null
+check "hops from alice to dave" "2" \
+    "$(sql node-a "FROM GRAPH_TABLE (social.friends MATCH p = ANY SHORTEST (a:person WHERE a.name = 'alice')-[k:knows]->+(b:person WHERE b.name = 'dave') COLUMNS (path_length(p) AS hops))")"
 
 echo "== mDNS (node-c was given no address)"
 wait_for "node-c discovers node-a by mDNS" 60 knows_peer node-c "$DID_A"

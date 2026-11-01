@@ -22,6 +22,7 @@
 pub mod capability;
 pub mod classify;
 pub mod error;
+pub mod graph;
 pub mod rewrite;
 pub mod search;
 pub mod sql_parser;
@@ -31,6 +32,7 @@ pub use classify::{
     classify, collect_spaces, cte_names, qualify_tables, DmlKind, StatementClass, TclKind,
 };
 pub use error::SemanticError;
+pub use graph::{render_graph_parts, CreateGraphRequest, DropGraphRequest, GraphPart, GraphQuery};
 pub use rewrite::{
     apply_access_control, inline_views, AccessResolver, RelationAccess, ViewResolver,
 };

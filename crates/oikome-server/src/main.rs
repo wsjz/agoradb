@@ -22,8 +22,9 @@
 //!                                       fetch the DuckDB extensions Oikome uses
 //! ```
 //!
-//! DuckDB extensions (`lance` for Lance Spaces, `sqlite` for analytical
-//! Spaces over SQLite files) are loaded from `<root>/.oikome/extensions`, or
+//! DuckDB extensions (`lance` for Lance Spaces, `duckpgq` for their graphs,
+//! `sqlite` for analytical Spaces over SQLite files) are loaded from
+//! `<root>/.oikome/extensions`, or
 //! `--extension-dir` / `OIKOME_EXTENSION_DIR`. Queries never download them;
 //! `extensions install` does, signed by DuckDB.
 //!
@@ -83,8 +84,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum ExtensionsCommand {
-    /// Download the DuckDB extensions Oikome loads (`sqlite`, `lance`) for
-    /// the linked DuckDB version.
+    /// Download the DuckDB extensions Oikome loads (`sqlite`, `lance`,
+    /// `duckpgq`) for the linked DuckDB version.
     Install,
 }
 

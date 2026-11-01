@@ -52,16 +52,20 @@ pub enum Extension {
     Sqlite,
     /// Lance datasets: reads, writes, indexes and search (§7.6).
     Lance,
+    /// Property graphs and SQL/PGQ queries (community extension, §8).
+    Duckpgq,
 }
 
 impl Extension {
     /// Extensions `oikome extensions install` fetches.
-    pub const INSTALLABLE: [Extension; 2] = [Extension::Sqlite, Extension::Lance];
+    pub const INSTALLABLE: [Extension; 3] =
+        [Extension::Sqlite, Extension::Lance, Extension::Duckpgq];
 
     pub fn name(self) -> &'static str {
         match self {
             Extension::Sqlite => "sqlite",
             Extension::Lance => "lance",
+            Extension::Duckpgq => "duckpgq",
         }
     }
 
@@ -70,13 +74,18 @@ impl Extension {
         match self {
             Extension::Sqlite => Capabilities::READ_SQLITE,
             Extension::Lance => Capabilities::READ_LANCE,
+            Extension::Duckpgq => Capabilities::EXT_GRAPH,
         }
     }
 
-    /// `INSTALL` statement: core extensions come from DuckDB's default
-    /// repository, signed by DuckDB.
+    /// `INSTALL` statement. Core extensions come from DuckDB's default
+    /// repository, community ones from DuckDB's community repository;
+    /// DuckDB checks the signature of both.
     fn install_sql(self) -> String {
-        format!("INSTALL {};", self.name())
+        match self {
+            Extension::Duckpgq => format!("INSTALL {} FROM community;", self.name()),
+            _ => format!("INSTALL {};", self.name()),
+        }
     }
 }
 
@@ -413,6 +422,23 @@ impl QueryEngine for DuckDbEngine {
             m.remove(name);
         }
         Ok(())
+    }
+
+    async fn enable(&self, needs: Capabilities) -> Result<(), EngineError> {
+        for ext in Extension::INSTALLABLE {
+            if needs.intersects(ext.capability()) {
+                self.ensure_extension(ext).await?;
+            }
+        }
+        let missing = needs.difference(self.capabilities());
+        if missing.is_empty() {
+            Ok(())
+        } else {
+            Err(EngineError::Unsupported(
+                EngineKind::DuckDb,
+                format!("{missing:?}"),
+            ))
+        }
     }
 
     async fn attach_space(&self, space: &str, source: SpaceSource) -> Result<(), EngineError> {

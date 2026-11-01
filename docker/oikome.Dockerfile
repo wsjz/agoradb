@@ -32,7 +32,7 @@ RUN cargo build --release --locked -p oikome-server --bin oikome \
     && cp target/release/oikome /out/ \
     && cp target/duckdb-download/*/*/libduckdb.so /out/
 
-# The DuckDB extensions nodes load (sqlite, lance), signed by DuckDB.
+# The DuckDB extensions nodes load (sqlite, lance, duckpgq), signed by DuckDB.
 RUN LD_LIBRARY_PATH=/out /out/oikome --root /tmp/node --extension-dir /out/extensions \
         extensions install
 

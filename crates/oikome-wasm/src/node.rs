@@ -381,6 +381,12 @@ fn statement_name(stmt: &OikomeStatement) -> &'static str {
         OikomeStatement::ShowUcans => "SHOW UCANS",
         OikomeStatement::ShowPeers => "SHOW PEERS",
         OikomeStatement::ShowWebrtc => "SHOW WEBRTC (the browser node serves no peers)",
+        OikomeStatement::CreateVirtualTable(_) => {
+            "virtual tables (FTS5 and vec0 run on Full Nodes)"
+        }
+        OikomeStatement::CreatePropertyGraph(_)
+        | OikomeStatement::DropPropertyGraph(_)
+        | OikomeStatement::GraphQuery(_) => "property graphs (DuckPGQ runs on Full Nodes)",
         _ => "this statement",
     }
 }

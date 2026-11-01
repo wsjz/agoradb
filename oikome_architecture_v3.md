@@ -7,6 +7,7 @@
 > **Core Change**: Oikome no longer owns query *computation*. Computation is delegated to pluggable embedded engines (DuckDB for analytics, SQLite for transactions; browser-hosted engines in WASM). DataFusion is retained **only** as the federation coordinator that merges results across engines and nodes. Oikome's own value concentrates in the semantic layer (naming, policy, views), the federation layer (routing, pushdown, merge), identity/authorization (DID/UCAN) and P2P (discovery, snapshot sync, Arrow Flight).
 > **Status**: 3.0-A (engines), 3.0-B (local federation), 3.0-C (semantic layer) and 3.0-D (publishing) implemented on `main`. Supersedes v2.0.
 > **Revised 2026-10-30**: positioning changed to an AI-native, multimodal private data center (§1). Added cloud drives (§7.5), Lance as a third Location format (§7.6), connectors (§11), compute sharing (§12) and roadmap phases 3.4–3.6. The engine, federation and semantic layers are unchanged.
+> **Revised 2026-11-01**: added the user-facing apps: repository layout (§13.3), apps and the API layer (§13.4) and an apps track beside the core phases (§14.1).
 
 ---
 
@@ -246,6 +247,7 @@ Every statement is classified before planning:
 | Query calling a search function (`lance_vector_search`, `lance_fts`, `lance_hybrid_search`) | one Lance Space or a copy of one; the node's owner only | **Pushed entirely** to DuckDB, the table argument replaced by its dataset path (§7.6) |
 | `CREATE VIRTUAL TABLE ... USING fts5(...)` / `vec0(...)` | transactional; the node's owner only | `SqliteEngine`, the module arguments as written |
 | Statement using `MATCH` (FTS5 full text, sqlite-vec nearest neighbours) | one transactional Space; the node's owner only | **Pushed entirely** to `SqliteEngine` |
+| `CREATE` / `DROP PROPERTY GRAPH`, query using `GRAPH_TABLE` | one Lance Space; the node's owner only | Catalog (definition) and `DuckDbEngine` through `duckpgq` |
 
 A Space bound `ACCESS = 'readonly'` refuses every DDL and DML statement.
 
@@ -457,7 +459,7 @@ Not done yet: reading a pinned version (waits for the extension), `PUBLISH` (§7
 |----------|---------------------|------------------------|------------------------|
 | VECTOR | Lance Location (§7.6): `lance_vector_search`, index stored in the dataset | `sqlite-vec` | Capability check; route to the one engine that runs it |
 | FTS | Lance Location: `lance_fts`, `lance_hybrid_search` (vector + text) | FTS5 | same |
-| GRAPH | DuckPGQ (SQL/PGQ `MATCH`) | — | same; Cypher is **dropped** |
+| GRAPH | DuckPGQ (SQL/PGQ `GRAPH_TABLE ... MATCH`) on Lance Spaces | — | Keep graph definitions; capability check; Cypher is **dropped** |
 | BLOB | Lance Location for files kept in the data center (images, audio, attachments); CID columns + gateway dereference for external content | CID columns + gateway dereference | CID: unchanged from v1 |
 
 Indexes inside a Lance dataset are part of its versions and **travel with it**, so a subscribing node searches without rebuilding. Indexes built by other extensions are engine-local and **not synchronized**; a subscribing node rebuilds them.
@@ -473,7 +475,22 @@ SELECT rowid, distance FROM shop.vecs WHERE embedding MATCH '[...]' AND k = 10 O
 
 FTS5 and vec0 tables are listed as relations of the Space; the tables SQLite keeps behind them are not. `PUBLISH` (§7.3) skips them: they index other tables, which are published. `MATCH`, like the Lance search functions, is for the node's owner within one Space. sqlparser's generic dialect has no `MATCH` operator, so a statement using it is parsed with the SQLite dialect.
 
-A Space does not declare the extensions it needs. They follow from its format and from the statement: a Lance Location needs `lance` (`Capabilities::READ_LANCE`), a search function needs it on the Space's engine; `MATCH` needs FTS5 and sqlite-vec (`EXT_FTS`, `EXT_VECTOR`), which every SQLite engine has. The check happens before the statement runs; a node without the extension answers with how to install it.
+Graphs, on a Lance Space (DuckPGQ cannot define a graph over views, and Iceberg tables reach DuckDB as views):
+
+```sql
+CREATE PROPERTY GRAPH social.friends
+    VERTEX TABLES (people LABEL person)
+    EDGE TABLES (knows SOURCE KEY (src) REFERENCES people (id)
+                       DESTINATION KEY (dst) REFERENCES people (id) LABEL knows);
+FROM GRAPH_TABLE (social.friends
+    MATCH p = ANY SHORTEST (a:person WHERE a.name = 'alice')-[k:knows]->+(b:person WHERE b.name = 'dave')
+    COLUMNS (path_length(p) AS hops));
+DROP PROPERTY GRAPH social.friends;
+```
+
+A graph's tables belong to its Space. sqlparser cannot read these statements; Oikome tokenizes them, qualifies the table names and names the graph `<space>__<graph>` in DuckDB. DuckPGQ keeps graphs in the DuckDB database, which lives in memory, so the catalog keeps the definitions (`graphs.json`) and a DuckDB that lacks one creates it before a graph query. Graph statements are for the node's owner and read one Space. Graph algorithm functions (`pagerank`, ...) are not available yet.
+
+A Space does not declare the extensions it needs. They follow from its format and from the statement: a Lance Location needs `lance` (`Capabilities::READ_LANCE`), a search function needs it on the Space's engine; `MATCH` needs FTS5 and sqlite-vec (`EXT_FTS`, `EXT_VECTOR`), which every SQLite engine has; a graph needs `duckpgq` (`EXT_GRAPH`). `QueryEngine::enable` loads what a capability takes. The check happens before the statement runs; a node without the extension answers with how to install it.
 
 ---
 
@@ -687,8 +704,12 @@ crates/
 ├── oikome-webrtc          WebRTC endpoint for browsers (str0m): sessions, DTLS certificate         [3.2]
 ├── oikome-wasm            Browser node: BrowserNode, HostEngine (duckdb-wasm), RemoteEngine, JS API [3.2]
 ├── oikome-connect         Connector trait, cursor store, built-in connectors (file import, flomo)  [3.5]
+├── oikome-api             API for clients, plugins and MCP; caller is Owner or Principal (§13.4)   [M1c]
+├── oikome-mcp             MCP adapter: principal operations only; bridges to the running node      [M3]
 └── oikome-cli                                                                                      [later]
 ```
+
+Tags `M1c` and `M3` refer to the apps track (§14).
 
 `oikome-query` was deleted; its `CREATE SPACE` parser moved to `oikome-semantic`.
 
@@ -719,6 +740,90 @@ The Arrow-line crates must move together: DataFusion 55 and `datafusion-federati
 
 Roughly 1,100 of the current ~4,300 lines are engine-bridge code that goes away; VFS, storage write path, Iceberg catalog core and `SpaceUri` (~2,600 lines) carry over.
 
+### 13.3 Repository Layout for User-Facing Apps
+
+The apps that people use (web now; desktop and phone later) live in this repository beside the Rust core. Each directory below is created when the work that needs it starts (tag = apps-track milestone, §14). Until then it exists only in this document.
+
+```
+oikome/
+├── Cargo.toml        Rust workspace: crates/*, tests, tests/tools/data-gen; apps/desktop/src-tauri later
+├── package.json      npm workspaces: apps/*, packages/*, plugins/*                                  [M1a]
+├── crates/           Rust core; adds oikome-api [M1c] and oikome-mcp [M3]
+├── apps/             one thin shell per client: entry, platform glue, packaging; no screens
+│   ├── web/          served by `oikome serve --web`; in a phone browser it runs the browser node    [M1b]
+│   ├── desktop/      Tauri; runs a Full Node in process                                             [later]
+│   │   └── src-tauri/
+│   └── mobile/       Tauri 2 mobile; reaches the owner's node over WebRTC, as a phone browser does  [later]
+├── packages/         TypeScript shared by every client
+│   ├── screens/      every screen and feature, desktop and phone layouts, UI strings                [M1b]
+│   ├── ui/           design system: tokens and components                                           [M1b]
+│   ├── client/       NodeClient interface, data hooks, HTTP and browser-node implementations        [M1b]
+│   ├── node/         browser-node runtime (today's web/src and web/scripts/build.sh)                [M1a]
+│   ├── api/          TypeScript types generated from oikome-api                                     [M1c]
+│   └── plugin-sdk/   message bridge and theme tokens for plugin authors                             [M2]
+├── plugins/          official reference plugins: recent-notes, storage, smart-home, on-this-day     [M2]
+├── design/           PRODUCT.md, DESIGN.md, design.json                                             [later]
+└── e2e/              Playwright: today's web/tests and the browser-node test page, then per client  [M1a]
+```
+
+- **Three layers.** `crates/` owns data and permissions. `packages/` owns screens and client logic. `apps/` owns how a client starts, reaches a node and is packaged.
+- **Screens live in `packages/screens`, not in an app**, so desktop and mobile reuse them instead of extracting them from the web app later.
+- **`web/` stays until M1a**, which moves it without changing behavior; §10's paths change with it:
+
+| Now | After M1a |
+|-----|-----------|
+| `web/src/host.js`, `store.js`, `transport.js` | `packages/node/src/` |
+| `web/scripts/build.sh` | `packages/node/scripts/build.sh` |
+| `web/index.html`, `web/src/main.js` (test page that exposes `window.oikome`) | `e2e/harness/` |
+| `web/tests/`, `web/playwright.config.mjs` | `e2e/` |
+| `web/package.json`, `web/package-lock.json` | `packages/node/package.json`; root `package.json` and `package-lock.json` (workspaces) |
+| `web/` entries in `.gitignore`, paths in `browser-e2e.yml` | the new paths |
+
+### 13.4 Apps and the API Layer
+
+```
+ apps/web (browser)          apps/desktop (Tauri, later)        AI tools (MCP clients)
+       │ HTTP                        │ in-process call                  │ MCP (stdio or HTTP)
+ oikome-server --web                 │                              oikome-mcp            [M3]
+       └─────────────────────────────┼──────────────────────────────────┘
+                               oikome-api                                                 [M1c]
+                request and response types · handlers · caller identity
+                                     │
+                oikome-node · oikome-semantic · …   (grants and policies enforced here)
+```
+
+- **`oikome-api`** is what Oikome offers to everything above the node: its own clients, plugins and MCP. The peer-to-peer protocol stays in `oikome-protocol` / `oikome-network`.
+  - It has no transport.
+  - Every call carries the caller: **Owner**, or **Principal** (a DID with a UCAN, e.g. an AI tool or a plugin). Owner-only operations (create Spaces, connect sources, share, issue and revoke grants) refuse a Principal. A Principal's reads go through the semantic layer like a peer's (§6), so it sees only what it is granted.
+- **HTTP** is a thin layer in `oikome-server`, turned on by `oikome serve --web`. It serves the embedded `apps/web` build and the API.
+  - It listens on loopback by default.
+  - `serve` prints a one-time token; the page exchanges it for an HttpOnly, SameSite=Strict session cookie.
+  - Requests whose `Host` or `Origin` is not the served address are refused, which covers DNS rebinding and cross-site requests.
+- **Desktop** (later) links `oikome-api` into its Tauri process and runs the Full Node there. Tauri commands call the handlers directly, so no port is opened.
+- **`packages/api`** is generated from `oikome-api`'s types. The generator is chosen in M1c; its license is checked by `cargo deny`.
+- **`oikome-mcp`** (M3) exposes Principal operations only: list the Spaces it may read, then search and query within its grants. It never exposes Owner commands.
+  - Grants for AI tools are managed on the app's AI Assistants screen.
+  - `oikome mcp`, when started by an AI client, is a thin bridge: it reaches the running node with that assistant's UCAN. It does not open the data directory, where it would contend for DuckDB and SQLite file locks.
+  - The MCP SDK and its license are checked when M3 starts.
+- **Plugins** (M2) run sandboxed and talk to the app through `packages/plugin-sdk`. Each is a Principal with its own grants, and has no network access.
+
+How each client reaches data (screens depend only on `NodeClient`):
+
+| Client | Runs in | Reaches data through | Layout |
+|--------|---------|----------------------|--------|
+| Web, desktop browser | Page served by the Full Node | HTTP on loopback, owner session | Desktop |
+| Web, phone browser | The same page, loading the browser node (§10; 32.7 MB, loaded on first use) | WebRTC with a UCAN issued at pairing | Phone |
+| Desktop app (later) | Tauri window | In-process calls to `oikome-api` | Desktop |
+| Phone app (later) | Tauri 2 mobile | WebRTC with a UCAN, as the phone browser | Phone |
+
+Which Owner operations a paired device may perform is settled in M1c.
+
+**Scope of the apps.**
+- They serve the owner's personal data center: onboarding, Spaces, sources, sharing, AI assistants, plugins and settings. Node operations (engines, logs, peers' internals) stay in the CLI. Members and family roles come later.
+- The UI is English; other languages arrive through i18n later.
+- Visual design: Apple-style minimal on a low-chroma cream palette. One crimson primary action per view; blue only for links and focus. Its tokens and rules move into `design/` with DESIGN.md.
+- **Storage.** Onboarding offers local folders and NAS only, because the product rule is that data stays at home. Whether a cloud drive may be a Location (§7.5, phase 3.4) is undecided, and the apps do not offer it until it is decided. Browsing files already on a drive (as AList does) and serving Oikome over WebDAV are planned but not scheduled.
+
 ---
 
 ## 14. Roadmap (v3)
@@ -731,12 +836,25 @@ Roughly 1,100 of the current ~4,300 lines are engine-bridge code that goes away;
 | **3.0-D Publish** ✅ | `PUBLISH SPACE` → `orders_published` analytical read-only Space; scheduled publisher | Publish → query via DuckDB matches SQLite source |
 | **3.1 Network** ✅ | DID/UCAN, Arrow Flight remote Spaces (3.1a ✅), snapshot subscription (3.1b ✅), libp2p discovery and TLS (3.1c ✅), two Docker nodes plus an mDNS-only node, run in CI (3.1d ✅) | Two Docker nodes: UCAN-gated federated query; revocation cuts access |
 | **3.2 Browser** ✅ | WASM core + `HostEngine` on duckdb-wasm (3.2a ✅); federated queries via a Full Node over WebRTC (3.2b ✅); browser SQLite later | Browser node runs a local query and a federated query via a Full Node |
-| **3.3 Multimodal** | Lance Locations through DuckDB's `lance` extension: vector, full-text and hybrid search, indexes, version sync (3.3a ✅); FTS5/`sqlite-vec` on transactional Spaces (3.3b ✅); DuckPGQ (3.3c); capability checks | Vector + FTS query on a Lance Space and on a transactional Space; a subscribed Lance Space is searchable without rebuilding its index |
+| **3.3 Multimodal** ✅ | Lance Locations through DuckDB's `lance` extension: vector, full-text and hybrid search, indexes, version sync (3.3a ✅); FTS5/`sqlite-vec` on transactional Spaces (3.3b ✅); DuckPGQ on Lance Spaces (3.3c ✅); capability checks | Vector + FTS query on a Lance Space and on a transactional Space; a subscribed Lance Space is searchable without rebuilding its index |
 | **3.4 Cloud drives** | opendal drive services behind feature flags; one writing node per drive Location; newest-complete-snapshot reads; bounded local cache; client-side encryption; transactional Spaces rejected on drive Locations | An analytical Space on a WebDAV Location is written by one node and read by another; a transactional Space on a drive Location is rejected at DDL; files on the drive cannot be read without the key |
 | **3.5 Connectors** | `Connector` contract; upsert and cursor in one SQLite transaction; scheduled and on-demand pulls; credentials from the OS keychain; file import and flomo connectors | flomo memos land in `flomo.memos`; a second pull touches only changed memos; an edited memo is updated, not duplicated; a failed pull leaves data and cursor unchanged |
 | **3.6 Compute sharing** | `compute/<runtime>` UCAN abilities with limits; task routing over Arrow Flight; host-registered runtimes; per-peer quotas | Node B runs a task for node A within its quota; a task over its limits is refused; revoking the UCAN drops A's queued tasks; A's compute grant gives no access to B's Spaces, and a data grant does not let A run tasks |
 
 No phase skipping (AGENT.md §4.1).
+
+### 14.1 Apps Track
+
+The user-facing apps (§13.3, §13.4) run beside the core phases. They do not block the core phases, and the core phases do not wait for them. A milestone starts only when its gate phases are done; within the track, too, there is no skipping.
+
+| Milestone | Goal | Gate | Exit criterion |
+|-----------|------|------|----------------|
+| **M1a Layout** | `web/` split into `packages/node` and `e2e/`; root `package.json` with npm workspaces | 3.2 ✅ | `browser-e2e` passes from the new paths with no change to the tests' assertions |
+| **M1b Screens** | `packages/ui`, `packages/screens`, `packages/client` and `apps/web`: the nine screens on fake data, desktop and phone layouts | M1a | Every screen renders at desktop and phone widths in e2e; no text pair fails its WCAG contrast ratio |
+| **M1c Usable** | `oikome-api`, `oikome serve --web`, `packages/api`. Real data for onboarding and the recovery key, Spaces, sharing and revoking with contacts, phone pairing, the access log and the advanced SQL view | 3.0–3.2 ✅, M1b | From an empty data directory, in e2e on CI: onboarding; a Space browsed; the Space shared with a contact and revoked, after which the contact's query fails; a phone browser paired that then queries over WebRTC. A request without the session cookie or with a foreign `Origin` is refused |
+| **M2 Connect** | Sources screen and sync status, Home dashboard, built-in cards, dashboard plugins v1 (`plugin-sdk`, data contract, plugin grants), reference plugins | 3.5, M1c | A connector's data appears on Home; a plugin reads only what its grant allows and cannot reach the network |
+| **M3 Find** | Full-text and semantic search, photo and note views, AI Assistants screen, `oikome-mcp` | 3.3 ✅, M2 | An MCP client lists and searches only the Spaces granted to it; revoking the grant in the app cuts it off; Owner commands are not offered over MCP |
+| **M4 Extend** | Borrowed compute, third-party connector plugins, plugin directory; cloud-drive storage only if §7.5 is confirmed (§13.4) | 3.4, 3.6, M3 | Set when M4 starts |
 
 ---
 
@@ -763,6 +881,7 @@ No phase skipping (AGENT.md §4.1).
 | The extension and `lance-table` disagree about a dataset after one of them is upgraded | Both pinned to the same lance release (12, DuckDB 1.5.6) and upgraded together; the subscription test copies a version listed by `lance-table` and searches it with the extension |
 | The extension caches each dataset per DuckDB connection, so a long-lived connection reads a stale version | Every statement runs on a fresh connection; a test reads through a second DuckDB after writes by the first |
 | `lance-io` uses `object_store` 0.14, DataFusion 54 uses 0.13 | Two copies, native nodes only; they share nothing at run time |
+| DuckPGQ is a research project, and cannot define graphs over views | Graphs are on Lance Spaces only; definitions are kept by Oikome and replayed; the extension is pinned with DuckDB |
 | sqlite-vec is pre-1.0, and 0.1.9 searches by brute force | Pinned exactly; fine at personal scale; its DiskANN and IVF indexes arrive with later releases, which change only the `vec0(...)` options |
 | Fewer external tools read Lance than Parquet / Iceberg | Lance only for data that is searched; tables that are aggregated stay Iceberg + Parquet |
 
@@ -802,11 +921,18 @@ No phase skipping (AGENT.md §4.1).
 | 2026-11-01 | Lance Spaces read the latest version; subscriptions ship one version, listed with `lance-table` | The extension cannot read a given version or list its files; shipping exactly one version keeps deleted rows on the owner and lets indexes travel |
 | 2026-11-01 | Search functions only for the owner (and on subscribed copies), within one Space; peers subscribe to search | A search reads the dataset past column grants and row policies; subscription copies only tables the peer may read in full |
 | 2026-11-01 | No `MODES` declaration on Spaces: required extensions follow from the format and the statement, checked against `Capabilities` | A declaration could drift from what the Space actually holds |
+| 2026-11-01 | Graphs (DuckPGQ) on Lance Spaces only; definitions in the catalog, created again in a DuckDB that lacks them; owner only, one Space | DuckPGQ refuses graphs over views, and Iceberg tables reach DuckDB as views; copying them into tables for every snapshot was turned down |
 | 2026-11-01 | FTS5 and sqlite-vec in transactional Spaces: `CREATE VIRTUAL TABLE` read by Oikome (module arguments as written, fts5 and vec0 only), `MATCH` parsed with the SQLite dialect, for the owner within one Space; `PUBLISH` skips virtual tables | sqlparser cannot read the module arguments, and its generic dialect has no `MATCH`; a dialect of our own would change how other statements parse |
 | 2026-11-01 | DuckDB extensions are fetched only by `oikome extensions install` (and in the Docker image build), never by a query | A query never downloads code; the node's extension directory is explicit |
 | 2026-10-30 | The 3.1 exit run is three Docker nodes on GitHub Actions (`docker-e2e`), one of them found only by mDNS | Development machines may have no container runtime; CI runs it on every push, and the Docker bridge network gives mDNS the multicast a firewalled laptop may block |
 | 2026-10-30 | VFS `materialize()` moves from 3.1 to 3.4 | Subscription copies live on local disk; the VFS is first needed for cloud drives |
 | 2026-10-30 | Lance as a third Location format for vector, full-text and large-object data; it replaces DuckDB `vss` / `fts` for analytical Spaces | Lance indexes live in the dataset and sync with its versions, while extension indexes must be rebuilt on every subscriber; Lance versions are immutable files plus a manifest, which fits principle 4; Iceberg + Parquet stays for tables that are scanned and aggregated |
+| 2026-11-01 | User-facing apps serve the owner's personal data center only: no node-operations or developer screens; members later; English UI, i18n later | The apps are for ordinary people using their data; operating the node stays in the CLI; the audience is global |
+| 2026-11-01 | Repository layout: `apps/` (thin shells), `packages/` (shared TypeScript), `plugins/`, `design/` and `e2e/` at the root beside `crates/`; root `package.json` (npm workspaces) beside `Cargo.toml`; a directory is created only when its work starts | Web, desktop and phone are peers, so `apps/` sits at the root rather than inside `web/`; shared screens avoid extracting them from one app later; directories for unbuilt features would only describe intent, which this document already does |
+| 2026-11-01 | `oikome-api`: one transport-free API with the caller as Owner or Principal; HTTP in `oikome-server --web`, desktop in process, MCP in `oikome-mcp` exposing Principal operations only; `packages/api` generated from it | One set of handlers for every client; the name covers plugins and MCP, not just Oikome's own apps, while the peer protocol keeps its own crates; an AI tool can never reach Owner commands |
+| 2026-11-01 | Desktop and phone apps on Tauri (later) | Its backend is Rust and links our crates directly, so the desktop app is a Full Node with a UI and no command line; Tauri 2 also targets iOS and Android; Apache-2.0 / MIT |
+| 2026-11-01 | The apps offer local folders and NAS as storage; cloud drives as Locations stay undecided, with §7.5 and phase 3.4 unchanged until then | The product rule is that data stays at home, which conflicts with keeping it on a drive provider's servers; browsing existing drive files and serving WebDAV are planned separately |
+| 2026-11-01 | Visual design: Apple-style minimal, low-chroma cream palette, one crimson primary action per view, blue only for links and focus | Calm and familiar for ordinary users; color marks the one thing to do instead of decorating; every text pair is checked against WCAG contrast |
 
 ---
 

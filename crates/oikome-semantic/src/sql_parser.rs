@@ -56,6 +56,10 @@ use sqlparser::tokenizer::{Token, Tokenizer};
 
 use crate::capability::{parse_issue_ucan, parse_revoke_ucan, IssueUcanRequest};
 use crate::error::SemanticError;
+use crate::graph::{
+    mentions_graph_table, parse_create_graph, parse_drop_graph, parse_graph_query,
+    CreateGraphRequest, DropGraphRequest, GraphQuery,
+};
 
 /// One parsed statement.
 #[derive(Debug, Clone, PartialEq)]
@@ -85,6 +89,12 @@ pub enum OikomeStatement {
     ShowWebrtc,
     /// `CREATE VIRTUAL TABLE ... USING fts5(...) | vec0(...)`
     CreateVirtualTable(VirtualTableRequest),
+    /// `CREATE PROPERTY GRAPH ...` (DuckPGQ)
+    CreatePropertyGraph(CreateGraphRequest),
+    /// `DROP PROPERTY GRAPH ...`
+    DropPropertyGraph(DropGraphRequest),
+    /// A query using `GRAPH_TABLE (...)`
+    GraphQuery(GraphQuery),
     /// Any standard SQL statement.
     Sql(Box<Statement>),
 }
@@ -140,6 +150,20 @@ fn parse_one(stmt: &str) -> Result<OikomeStatement, SemanticError> {
     match (upper(0).as_deref(), upper(1).as_deref()) {
         (Some("CREATE"), Some("SPACE")) => parse_create_space(stmt),
         (Some("CREATE"), Some("VIRTUAL")) => parse_create_virtual_table(stmt),
+        (Some("CREATE"), Some("PROPERTY")) => Ok(OikomeStatement::CreatePropertyGraph(
+            parse_create_graph(stmt)?,
+        )),
+        (Some("CREATE"), Some("OR"))
+            if upper(2).as_deref() == Some("REPLACE")
+                && upper(3).as_deref() == Some("PROPERTY") =>
+        {
+            Ok(OikomeStatement::CreatePropertyGraph(parse_create_graph(
+                stmt,
+            )?))
+        }
+        (Some("DROP"), Some("PROPERTY")) => {
+            Ok(OikomeStatement::DropPropertyGraph(parse_drop_graph(stmt)?))
+        }
         (Some(verb @ ("DROP" | "REFRESH")), Some("SPACE")) => {
             let name = words.get(2).ok_or_else(|| {
                 SemanticError::Parse(format!("{verb} SPACE: expected a space name"))
@@ -188,6 +212,9 @@ fn parse_one(stmt: &str) -> Result<OikomeStatement, SemanticError> {
                 }
             };
             Ok(OikomeStatement::SetSpace(validate_name(unquote(raw))?))
+        }
+        _ if mentions_graph_table(stmt) => {
+            Ok(OikomeStatement::GraphQuery(parse_graph_query(stmt)?))
         }
         _ => {
             let mut parsed = match Parser::parse_sql(&GenericDialect {}, stmt) {
@@ -448,7 +475,7 @@ fn parse_publish(stmt: &str) -> Result<OikomeStatement, SemanticError> {
     }))
 }
 
-fn validate_name(raw: &str) -> Result<String, SemanticError> {
+pub(crate) fn validate_name(raw: &str) -> Result<String, SemanticError> {
     let name = unquote(raw.trim_end_matches(';'));
     let ok = !name.is_empty()
         && name

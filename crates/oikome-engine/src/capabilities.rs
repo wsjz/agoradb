@@ -42,6 +42,8 @@ bitflags::bitflags! {
         const EXT_FTS = 1 << 9;
         /// Vector search (`MATCH` on sqlite-vec `vec0` tables).
         const EXT_VECTOR = 1 << 10;
+        /// Property graphs and SQL/PGQ `GRAPH_TABLE` queries (DuckPGQ).
+        const EXT_GRAPH = 1 << 11;
     }
 }
 
