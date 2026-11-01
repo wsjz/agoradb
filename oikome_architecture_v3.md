@@ -194,9 +194,14 @@ pub trait QueryEngine: Send + Sync {
 pub enum TableSource {
     ParquetFiles { files: Vec<VfsPath>, schema: SchemaRef },   // resolved from an Iceberg snapshot
     SqliteFile   { path: VfsPath, table: String },
-    LanceDataset { path: VfsPath, version: Option<u64> },      // pinned Lance version (§7.6); None = latest
     ArrowBatches { schema: SchemaRef, stream: SendableRecordBatchStream }, // remote results, temp tables
 }
+
+// A whole Space exposed as `<space>.<table>`, read and written through the engine.
+pub enum SpaceSource {
+    LanceNamespace { root: VfsPath },                          // a directory of <table>.lance datasets (§7.6)
+}
+// QueryEngine::attach_space / detach_space; engines that cannot keep the default (refuse).
 
 bitflags! Capabilities {
     OLAP, OLTP, TRANSACTIONS, READ_PARQUET, READ_SQLITE, READ_LANCE, ARROW_OUT,
@@ -208,7 +213,7 @@ bitflags! Capabilities {
 
 | Engine | Crate (license) | Notes |
 |--------|-----------------|-------|
-| `DuckDbEngine` | `duckdb` 1.10505 (MIT, `bundled`) | Parquet via `read_parquet([...])`; SQLite via `sqlite_scanner` extension; Lance via the `lance` extension (§7.6); Arrow out natively. Extensions loaded on demand: `lance`, `duckpgq`. |
+| `DuckDbEngine` | `duckdb` 1.10506 (DuckDB 1.5.6, MIT, prebuilt `libduckdb`) | Parquet via `read_parquet([...])`; SQLite via the `sqlite` extension; Lance via the `lance` extension (§7.6); Arrow out natively. Extensions are loaded on demand from the node's extension directory and never downloaded by a query (`oikome extensions install` fetches them, signed by DuckDB). Each statement runs on a fresh connection to the shared database, because the `lance` extension caches datasets per connection. |
 | `SqliteEngine` | `rusqlite` 0.40 (MIT, `bundled`) | WAL mode; FTS5 built in; `sqlite-vec` loadable. Row results converted to Arrow batches (small result sets by design — OLTP). |
 | `HostEngine` | wasm-bindgen bridge | The JS host implements the same contract; Arrow IPC over the boundary. |
 
@@ -231,12 +236,16 @@ Every statement is classified before planning:
 | DDL on Space (`CREATE SPACE`, `ALTER SPACE`, `GRANT`) | — | Oikome catalog, never an engine |
 | DDL on table (`CREATE TABLE`) | analytical | Iceberg schema commit (Oikome) |
 | DDL on table | transactional | SQLite engine `execute` + catalog mirror |
+| DDL on table (`CREATE/ALTER/DROP TABLE`, `CREATE INDEX ... USING <type>`, `DROP INDEX ... ON`) | analytical on a `Lance` Location | `DuckDbEngine` through the `lance` extension; index statements are rewritten to name the dataset path |
 | DML (`INSERT/UPDATE/DELETE`) | transactional | **Directly** to `SqliteEngine`, bypassing DataFusion |
 | DML (`INSERT`) | analytical | AppendBuffer → Parquet → Iceberg commit (v2 write path) |
 | DML (`INSERT/UPDATE/DELETE`, `MERGE`) | analytical on a `Lance` Location | `DuckDbEngine` through the `lance` extension; each statement commits one Lance version |
 | TCL (`BEGIN/COMMIT/ROLLBACK`) | transactional | `SqliteEngine::begin` — session holds the `TxHandle` |
 | Query (`SELECT`) touching **one** local Space | any | **Pushed entirely** to that Space's engine; DataFusion is a pass-through |
-| Query touching **N** Spaces / remote Spaces | any | Federation Layer (§5) |
+| Query touching **N** Spaces / remote Spaces queried over Flight | any | Federation Layer (§5) |
+| Query calling a search function (`lance_vector_search`, `lance_fts`, `lance_hybrid_search`) | one Lance Space or a copy of one; the node's owner only | **Pushed entirely** to DuckDB, the table argument replaced by its dataset path (§7.6) |
+
+A Space bound `ACCESS = 'readonly'` refuses every DDL and DML statement.
 
 Each transactional Space has one shared SQLite connection for autocommit statements. `BEGIN` gives the session a **private connection** to the Space's file, and until `COMMIT`/`ROLLBACK` every statement of that session on that Space, including federated queries, runs on it, so the session sees its own uncommitted rows and nobody else does. A writer on another connection waits up to 5 s for the write lock (`busy_timeout`); dropping a session with an open transaction rolls it back.
 
@@ -302,7 +311,7 @@ REFRESH SPACE copy;   -- one row per table: table, snapshot_id, files_fetched, b
 
 ### 5.4 Snapshot Pinning
 
-A federated query pins one Iceberg snapshot ID or Lance version per analytical Space (local or remote) at planning time and threads it through every provider, so all subtrees observe a consistent point in time. Transactional Spaces have no snapshot; they observe the latest committed WAL state at scan start.
+A federated query pins one Iceberg snapshot ID per Iceberg table at planning time and threads it through every provider, so all subtrees observe a consistent point in time. Transactional Spaces have no snapshot; they observe the latest committed WAL state at scan start. Lance Spaces behave the same way: the `lance` extension (DuckDB 1.5.6) cannot read a given version, so a scan reads the latest version at its start. Subscriptions are still version-consistent (§9).
 
 ---
 
@@ -408,8 +417,14 @@ Open: the encryption mechanism. Parquet modular encryption (the pinned `parquet`
 Lance is a columnar format with versions, built for vector search, full-text search and large objects. A Lance Location holds one Lance dataset per table. It is for data that is searched or read row by row rather than aggregated: note text and embeddings, documents, images, audio, attachments.
 
 ```sql
-CREATE SPACE notes WITH KIND = 'analytical', FORMAT = 'lance', STORAGE = 'disk';
--- FORMAT defaults to 'iceberg' for analytical Spaces
+CREATE SPACE notes WITH FORMAT = 'lance';     -- FORMAT defaults to 'iceberg' for analytical Spaces
+CREATE TABLE notes.items (id BIGINT, body VARCHAR, embedding FLOAT[768]);
+INSERT INTO notes.items ...;                   -- also UPDATE, DELETE, MERGE; each statement is a version
+CREATE INDEX emb ON notes.items USING IVF_PQ (embedding) WITH (num_partitions = 64, metric_type = 'cosine');
+CREATE INDEX body ON notes.items USING INVERTED (body);
+SELECT id, _distance FROM lance_vector_search(notes.items, 'embedding', [...]::FLOAT[768], k => 10);
+SELECT id, _score FROM lance_fts(notes.items, 'body', 'apple', k => 10);
+SELECT id, _hybrid_score FROM lance_hybrid_search(notes.items, 'embedding', [...]::FLOAT[768], 'body', 'apple', k => 10);
 ```
 
 | | Iceberg + Parquet | Lance |
@@ -422,16 +437,15 @@ CREATE SPACE notes WITH KIND = 'analytical', FORMAT = 'lance', STORAGE = 'disk';
 
 Rules:
 
-- **DuckDB does the work.** Reads, writes, index builds and searches (`lance_vector_search`, `lance_fts`, `lance_hybrid_search`) go through DuckDB's `lance` extension. Oikome only records versions (principle 1).
-- **Versions play the role of snapshots.** A federated query pins one version per Lance Space (§5.4); P2P sync ships versions (§9); single writer as for any Location (§3.2).
-- **Indexes travel with the data.** A subscribing node can search a Lance Space without rebuilding its index (contrast §8).
+- **DuckDB does the work.** The Location (`.oikome/lance/<location>/`, one `<table>.lance` per table) is attached to DuckDB as a catalog named after the Space, so `<space>.<table>` is read and written directly. Reads, writes, index builds and searches go through DuckDB's `lance` extension (core extension of DuckDB 1.5.6, built on lance 12). Oikome only rewrites what names a dataset: an index statement's table and a search function's first argument become the dataset path.
+- **Search is for the node's owner.** A search function reads the dataset itself, past column grants and row policies, so a peer cannot call it over query shipping (it still queries the table's columns under its grants). A peer that may read a table in full subscribes to it and searches the copy. A search runs in a query over one Space.
+- **Versions.** Every statement commits one Lance version. Reads see the latest version (§5.4). Subscription ships exactly one version (§9): Oikome reads that version's manifest with `lance-table` 12 (the extension cannot list a version's files) and ships the manifest, data, deletion and index files it references, so rows deleted before that version never leave the node.
+- **Indexes travel with the data.** A subscriber searches its copy with the owner's indexes and never builds one.
+- **Single writer** as for any Location (§3.2); a second Space bound `ACCESS = 'readonly'` reads it and refuses writes.
 - **Cloud drives:** the same rules as Iceberg Locations (§7.5).
 - **Not in the browser.** The `lance` extension is published for linux (amd64, arm64), macOS arm64 and windows amd64, not WebAssembly; browser nodes reach Lance Spaces through a Full Node (§10).
 
-Open:
-- The pinned DuckDB (`duckdb` =1.10505.0) must be able to load the `lance` extension.
-- Pinning a version and listing a version's files for sync: if the extension cannot read a given version, use the `lance` crate (Apache-2.0; 14.0.2 depends on Arrow 58 and DataFusion 54, the versions pinned in §13.1) for that part. It then joins the crates that must be upgraded together.
-- Whether `PUBLISH` (§7.3) can target a Lance Space, e.g. to publish notes together with their embeddings.
+Not done yet: reading a pinned version (waits for the extension), `PUBLISH` (§7.3) into a Lance Space, peers searching over query shipping, and a search spanning several Spaces.
 
 ---
 
@@ -439,12 +453,14 @@ Open:
 
 | Modality | DuckDB (analytical) | SQLite (transactional) | Oikome responsibility |
 |----------|---------------------|------------------------|------------------------|
-| VECTOR | Lance Location (§7.6): `lance_vector_search`, index stored in the dataset | `sqlite-vec` | `Mode` registry entry; capability check; pass SQL through |
+| VECTOR | Lance Location (§7.6): `lance_vector_search`, index stored in the dataset | `sqlite-vec` | Capability check; route to the one engine that runs it |
 | FTS | Lance Location: `lance_fts`, `lance_hybrid_search` (vector + text) | FTS5 | same |
 | GRAPH | DuckPGQ (SQL/PGQ `MATCH`) | — | same; Cypher is **dropped** |
 | BLOB | Lance Location for files kept in the data center (images, audio, attachments); CID columns + gateway dereference for external content | CID columns + gateway dereference | CID: unchanged from v1 |
 
-Indexes inside a Lance dataset are part of its versions and **travel with it**, so a subscribing node searches without rebuilding. Indexes built by other extensions are engine-local and **not synchronized**; a subscribing node rebuilds them. The `Mode` enum survives only as a declaration of which extensions a Space expects, used for capability checks at planning time.
+Indexes inside a Lance dataset are part of its versions and **travel with it**, so a subscribing node searches without rebuilding. Indexes built by other extensions are engine-local and **not synchronized**; a subscribing node rebuilds them.
+
+A Space does not declare the extensions it needs. They follow from its format and from the statement: a Lance Location needs `lance` (`Capabilities::READ_LANCE`), a search function needs it on the Space's engine. The check happens before the statement runs; a node without the extension answers with how to install it.
 
 ---
 
@@ -453,7 +469,7 @@ Indexes inside a Lance dataset are part of its versions and **travel with it**, 
 Unchanged in intent from v1 §8: DID (Ed25519), UCAN (issue/verify/revoke/CRL), peer state machine, libp2p discovery, Arrow Flight RPC. Two clarifications for v3:
 
 - Arrow Flight `DoGet` carries **SQL in the receiver's semantic namespace**; the receiver runs it through its own semantic layer and engines. A node never executes SQL it did not rewrite itself.
-- Snapshot sync exchanges only `IcebergParquet` and `Lance` Locations. SQLite files never leave a node.
+- Snapshot sync exchanges only `IcebergParquet` and `Lance` Locations. SQLite files never leave a node. For a Lance table, `oikome.snapshot` lists one version's files with their path in the dataset; the subscriber checks each path (only `data/`, `_versions/`, `_deletions/`, `_indices/<uuid>/`, plain names), downloads the version's manifest last so a reader sees the old version or the whole new one, and keeps the files of the current and previous version.
 
 The peer protocol over Arrow Flight (`oikome-network::protocol`). Every call carries a UCAN and a request signed for the receiving node over the call's method, payload and UCAN; each signed request is accepted once.
 
@@ -665,7 +681,7 @@ crates/
 
 ### 13.1 Dependency Changes
 
-The four Arrow-line crates must move together: DataFusion 55 and `datafusion-federation` ≥ 0.5.6 require Arrow 59, which DuckDB 1.10505 and Iceberg 0.10 do not support yet.
+The Arrow-line crates must move together: DataFusion 55 and `datafusion-federation` ≥ 0.5.6 require Arrow 59, which DuckDB 1.10506 and Iceberg 0.10 do not support yet. `lance-table` follows the lance release inside DuckDB's `lance` extension, so it moves with `duckdb`.
 
 | Action | Crate | Version | License |
 |--------|-------|---------|---------|
@@ -674,7 +690,8 @@ The four Arrow-line crates must move together: DataFusion 55 and `datafusion-fed
 | Upgrade | `iceberg` | 0.9 → **0.10.1** | Apache-2.0 |
 | Upgrade | `sqlparser` | 0.59 → **0.62** (same as DataFusion 54) | Apache-2.0 |
 | Add | `datafusion-federation` | **=0.5.5** (`sql` feature) | Apache-2.0 |
-| Add | `duckdb` | **=1.10505.0** (`bundled`, `parquet`, `appender-arrow`) | MIT |
+| Add | `duckdb` | **=1.10506.1** (DuckDB 1.5.6, prebuilt `libduckdb`) | MIT |
+| Add | `lance-table`, `lance-io` | **=12.0.0** (Lance manifests only; `protoc` built from source; no cloud stores) | Apache-2.0 |
 | Add | `rusqlite` | **0.40** (`bundled`, `column_decltype`) | MIT |
 | Remove | `datafusion-datasource/-common/-execution/-physical-plan` direct deps, `dashmap`, `memmap2` | — | — |
 
@@ -700,7 +717,7 @@ Roughly 1,100 of the current ~4,300 lines are engine-bridge code that goes away;
 | **3.0-D Publish** ✅ | `PUBLISH SPACE` → `orders_published` analytical read-only Space; scheduled publisher | Publish → query via DuckDB matches SQLite source |
 | **3.1 Network** ✅ | DID/UCAN, Arrow Flight remote Spaces (3.1a ✅), snapshot subscription (3.1b ✅), libp2p discovery and TLS (3.1c ✅), two Docker nodes plus an mDNS-only node, run in CI (3.1d ✅) | Two Docker nodes: UCAN-gated federated query; revocation cuts access |
 | **3.2 Browser** ✅ | WASM core + `HostEngine` on duckdb-wasm (3.2a ✅); federated queries via a Full Node over WebRTC (3.2b ✅); browser SQLite later | Browser node runs a local query and a federated query via a Full Node |
-| **3.3 Multimodal** | Lance Locations through DuckDB's `lance` extension (vector, full-text, large objects; version pinning and sync); DuckPGQ; FTS5/`sqlite-vec`; `Mode` capability checks | Vector + FTS query on a Lance Space and on a transactional Space; a subscribed Lance Space is searchable without rebuilding its index |
+| **3.3 Multimodal** | Lance Locations through DuckDB's `lance` extension: vector, full-text and hybrid search, indexes, version sync (3.3a ✅); FTS5/`sqlite-vec` on transactional Spaces (3.3b); DuckPGQ (3.3c); capability checks | Vector + FTS query on a Lance Space and on a transactional Space; a subscribed Lance Space is searchable without rebuilding its index |
 | **3.4 Cloud drives** | opendal drive services behind feature flags; one writing node per drive Location; newest-complete-snapshot reads; bounded local cache; client-side encryption; transactional Spaces rejected on drive Locations | An analytical Space on a WebDAV Location is written by one node and read by another; a transactional Space on a drive Location is rejected at DDL; files on the drive cannot be read without the key |
 | **3.5 Connectors** | `Connector` contract; upsert and cursor in one SQLite transaction; scheduled and on-demand pulls; credentials from the OS keychain; file import and flomo connectors | flomo memos land in `flomo.memos`; a second pull touches only changed memos; an edited memo is updated, not duplicated; a failed pull leaves data and cursor unchanged |
 | **3.6 Compute sharing** | `compute/<runtime>` UCAN abilities with limits; task routing over Arrow Flight; host-registered runtimes; per-peer quotas | Node B runs a task for node A within its quota; a task over its limits is refused; revoking the UCAN drops A's queued tasks; A's compute grant gives no access to B's Spaces, and a data grant does not let A run tasks |
@@ -728,7 +745,10 @@ No phase skipping (AGENT.md §4.1).
 | Peers overuse a node's compute | Deny-by-default, per-peer quotas, UCAN limits and expiry |
 | DataFusion 54 spawns Tokio tasks in operators the browser coordinator has not met yet | `MergePartitionsExec` covers partition merges; the native single-task test runs joins, unions, aggregates and limits without a runtime; a new plan shape gets a test before it is relied on, and the upstream fix lands with DataFusion 55 / 56 |
 | A browser can reach a Full Node only at a directly routable UDP address | Same network or a public address for now; ICE is already in the connection, so STUN / TURN can be added without changing records or requests |
-| DuckDB's `lance` extension must load on the pinned DuckDB, and is not published for WebAssembly | Checked at the start of 3.3; the format is chosen per Space, so a node without the extension keeps its Iceberg Spaces; browser nodes go through a Full Node; fallback is the `lance` crate (Apache-2.0, on Arrow 58 / DataFusion 54) |
+| DuckDB's `lance` extension cannot read a given version or list a version's files, and is not published for WebAssembly | Lance reads see the latest version (§5.4); `lance-table`, at the extension's lance version, lists a version's files for subscription; browser nodes go through a Full Node |
+| The extension and `lance-table` disagree about a dataset after one of them is upgraded | Both pinned to the same lance release (12, DuckDB 1.5.6) and upgraded together; the subscription test copies a version listed by `lance-table` and searches it with the extension |
+| The extension caches each dataset per DuckDB connection, so a long-lived connection reads a stale version | Every statement runs on a fresh connection; a test reads through a second DuckDB after writes by the first |
+| `lance-io` uses `object_store` 0.14, DataFusion 54 uses 0.13 | Two copies, native nodes only; they share nothing at run time |
 | Fewer external tools read Lance than Parquet / Iceberg | Lance only for data that is searched; tables that are aggregated stay Iceberg + Parquet |
 
 ---
@@ -763,6 +783,11 @@ No phase skipping (AGENT.md §4.1).
 | 2026-11-01 | WebRTC endpoint on str0m with its pure-Rust crypto; WebRTC-direct (sessions named by the browser's ICE fragment, SDP answer built by the browser); the server does not verify the browser's DTLS certificate | No C crypto in the server; no signaling service; the browser is authenticated by its signed requests, exactly as a native peer, and the spike showed browsers reject a wrong pinned fingerprint at the handshake |
 | 2026-11-01 | Browser requests are envelopes with the Flight call's fields, served by `OikomeFlightService::serve_envelope` | One authentication, authorization and semantic layer for both transports; replies carry the whole result as one Arrow IPC message |
 | 2026-11-01 | The browser coordinator runs in one task: one target partition, `MergePartitionsExec` instead of `CoalescePartitionsExec`; chrono `wasmbind` | DataFusion 54 spawns Tokio tasks to merge partitions and reads the clock through `std`, both of which panic in the browser; merging by polling keeps remote partitions concurrent |
+| 2026-11-01 | DuckDB 1.5.5 → 1.5.6 | DuckPGQ has no 1.5.5 build, and 1.5.6's `lance` extension is built on lance 12 with DataFusion 54, the versions Oikome uses |
+| 2026-11-01 | Lance Spaces read the latest version; subscriptions ship one version, listed with `lance-table` | The extension cannot read a given version or list its files; shipping exactly one version keeps deleted rows on the owner and lets indexes travel |
+| 2026-11-01 | Search functions only for the owner (and on subscribed copies), within one Space; peers subscribe to search | A search reads the dataset past column grants and row policies; subscription copies only tables the peer may read in full |
+| 2026-11-01 | No `MODES` declaration on Spaces: required extensions follow from the format and the statement, checked against `Capabilities` | A declaration could drift from what the Space actually holds |
+| 2026-11-01 | DuckDB extensions are fetched only by `oikome extensions install` (and in the Docker image build), never by a query | A query never downloads code; the node's extension directory is explicit |
 | 2026-10-30 | The 3.1 exit run is three Docker nodes on GitHub Actions (`docker-e2e`), one of them found only by mDNS | Development machines may have no container runtime; CI runs it on every push, and the Docker bridge network gives mDNS the multicast a firewalled laptop may block |
 | 2026-10-30 | VFS `materialize()` moves from 3.1 to 3.4 | Subscription copies live on local disk; the VFS is first needed for cloud drives |
 | 2026-10-30 | Lance as a third Location format for vector, full-text and large-object data; it replaces DuckDB `vss` / `fts` for analytical Spaces | Lance indexes live in the dataset and sync with its versions, while extension indexes must be rebuilt on every subscriber; Lance versions are immutable files plus a manifest, which fits principle 4; Iceberg + Parquet stays for tables that are scanned and aggregated |

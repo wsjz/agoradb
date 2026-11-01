@@ -18,6 +18,7 @@
 
 pub mod acl;
 pub mod catalog;
+pub mod lance;
 pub mod peer;
 pub mod registry;
 pub mod replace;

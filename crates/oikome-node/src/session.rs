@@ -20,18 +20,19 @@ use std::sync::{Arc, Mutex, RwLock};
 use arrow_schema::SchemaRef;
 use futures::TryStreamExt;
 use oikome_catalog::{LocationFormat, OikomeCatalog, Space};
-use oikome_core::{EngineKind, RemoteMode, SpaceKind};
-use oikome_engine::{QualifiedName, QueryEngine, RecordBatchStream, TxHandle};
+use oikome_core::{AccessMode, EngineKind, RemoteMode, SpaceKind};
+use oikome_engine::{Capabilities, QualifiedName, QueryEngine, RecordBatchStream, TxHandle};
 use oikome_federation::{BoundSpace, BoundTable, Coordinator};
 use oikome_semantic::{
-    apply_access_control, classify, collect_spaces, inline_views, parse_single, DmlKind,
-    OikomeStatement, StatementClass, TclKind,
+    apply_access_control, bind_search_tables, classify, collect_spaces, inline_views, parse_single,
+    search_tables, DmlKind, OikomeStatement, StatementClass, TclKind,
 };
 use sqlparser::ast::{ObjectType, Statement};
 
 use crate::acl::{CatalogAccess, CatalogViews};
 use crate::bind::bind_space;
 use crate::error::SessionError;
+use crate::lance::{dataset_path, index_sql, lance_root};
 use crate::registry::EngineRegistry;
 use crate::result::QueryResult;
 use crate::{ddl, dml};
@@ -79,6 +80,8 @@ pub(crate) struct Routed {
     /// The SQL text to hand to an engine: the user's text when qualification
     /// changed nothing, otherwise the re-rendered, fully qualified statement.
     text: String,
+    /// Whether the statement calls a search function (§7.6).
+    searches: bool,
 }
 
 impl OikomeSession {
@@ -165,10 +168,12 @@ impl OikomeSession {
             OikomeStatement::DropSpace(name) => {
                 self.deny_principal("DROP SPACE")?;
                 let space = self.space(&name)?;
-                let replica = self
-                    .catalog
-                    .get_location(&space.location)
-                    .is_ok_and(|l| matches!(l.format, LocationFormat::Replica { .. }));
+                let format = self.catalog.get_location(&space.location).map(|l| l.format);
+                let replica = matches!(format, Ok(LocationFormat::Replica { .. }));
+                if matches!(format, Ok(LocationFormat::Lance { .. })) || replica {
+                    // A Lance Space (or a copy of one) is attached whole.
+                    self.engines.duckdb()?.detach_space(&name).await?;
+                }
                 self.catalog.drop_space(&name)?;
                 if self.default_space().as_deref() == Some(name.as_str()) {
                     self.set_default_space(None);
@@ -203,6 +208,7 @@ impl OikomeSession {
                         spaces,
                     } => self.run_dml(&space, kind, &spaces, routed).await,
                     StatementClass::Query { spaces } => {
+                        self.check_search(&routed, &spaces).await?;
                         let (schema, stream) = self.run_query(&spaces, &routed.text).await?;
                         let batches = stream.try_collect().await?;
                         Ok(QueryResult::Batches { schema, batches })
@@ -223,7 +229,10 @@ impl OikomeSession {
             OikomeStatement::Sql(stmt) => {
                 let routed = self.route(*stmt, sql)?;
                 match &routed.class {
-                    StatementClass::Query { spaces } => self.run_query(spaces, &routed.text).await,
+                    StatementClass::Query { spaces } => {
+                        self.check_search(&routed, spaces).await?;
+                        self.run_query(spaces, &routed.text).await
+                    }
                     _ => Err(SessionError::Unsupported(
                         "sql_stream only accepts queries".to_string(),
                     )),
@@ -242,10 +251,19 @@ impl OikomeSession {
         let before = stmt.to_string();
         let default = self.default_space();
         let mut class = classify(&mut stmt, default.as_deref())?;
+        let searches = !search_tables(&stmt).is_empty();
         if let Some(principal) = &self.principal {
             if !matches!(class, StatementClass::Query { .. }) {
                 return Err(SessionError::PermissionDenied(format!(
                     "principal '{principal}' is read-only"
+                )));
+            }
+            if searches {
+                // A search reads the dataset itself, past column grants and
+                // row policies.
+                return Err(SessionError::PermissionDenied(format!(
+                    "principal '{principal}' cannot call search functions; \
+                     subscribe to the space to search a copy of it"
                 )));
             }
             apply_access_control(&mut stmt, principal, &CatalogAccess(&self.catalog))?;
@@ -260,13 +278,75 @@ impl OikomeSession {
             inline_views(&mut stmt, &CatalogViews(&self.catalog))?;
             *spaces = collect_spaces(&stmt);
         }
+        if searches {
+            self.bind_search_calls(&mut stmt, &class)?;
+        }
         let after = stmt.to_string();
         let text = if before == after {
             original.trim().trim_end_matches(';').to_string()
         } else {
             after
         };
-        Ok(Routed { class, stmt, text })
+        Ok(Routed {
+            class,
+            stmt,
+            text,
+            searches,
+        })
+    }
+
+    /// Replace each search call's table with its dataset path. A search runs
+    /// in a query over one Lance Space (or a copy of one), on DuckDB.
+    fn bind_search_calls(
+        &self,
+        stmt: &mut Statement,
+        class: &StatementClass,
+    ) -> Result<(), SessionError> {
+        let StatementClass::Query { spaces } = class else {
+            return Err(SessionError::Unsupported(
+                "search functions outside a query".to_string(),
+            ));
+        };
+        if spaces.len() != 1 {
+            return Err(SessionError::Unsupported(format!(
+                "a search across several spaces ({}); search one space per query",
+                spaces.iter().cloned().collect::<Vec<_>>().join(", ")
+            )));
+        }
+        bind_search_tables(stmt, |space, table| {
+            let space = self.space(space)?;
+            let root = lance_root(&self.catalog, &space)?.ok_or_else(|| {
+                SessionError::Unsupported(format!(
+                    "search functions read Lance spaces; '{}' is not stored as Lance",
+                    space.name
+                ))
+            })?;
+            Ok(dataset_path(&root, &space.name, table)?
+                .to_string_lossy()
+                .into_owned())
+        })
+    }
+
+    /// A search needs the `lance` extension on the Space's engine; binding
+    /// the Space loads it, or fails with how to install it.
+    async fn check_search(
+        &self,
+        routed: &Routed,
+        spaces: &BTreeSet<String>,
+    ) -> Result<(), SessionError> {
+        if !routed.searches {
+            return Ok(());
+        }
+        for name in spaces {
+            let engine = self.bind(&self.space(name)?).await?;
+            if !engine.capabilities().contains(Capabilities::READ_LANCE) {
+                return Err(SessionError::Unsupported(format!(
+                    "search functions need the lance extension, which engine {} lacks",
+                    engine.kind()
+                )));
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn space(&self, name: &str) -> Result<Space, SessionError> {
@@ -290,8 +370,12 @@ impl OikomeSession {
         ))
     }
 
-    /// Published Spaces are written only by `PUBLISH SPACE <source>`.
+    /// Published Spaces are written only by `PUBLISH SPACE <source>`, and a
+    /// read-only binding of a Location never writes to it.
     fn require_writable(&self, space: &Space) -> Result<(), SessionError> {
+        if space.access == AccessMode::ReadOnly {
+            return Err(SessionError::ReadOnlySpace(space.name.clone()));
+        }
         match &space.published_from {
             Some(origin) => Err(SessionError::PublishedSpace {
                 space: space.name.clone(),
@@ -324,18 +408,25 @@ impl OikomeSession {
         spaces: &BTreeSet<String>,
         text: &str,
     ) -> Result<(SchemaRef, RecordBatchStream), SessionError> {
-        let mut remote = false;
+        let (mut remote, mut shipped) = (false, false);
         for name in spaces {
-            remote |= self.space(name)?.kind == SpaceKind::Remote;
+            let space = self.space(name)?;
+            remote |= space.kind == SpaceKind::Remote;
+            // A subscribed copy is local data on DuckDB; only queries on
+            // a Space queried over Flight are shipped to its owner.
+            shipped |= space.kind == SpaceKind::Remote && space.engine == EngineKind::Flight;
         }
         if remote {
-            // A node never forwards a peer's query to a third node: the
-            // capability it was presented covers this node's Spaces only.
+            // A node never forwards a peer's query to a third node, nor
+            // serves another node's data onwards: the capability it was
+            // presented covers this node's Spaces only.
             if let Some(p) = &self.principal {
                 return Err(SessionError::PermissionDenied(format!(
                     "principal '{p}' cannot query remote spaces through this node"
                 )));
             }
+        }
+        if shipped {
             // Always federate, so the SQL each owner receives names its
             // tables by their names on the owner.
             let coordinator = self.federate(spaces).await?;
@@ -362,13 +453,20 @@ impl OikomeSession {
         let mut bound = Vec::with_capacity(spaces.len());
         for name in spaces {
             let space = self.space(name)?;
+            let iceberg = self
+                .catalog
+                .get_location(&space.location)
+                .is_ok_and(|l| matches!(l.format, LocationFormat::IcebergParquet { .. }));
             let (engine, pins) = match space.kind {
-                SpaceKind::Analytical => {
+                // Iceberg tables are pinned to their current snapshots; Lance
+                // and SQLite tables are read at their latest state (§5.4).
+                SpaceKind::Analytical if iceberg => {
                     let pins = self.catalog.current_snapshot_ids(&space).await?;
                     let engine =
                         bind_space(&self.catalog, &self.engines, &space, Some(&pins)).await?;
                     (engine, pins)
                 }
+                SpaceKind::Analytical => (self.bind(&space).await?, Default::default()),
                 SpaceKind::Transactional => (self.bind(&space).await?, Default::default()),
                 SpaceKind::Remote => {
                     if self.principal.is_some() {
@@ -431,7 +529,27 @@ impl OikomeSession {
         routed: Routed,
     ) -> Result<QueryResult, SessionError> {
         let space = self.space(space_name)?;
+        if space.kind == SpaceKind::Remote {
+            return Err(Self::remote_is_read_only(&space));
+        }
         self.require_writable(&space)?;
+        let index = matches!(
+            routed.stmt,
+            Statement::CreateIndex(_)
+                | Statement::Drop {
+                    object_type: ObjectType::Index,
+                    ..
+                }
+        );
+        if let Some(root) = lance_root(&self.catalog, &space)? {
+            return self.run_lance_ddl(&space, &root, index, routed).await;
+        }
+        if index {
+            return Err(SessionError::Unsupported(format!(
+                "indexes on {} space '{}'; indexes are for Lance spaces (FORMAT = 'lance')",
+                space.kind, space.name
+            )));
+        }
         match space.kind {
             SpaceKind::Remote => return Err(Self::remote_is_read_only(&space)),
             SpaceKind::Transactional => {
@@ -478,9 +596,23 @@ impl OikomeSession {
         routed: Routed,
     ) -> Result<QueryResult, SessionError> {
         let space = self.space(space_name)?;
+        if space.kind == SpaceKind::Remote {
+            return Err(Self::remote_is_read_only(&space));
+        }
         self.require_writable(&space)?;
+        if lance_root(&self.catalog, &space)?.is_some() {
+            // Each statement commits one Lance version.
+            self.bind_duckdb_sources(space_name, spaces).await?;
+            let engine = self.bind(&space).await?;
+            return Ok(QueryResult::RowsAffected(
+                engine.execute(&routed.text, &[]).await?,
+            ));
+        }
         match space.kind {
             SpaceKind::Remote => Err(Self::remote_is_read_only(&space)),
+            SpaceKind::Transactional if kind == DmlKind::Merge => Err(SessionError::Unsupported(
+                format!("MERGE on transactional space '{space_name}'"),
+            )),
             SpaceKind::Transactional => {
                 if spaces.iter().any(|s| s != space_name) {
                     return Err(SessionError::MultiSpaceNotSupported(
@@ -523,6 +655,63 @@ impl OikomeSession {
                 ))),
             },
         }
+    }
+
+    /// DDL on a Lance Space: tables through DuckDB's attached namespace,
+    /// indexes on the dataset they cover.
+    async fn run_lance_ddl(
+        &self,
+        space: &Space,
+        root: &std::path::Path,
+        index: bool,
+        routed: Routed,
+    ) -> Result<QueryResult, SessionError> {
+        let engine = self.bind(space).await?;
+        if index {
+            let table = match &routed.stmt {
+                Statement::CreateIndex(create) => ddl::table_name(&create.table_name),
+                Statement::Drop {
+                    table: Some(table), ..
+                } => ddl::table_name(table),
+                _ => unreachable!("an index statement names its table"),
+            };
+            let sql = index_sql(&routed.stmt, &dataset_path(root, &space.name, &table)?)?;
+            engine.execute(&sql, &[]).await?;
+            return Ok(QueryResult::Empty);
+        }
+        if let Statement::CreateTable(create) = &routed.stmt {
+            let name = ddl::table_name(&create.name);
+            if self.catalog.get_view(&space.name, &name).is_some() {
+                return Err(SessionError::AlreadyExists(format!(
+                    "a view named {}.{name} already exists",
+                    space.name
+                )));
+            }
+        }
+        // CREATE TABLE ... AS SELECT may read other Spaces on DuckDB.
+        self.bind_duckdb_sources(&space.name, &collect_spaces(&routed.stmt))
+            .await?;
+        engine.execute(&routed.text, &[]).await?;
+        Ok(QueryResult::Empty)
+    }
+
+    /// Bind every Space other than `target` that a statement reads, all of
+    /// which must live on DuckDB.
+    async fn bind_duckdb_sources(
+        &self,
+        target: &str,
+        spaces: &BTreeSet<String>,
+    ) -> Result<(), SessionError> {
+        for name in spaces.iter().filter(|s| *s != target) {
+            let space = self.space(name)?;
+            if space.engine != EngineKind::DuckDb {
+                return Err(SessionError::MultiSpaceNotSupported(
+                    spaces.iter().cloned().collect(),
+                ));
+            }
+            self.bind(&space).await?;
+        }
+        Ok(())
     }
 
     async fn run_tcl(&self, kind: TclKind) -> Result<QueryResult, SessionError> {

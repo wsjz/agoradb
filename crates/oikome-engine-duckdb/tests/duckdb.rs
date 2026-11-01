@@ -315,7 +315,11 @@ async fn execute_reports_affected_rows_and_begin_is_unsupported() {
     let Err(err) = engine.query("SELECT * FROM nope.nothing_here", &[]).await else {
         panic!("querying a missing table must fail");
     };
-    assert!(matches!(err, EngineError::Sql(_)));
+    assert!(matches!(err, EngineError::TableNotFound(_)), "{err}");
+    assert!(matches!(
+        engine.query("SELEC 1", &[]).await,
+        Err(EngineError::Sql(_))
+    ));
     assert!(matches!(
         engine
             .table_schema(&QualifiedName::new("nope", "nothing_here"))

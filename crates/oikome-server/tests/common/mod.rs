@@ -44,15 +44,31 @@ pub struct Node {
 impl Node {
     /// A node that only reaches peers over TLS.
     pub fn new(seed: u8) -> Self {
-        Self::with_config(seed, false)
+        Self::with_config(seed, false, Default::default())
     }
 
     /// A node that also accepts plaintext (`http://`) peers.
     pub fn allowing_http(seed: u8) -> Self {
-        Self::with_config(seed, true)
+        Self::with_config(seed, true, Default::default())
     }
 
-    fn with_config(seed: u8, allow_http: bool) -> Self {
+    /// A node that loads DuckDB's `lance` extension, downloaded once into
+    /// the target directory.
+    pub fn with_lance(seed: u8) -> Self {
+        let extension_dir =
+            std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("duckdb-extensions");
+        Self::with_config(
+            seed,
+            false,
+            oikome_engine_duckdb::DuckDbConfig {
+                extension_dir: Some(extension_dir),
+                allow_extension_install: true,
+                ..Default::default()
+            },
+        )
+    }
+
+    fn with_config(seed: u8, allow_http: bool, duckdb: oikome_engine_duckdb::DuckDbConfig) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let catalog = Arc::new(
             OikomeCatalog::open(FileIO::new_with_fs(), dir.path().to_str().unwrap()).unwrap(),
@@ -64,6 +80,7 @@ impl Node {
                 NodeConfig {
                     identity: Some(identity.clone()),
                     allow_http,
+                    duckdb,
                     ..Default::default()
                 },
             )

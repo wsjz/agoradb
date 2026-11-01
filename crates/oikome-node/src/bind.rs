@@ -19,11 +19,11 @@ use std::sync::Arc;
 
 use oikome_catalog::{LocationFormat, OikomeCatalog, Space};
 use oikome_core::{EngineKind, SpaceKind};
-use oikome_engine::{QualifiedName, QueryEngine, TableSource};
+use oikome_engine::{QualifiedName, QueryEngine, SpaceSource, TableSource};
 
 use crate::error::SessionError;
 use crate::registry::EngineRegistry;
-use crate::subscribe::replica_tables;
+use crate::subscribe::{replica_lance_root, replica_tables};
 
 /// Snapshot to use per table when binding an analytical Space; `None`
 /// entries (or a missing table) mean "current".
@@ -48,6 +48,18 @@ pub async fn bind_space(
 
     let location = catalog.get_location(&space.location)?;
     match &location.format {
+        LocationFormat::Lance { .. } => {
+            let root = catalog.lance_root(&location)?;
+            engine
+                .attach_space(&space.name, SpaceSource::LanceNamespace { root })
+                .await?;
+        }
+        LocationFormat::Replica { .. } if replica_lance_root(catalog, &location)?.is_some() => {
+            let root = replica_lance_root(catalog, &location)?.unwrap_or_default();
+            engine
+                .attach_space(&space.name, SpaceSource::LanceNamespace { root })
+                .await?;
+        }
         LocationFormat::Replica { .. } => {
             let tables = replica_tables(catalog, &location)?;
             for attached in engine.table_names(&space.name).await? {

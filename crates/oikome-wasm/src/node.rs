@@ -211,9 +211,11 @@ impl BrowserNode {
             || request.location.is_some()
             || request.access.is_some()
             || request.storage.is_some()
+            || request.format.is_some()
         {
             return Err(NodeError::Unsupported(
-                "ENGINE, LOCATION, ACCESS and STORAGE (every browser space is a duckdb-wasm schema)"
+                "ENGINE, LOCATION, ACCESS, STORAGE and FORMAT (every browser space is a duckdb-wasm \
+                 schema; Lance spaces are reached through a Full Node)"
                     .to_string(),
             ));
         }
@@ -467,6 +469,7 @@ mod tests {
             "CREATE SPACE shop WITH KIND = 'transactional'",
             "CREATE SPACE pub WITH TOKEN = 'a.b.c'",
             "CREATE SPACE x WITH STORAGE = 'disk'",
+            "CREATE SPACE x WITH FORMAT = 'lance'",
             "ISSUE UCAN ON SPACE notes TO 'did:key:z6MktwupdmLXVVqTzCw4i46r4uGyosGXRnR3XjN4Zq7oMMsw'",
             "GRANT SELECT ON notes.items TO alice",
             "BEGIN",

@@ -18,7 +18,14 @@
 //! oikome [--root DIR] identity          print this node's DID
 //! oikome [--root DIR] sql "<SQL>"       run statements as the node owner
 //! oikome [--root DIR] serve             serve this node's Spaces to peers
+//! oikome [--root DIR] extensions install
+//!                                       fetch the DuckDB extensions Oikome uses
 //! ```
+//!
+//! DuckDB extensions (`lance` for Lance Spaces, `sqlite` for analytical
+//! Spaces over SQLite files) are loaded from `<root>/.oikome/extensions`, or
+//! `--extension-dir` / `OIKOME_EXTENSION_DIR`. Queries never download them;
+//! `extensions install` does, signed by DuckDB.
 //!
 //! The node key is read from `OIKOME_NODE_KEY` (base64url seed) when set,
 //! otherwise from `<root>/.oikome/identity/node_ed25519`, created on first use.
@@ -35,6 +42,7 @@ use clap::{Parser, Subcommand};
 use iceberg::io::FileIO;
 use oikome_catalog::OikomeCatalog;
 use oikome_discovery::{Discovery, DiscoveryConfig, EndpointResponse};
+use oikome_engine_duckdb::{DuckDbConfig, DuckDbEngine, Extension};
 use oikome_node::{EngineRegistry, NodeConfig, OikomeSession, QueryResult, SessionConfig};
 use oikome_server::{serve, serve_webrtc, DtlsIdentity, OikomeFlightService};
 use tokio::net::{TcpListener, UdpSocket};
@@ -65,12 +73,28 @@ struct Cli {
     #[arg(long, env = "OIKOME_ALLOW_HTTP", global = true)]
     allow_http: bool,
 
+    /// Directory of DuckDB extensions; defaults to `<root>/.oikome/extensions`.
+    #[arg(long, env = "OIKOME_EXTENSION_DIR", global = true)]
+    extension_dir: Option<PathBuf>,
+
     #[command(subcommand)]
     command: Command,
 }
 
 #[derive(Subcommand)]
+enum ExtensionsCommand {
+    /// Download the DuckDB extensions Oikome loads (`sqlite`, `lance`) for
+    /// the linked DuckDB version.
+    Install,
+}
+
+#[derive(Subcommand)]
 enum Command {
+    /// Manage DuckDB extensions.
+    Extensions {
+        #[command(subcommand)]
+        command: ExtensionsCommand,
+    },
     /// Print this node's DID.
     Identity,
     /// Run SQL statements (separated by `;`) as the node owner.
@@ -114,20 +138,34 @@ enum Command {
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
+/// The DuckDB configuration of the node at `root`.
+fn duckdb_config(root: &Path, extension_dir: Option<&Path>) -> DuckDbConfig {
+    DuckDbConfig {
+        extension_dir: Some(
+            extension_dir
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| root.join(".oikome").join("extensions")),
+        ),
+        ..Default::default()
+    }
+}
+
 fn open_node(
     root: &Path,
     allow_http: bool,
+    extension_dir: Option<&Path>,
 ) -> Result<(Arc<OikomeCatalog>, Arc<EngineRegistry>), BoxError> {
     std::fs::create_dir_all(root)?;
     let root = root.canonicalize()?;
+    let config = NodeConfig {
+        allow_http,
+        duckdb: duckdb_config(&root, extension_dir),
+        ..Default::default()
+    };
     let root = root
         .to_str()
         .ok_or("the data directory path must be valid UTF-8")?;
     let catalog = Arc::new(OikomeCatalog::open(FileIO::new_with_fs(), root)?);
-    let config = NodeConfig {
-        allow_http,
-        ..Default::default()
-    };
     let engines = Arc::new(EngineRegistry::new(catalog.clone(), config)?);
     Ok((catalog, engines))
 }
@@ -160,8 +198,20 @@ fn print_result(result: &QueryResult, raw: bool) -> Result<(), BoxError> {
 
 async fn run(cli: Cli) -> Result<(), BoxError> {
     match cli.command {
+        Command::Extensions {
+            command: ExtensionsCommand::Install,
+        } => {
+            std::fs::create_dir_all(&cli.root)?;
+            let root = cli.root.canonicalize()?;
+            let engine =
+                DuckDbEngine::open_in_memory(duckdb_config(&root, cli.extension_dir.as_deref()))?;
+            for ext in Extension::INSTALLABLE {
+                let version = engine.install_extension(ext).await?;
+                println!("{}\t{version}", ext.name());
+            }
+        }
         Command::Identity => {
-            let (_, engines) = open_node(&cli.root, cli.allow_http)?;
+            let (_, engines) = open_node(&cli.root, cli.allow_http, cli.extension_dir.as_deref())?;
             println!("{}", engines.identity()?.did());
         }
         Command::Sql { sql, space, raw } => {
@@ -172,7 +222,8 @@ async fn run(cli: Cli) -> Result<(), BoxError> {
             } else {
                 sql
             };
-            let (catalog, engines) = open_node(&cli.root, cli.allow_http)?;
+            let (catalog, engines) =
+                open_node(&cli.root, cli.allow_http, cli.extension_dir.as_deref())?;
             let session = OikomeSession::new(
                 catalog,
                 engines,
@@ -198,7 +249,8 @@ async fn run(cli: Cli) -> Result<(), BoxError> {
             if plaintext && !cli.allow_http {
                 return Err("--plaintext needs --allow-http".into());
             }
-            let (catalog, engines) = open_node(&cli.root, cli.allow_http)?;
+            let (catalog, engines) =
+                open_node(&cli.root, cli.allow_http, cli.extension_dir.as_deref())?;
             let catalog_dir = catalog.oikome_dir();
             let record_path = catalog.webrtc_record_path();
             let tls = if plaintext {

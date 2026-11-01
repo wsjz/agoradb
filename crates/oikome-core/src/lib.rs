@@ -23,4 +23,6 @@ pub mod space;
 
 pub use constants::*;
 pub use error::{CatalogError, CompactionError, OikomeError, Result, StorageError};
-pub use space::{AccessMode, CreateSpaceRequest, EngineKind, RemoteMode, SpaceKind, SpaceUri};
+pub use space::{
+    AccessMode, CreateSpaceRequest, EngineKind, RemoteMode, SpaceFormat, SpaceKind, SpaceUri,
+};

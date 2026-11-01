@@ -35,6 +35,9 @@ bitflags::bitflags! {
         const PUSHDOWN_JOIN = 1 << 6;
         /// Aggregates may be pushed down.
         const PUSHDOWN_AGG = 1 << 7;
+        /// Can attach a Lance namespace ([`SpaceSource::LanceNamespace`](crate::SpaceSource::LanceNamespace))
+        /// and run Lance vector and full-text search.
+        const READ_LANCE = 1 << 8;
     }
 }
 

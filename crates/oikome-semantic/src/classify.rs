@@ -23,10 +23,11 @@ use std::ops::ControlFlow;
 
 use sqlparser::ast::{
     visit_relations_mut, GrantObjects, Ident, ObjectName, ObjectNamePart, ObjectType, Query,
-    Statement, TableObject, Visit, Visitor,
+    Statement, TableFactor, TableObject, Visit, Visitor,
 };
 
 use crate::error::SemanticError;
+use crate::search::{is_search_function, qualify_search_calls, search_tables};
 
 /// Which DML verb a statement is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,6 +35,7 @@ pub enum DmlKind {
     Insert,
     Update,
     Delete,
+    Merge,
 }
 
 /// Transaction control verbs.
@@ -47,9 +49,11 @@ pub enum TclKind {
 /// How the session must route a SQL statement.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StatementClass {
-    /// `CREATE TABLE` / `DROP TABLE` in one Space.
+    /// `CREATE TABLE` / `DROP TABLE` / `ALTER TABLE` / `CREATE INDEX` /
+    /// `DROP INDEX` in one Space.
     TableDdl { space: String },
-    /// `INSERT` / `UPDATE` / `DELETE` targeting one Space (sources may span more).
+    /// `INSERT` / `UPDATE` / `DELETE` / `MERGE` targeting one Space (sources
+    /// may span more).
     Dml {
         space: String,
         kind: DmlKind,
@@ -90,10 +94,14 @@ pub(crate) fn is_cte_ref(name: &ObjectName, ctes: &HashSet<String>) -> bool {
     name.0.len() == 1 && ctes.contains(&part_value(&name.0[0]))
 }
 
-/// Spaces referenced by the (already qualified) relations of `stmt`.
+/// Spaces referenced by the (already qualified) relations and search calls
+/// of `stmt`.
 pub fn collect_spaces(stmt: &Statement) -> BTreeSet<String> {
     let ctes = cte_names(stmt);
-    let mut spaces = BTreeSet::new();
+    let mut spaces: BTreeSet<String> = search_tables(stmt)
+        .into_iter()
+        .map(|(space, _)| space)
+        .collect();
     let _ = sqlparser::ast::visit_relations(stmt, |name: &ObjectName| {
         if name.0.len() == 2 && !is_cte_ref(name, &ctes) {
             spaces.insert(part_value(&name.0[0]));
@@ -114,7 +122,9 @@ pub fn qualify_tables(
     let mut spaces = BTreeSet::new();
     let mut error: Option<SemanticError> = None;
     let _ = visit_relations_mut(stmt, |name: &mut ObjectName| {
-        if is_cte_ref(name, &ctes) {
+        // A search call's name is a function; its table argument is
+        // qualified by `qualify_search_calls`.
+        if is_cte_ref(name, &ctes) || is_search_function(name) {
             return ControlFlow::Continue(());
         }
         match qualify_name(name, default_space) {
@@ -194,7 +204,9 @@ pub fn classify(
         _ => {}
     }
 
-    let spaces = qualify_tables(stmt, default_space)?;
+    let searched = qualify_search_calls(stmt, default_space)?;
+    let mut spaces = qualify_tables(stmt, default_space)?;
+    spaces.extend(searched.into_iter().map(|(space, _)| space));
     match stmt {
         Statement::Query(_) => Ok(StatementClass::Query { spaces }),
         Statement::Explain { statement, .. } => match statement.as_ref() {
@@ -225,6 +237,17 @@ pub fn classify(
             kind: DmlKind::Delete,
             spaces,
         }),
+        Statement::Merge(merge) => {
+            let space = match &merge.table {
+                TableFactor::Table { name, .. } => object_space(name)?,
+                other => return Err(SemanticError::Unsupported(format!("MERGE INTO {other}"))),
+            };
+            Ok(StatementClass::Dml {
+                space,
+                kind: DmlKind::Merge,
+                spaces,
+            })
+        }
         // DDL object names are not "relations" for the visitor, so qualify them here.
         Statement::CreateTable(create) => Ok(StatementClass::TableDdl {
             space: qualify_name(&mut create.name, default_space)?,
@@ -246,6 +269,22 @@ pub fn classify(
         Statement::AlterTable(alter) => Ok(StatementClass::TableDdl {
             space: object_space(&alter.name)?,
         }),
+        // So is the indexed table's.
+        Statement::CreateIndex(create) => Ok(StatementClass::TableDdl {
+            space: object_space(&create.table_name)?,
+        }),
+        Statement::Drop {
+            object_type: ObjectType::Index,
+            table,
+            ..
+        } => match table {
+            Some(table) => Ok(StatementClass::TableDdl {
+                space: qualify_name(table, default_space)?,
+            }),
+            None => Err(SemanticError::Unsupported(
+                "DROP INDEX without ON <space>.<table>".to_string(),
+            )),
+        },
         Statement::CreateView(create) => {
             qualify_name(&mut create.name, default_space)?;
             Ok(StatementClass::ViewDdl)
@@ -441,10 +480,51 @@ mod tests {
     }
 
     #[test]
+    fn indexes_and_merge_name_their_space() {
+        let mut stmt =
+            sql("CREATE INDEX i ON posts USING IVF_FLAT (embedding) WITH (num_partitions = 2)");
+        assert_eq!(
+            classify(&mut stmt, Some("notes")).unwrap(),
+            StatementClass::TableDdl {
+                space: "notes".into()
+            }
+        );
+        assert_eq!(
+            stmt.to_string(),
+            "CREATE INDEX i ON notes.posts USING IVF_FLAT (embedding) WITH (num_partitions = 2)"
+        );
+        let mut stmt = sql("DROP INDEX i ON posts");
+        assert_eq!(
+            classify(&mut stmt, Some("notes")).unwrap(),
+            StatementClass::TableDdl {
+                space: "notes".into()
+            }
+        );
+        assert_eq!(stmt.to_string(), "DROP INDEX i ON notes.posts");
+        let mut stmt = sql(
+            "MERGE INTO notes.posts t USING blog.drafts s ON t.id = s.id \
+             WHEN MATCHED THEN UPDATE SET title = s.title",
+        );
+        assert_eq!(
+            classify(&mut stmt, None).unwrap(),
+            StatementClass::Dml {
+                space: "notes".into(),
+                kind: DmlKind::Merge,
+                spaces: ["blog".to_string(), "notes".to_string()].into()
+            }
+        );
+    }
+
+    #[test]
     fn unsupported_statements_are_reported() {
-        let mut stmt = sql("CREATE INDEX i ON blog.posts (id)");
+        let mut stmt = sql("CREATE SCHEMA blog");
         assert!(matches!(
             classify(&mut stmt, None),
+            Err(SemanticError::Unsupported(_))
+        ));
+        let mut stmt = sql("DROP INDEX i");
+        assert!(matches!(
+            classify(&mut stmt, Some("blog")),
             Err(SemanticError::Unsupported(_))
         ));
         let mut stmt = sql("SELECT 1");

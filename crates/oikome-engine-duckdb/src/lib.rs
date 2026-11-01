@@ -23,4 +23,4 @@
 mod engine;
 pub mod types;
 
-pub use engine::{DuckDbConfig, DuckDbEngine};
+pub use engine::{DuckDbConfig, DuckDbEngine, Extension};

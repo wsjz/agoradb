@@ -104,7 +104,25 @@ pub struct SnapshotResponse {
     pub restricted: Vec<String>,
 }
 
-/// One table pinned to one snapshot.
+/// How a table's files are laid out.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TableFormat {
+    /// Parquet data files of one Iceberg snapshot, named by hash.
+    #[default]
+    Iceberg,
+    /// One version of a Lance dataset: every file has a path in the
+    /// dataset, the version's manifest among them.
+    Lance,
+}
+
+impl TableFormat {
+    fn is_iceberg(&self) -> bool {
+        *self == TableFormat::Iceberg
+    }
+}
+
+/// One table pinned to one snapshot (a Lance version for Lance tables).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TableSnapshot {
     pub name: String,
@@ -113,6 +131,8 @@ pub struct TableSnapshot {
     /// Arrow schema, see [`encode_schema`].
     pub schema: String,
     pub files: Vec<FileEntry>,
+    #[serde(default, skip_serializing_if = "TableFormat::is_iceberg")]
+    pub format: TableFormat,
 }
 
 /// A data file of a snapshot.
@@ -121,6 +141,9 @@ pub struct FileEntry {
     /// BLAKE3 hash of the file, 64 lowercase hex digits.
     pub hash: String,
     pub size: u64,
+    /// Path inside a Lance dataset, see [`is_lance_file_path`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
 /// `oikome.fetch_file` request body.
@@ -131,6 +154,28 @@ pub struct FetchFileRequest {
     pub table: String,
     pub snapshot_id: i64,
     pub hash: String,
+}
+
+/// Whether `path` is a file of a Lance dataset as shipped to subscribers:
+/// relative, of plain components (letters, digits, `.`, `_`, `-`; no `..`),
+/// and under `data/`, `_versions/`, `_deletions/` or `_indices/<uuid>/`.
+/// Safe to join to a dataset directory once this holds.
+pub fn is_lance_file_path(path: &str) -> bool {
+    let parts: Vec<&str> = path.split('/').collect();
+    let plain = |part: &str| {
+        !part.is_empty()
+            && part != "."
+            && part != ".."
+            && part
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+    };
+    path.len() <= 512
+        && parts.iter().all(|p| plain(p))
+        && matches!(
+            parts.as_slice(),
+            ["data" | "_versions" | "_deletions", _] | ["_indices", _, _]
+        )
 }
 
 /// Whether `hash` is a BLAKE3 hash as files are named by: 64 lowercase hex
@@ -227,6 +272,32 @@ mod tests {
             assert!(!is_identifier(bad), "{bad}");
         }
         assert!(!is_identifier(&"a".repeat(MAX_IDENTIFIER_BYTES + 1)));
+    }
+
+    #[test]
+    fn lance_file_paths_stay_inside_the_dataset() {
+        for ok in [
+            "data/0101abc.lance",
+            "_versions/18446744073709551607.manifest",
+            "_deletions/0-4-1520.arrow",
+            "_indices/946532a4-b4b7-4f38-a2c5-04033ea173be/part_2_docs.lance",
+        ] {
+            assert!(is_lance_file_path(ok), "{ok}");
+        }
+        for bad in [
+            "",
+            "/etc/passwd",
+            "data/../../x",
+            "data/./x",
+            "data/a/b",
+            "_indices/x",
+            "_transactions/1.txn",
+            "data/a b",
+            "data\\x",
+            "_versions/",
+        ] {
+            assert!(!is_lance_file_path(bad), "{bad}");
+        }
     }
 
     #[test]

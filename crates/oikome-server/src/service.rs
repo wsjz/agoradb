@@ -50,6 +50,7 @@ use arrow_ipc::writer::IpcWriteOptions;
 use arrow_schema::SchemaRef;
 use futures::stream;
 use futures::{StreamExt, TryStreamExt};
+use oikome_catalog::lance::{lance_tables, lance_version, DATASET_SUFFIX};
 use oikome_catalog::{LocationFormat, OikomeCatalog, Space};
 use oikome_core::{CatalogError, SpaceKind};
 use oikome_engine::{EngineError, RecordBatchStream};
@@ -61,7 +62,7 @@ use oikome_network::protocol::webrtc::{encode_reply, Envelope, ReplyHeader};
 use oikome_network::protocol::{
     digest, encode_schema, encode_stream, is_file_hash, is_identifier, parse_schema_payload,
     schema_payload, FetchFileRequest, FileEntry, ListTablesRequest, ListTablesResponse,
-    QueryTicket, SnapshotRequest, SnapshotResponse, TableSnapshot, ACTION_FETCH_FILE,
+    QueryTicket, SnapshotRequest, SnapshotResponse, TableFormat, TableSnapshot, ACTION_FETCH_FILE,
     ACTION_LIST_TABLES, ACTION_SNAPSHOT, FILE_CHUNK_BYTES, HEADER_AUTH, HEADER_UCAN, MAX_SQL_BYTES,
     METHOD_DO_GET, METHOD_FETCH_FILE, METHOD_GET_SCHEMA, METHOD_LIST_TABLES, METHOD_SNAPSHOT,
 };
@@ -336,8 +337,10 @@ impl OikomeFlightService {
     }
 
     /// A Space a peer may subscribe to: analytical and stored as Iceberg
-    /// tables. Transactional Spaces are shared by publishing them.
-    fn subscribable(&self, name: &str) -> Result<Space, Status> {
+    /// tables or Lance datasets. Transactional Spaces are shared by
+    /// publishing them. Returns the Space and, for Lance, its datasets'
+    /// directory.
+    fn subscribable(&self, name: &str) -> Result<(Space, Option<PathBuf>), Status> {
         let space = self
             .catalog
             .get_space(name)
@@ -353,9 +356,16 @@ impl OikomeFlightService {
             SpaceKind::Remote => return Err(Status::permission_denied(DENIED)),
         }
         match self.catalog.get_location(&space.location) {
-            Ok(l) if matches!(l.format, LocationFormat::IcebergParquet { .. }) => Ok(space),
+            Ok(l) if matches!(l.format, LocationFormat::IcebergParquet { .. }) => Ok((space, None)),
+            Ok(l) if matches!(l.format, LocationFormat::Lance { .. }) => {
+                let root = self
+                    .catalog
+                    .lance_root(&l)
+                    .map_err(|e| session_status(e.into()))?;
+                Ok((space, Some(root)))
+            }
             _ => Err(Status::failed_precondition(format!(
-                "space '{name}' is not stored as Iceberg tables and cannot be subscribed"
+                "space '{name}' is not stored as Iceberg tables or Lance datasets and cannot be subscribed"
             ))),
         }
     }
@@ -383,13 +393,13 @@ impl OikomeFlightService {
         }
         let principal =
             self.authorize(&caller, &BTreeSet::from([req.space.clone()]), ABILITY_READ)?;
-        let space = self.subscribable(&req.space)?;
+        let (space, lance) = self.subscribable(&req.space)?;
         let mut response = SnapshotResponse::default();
-        let tables = self
-            .catalog
-            .space_tables(&space)
-            .await
-            .map_err(|e| session_status(e.into()))?;
+        let tables = match &lance {
+            Some(root) => lance_tables(root),
+            None => self.catalog.space_tables(&space).await,
+        }
+        .map_err(|e| session_status(e.into()))?;
         for table in tables {
             match self.full_access(&principal, &space.name, &table) {
                 None => continue,
@@ -399,6 +409,34 @@ impl OikomeFlightService {
                 }
                 Some(true) => {}
             }
+            if let Some(root) = &lance {
+                let dataset = root.join(format!("{table}{DATASET_SUFFIX}"));
+                let version = lance_version(&dataset, None)
+                    .await
+                    .map_err(|e| session_status(e.into()))?;
+                let mut files = Vec::with_capacity(version.files.len() + 1);
+                for relative in version.files.iter().chain([&version.manifest]) {
+                    let (hash, size) = self
+                        .hashes
+                        .hash(&dataset.join(relative))
+                        .await
+                        .map_err(io_status)?;
+                    files.push(FileEntry {
+                        hash,
+                        size,
+                        path: Some(relative.clone()),
+                    });
+                }
+                response.tables.push(TableSnapshot {
+                    name: table,
+                    snapshot_id: Some(version.version as i64),
+                    schema: encode_schema(&version.schema)
+                        .map_err(|e| Status::internal(e.to_string()))?,
+                    files,
+                    format: TableFormat::Lance,
+                });
+                continue;
+            }
             let resolved = self
                 .catalog
                 .resolve_table(&space, &table, None)
@@ -407,7 +445,11 @@ impl OikomeFlightService {
             let mut files = Vec::with_capacity(resolved.files.len());
             for path in &resolved.files {
                 let (hash, size) = self.hashes.hash(path).await.map_err(io_status)?;
-                files.push(FileEntry { hash, size });
+                files.push(FileEntry {
+                    hash,
+                    size,
+                    path: None,
+                });
             }
             response.tables.push(TableSnapshot {
                 name: table,
@@ -415,6 +457,7 @@ impl OikomeFlightService {
                 schema: encode_schema(&resolved.schema)
                     .map_err(|e| Status::internal(e.to_string()))?,
                 files,
+                format: TableFormat::Iceberg,
             });
         }
         tracing::debug!(caller = %caller.did, %principal, space = %space.name, tables = response.tables.len(), "serving snapshot");
@@ -438,22 +481,40 @@ impl OikomeFlightService {
         }
         let principal =
             self.authorize(&caller, &BTreeSet::from([req.space.clone()]), ABILITY_READ)?;
-        let space = self.subscribable(&req.space)?;
+        let (space, lance) = self.subscribable(&req.space)?;
         if self.full_access(&principal, &space.name, &req.table) != Some(true) {
             tracing::info!(caller = %caller.did, table = %req.table, "file of a restricted table refused");
             return Err(Status::permission_denied(DENIED));
         }
         let not_found = || Status::not_found("file not found in this snapshot");
-        let resolved = self
-            .catalog
-            .resolve_table(&space, &req.table, Some(req.snapshot_id))
-            .await
-            .map_err(|e| {
-                tracing::info!(error = %e, "fetch_file: snapshot not resolved");
-                not_found()
-            })?;
+        let files = match &lance {
+            Some(root) => {
+                let dataset = root.join(format!("{}{DATASET_SUFFIX}", req.table));
+                let version = u64::try_from(req.snapshot_id).map_err(|_| not_found())?;
+                let version = lance_version(&dataset, Some(version)).await.map_err(|e| {
+                    tracing::info!(error = %e, "fetch_file: version not resolved");
+                    not_found()
+                })?;
+                version
+                    .files
+                    .iter()
+                    .chain([&version.manifest])
+                    .map(|relative| dataset.join(relative))
+                    .collect()
+            }
+            None => {
+                self.catalog
+                    .resolve_table(&space, &req.table, Some(req.snapshot_id))
+                    .await
+                    .map_err(|e| {
+                        tracing::info!(error = %e, "fetch_file: snapshot not resolved");
+                        not_found()
+                    })?
+                    .files
+            }
+        };
         let mut found = None;
-        for path in resolved.files {
+        for path in files {
             if self.hashes.hash(&path).await.map_err(io_status)?.0 == req.hash {
                 found = Some(path);
                 break;

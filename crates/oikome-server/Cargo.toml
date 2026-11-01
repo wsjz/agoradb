@@ -15,6 +15,7 @@ oikome-catalog = { path = "../oikome-catalog" }
 oikome-core = { path = "../oikome-core" }
 oikome-discovery = { path = "../oikome-discovery" }
 oikome-engine = { path = "../oikome-engine" }
+oikome-engine-duckdb = { path = "../oikome-engine-duckdb" }
 oikome-identity = { path = "../oikome-identity" }
 oikome-network = { path = "../oikome-network" }
 oikome-node = { path = "../oikome-node" }

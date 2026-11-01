@@ -5,6 +5,9 @@ name: docker-e2e
 on:
   push:
     branches: ["main", "feat/**", "ci/**"]
+  # Pull requests from forks, which do not push to this repository.
+  pull_request:
+    branches: ["main"]
   workflow_dispatch:
 
 permissions:
@@ -20,7 +23,7 @@ jobs:
       - name: Build the node image
         run: docker compose -f docker/compose.yml build
 
-      - name: Discovery, TLS, federated query, subscription, revocation
+      - name: Discovery, TLS, federated query, subscription, revocation, Lance search
         run: bash tests/e2e/docker_nodes.sh
         env:
           E2E_BUILD: "0"

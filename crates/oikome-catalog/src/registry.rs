@@ -322,6 +322,9 @@ impl OikomeCatalog {
                         std::fs::create_dir_all(parent)?;
                     }
                 }
+                LocationFormat::Lance { root } => {
+                    std::fs::create_dir_all(Path::new(self.root_path()).join(root))?;
+                }
                 // validate_binding never creates these (see create_peer_space).
                 LocationFormat::Remote { .. } | LocationFormat::Replica { .. } => {}
             }
@@ -418,6 +421,17 @@ impl OikomeCatalog {
             LocationFormat::IcebergParquet { namespace } => Ok(NamespaceIdent::new(namespace)),
             other => Err(CatalogError::KindFormatMismatch {
                 kind: space.kind.to_string(),
+                format: other.name().to_string(),
+            }),
+        }
+    }
+
+    /// Absolute path of a Lance Location's directory of datasets.
+    pub fn lance_root(&self, location: &Location) -> Result<PathBuf, CatalogError> {
+        match &location.format {
+            LocationFormat::Lance { root } => Ok(Path::new(self.root_path()).join(root)),
+            other => Err(CatalogError::KindFormatMismatch {
+                kind: "lance".to_string(),
                 format: other.name().to_string(),
             }),
         }

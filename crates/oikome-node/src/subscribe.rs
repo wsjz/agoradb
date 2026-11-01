@@ -41,7 +41,8 @@ use oikome_engine::EngineError;
 use oikome_identity::ucan::ABILITY_READ;
 use oikome_identity::{unix_now_ms, Did};
 use oikome_network::protocol::{
-    decode_schema, is_file_hash, is_identifier, FetchFileRequest, FileEntry,
+    decode_schema, is_file_hash, is_identifier, is_lance_file_path, FetchFileRequest, FileEntry,
+    TableFormat, TableSnapshot,
 };
 use oikome_network::{ChunkStream, PeerClient};
 use serde::{Deserialize, Serialize};
@@ -54,12 +55,17 @@ use crate::session::OikomeSession;
 
 const MANIFEST_FILE: &str = "manifest.json";
 const FILES_DIR: &str = "files";
+/// Where a copy of a Lance Space keeps its datasets, `<table>.lance` each.
+const LANCE_DIR: &str = "lance";
 
 /// What a replica holds: per table, the owner's snapshot, schema and files.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 struct ReplicaManifest {
     tables: BTreeMap<String, ReplicaTable>,
     refreshed_at_ms: u64,
+    /// A copy of a Lance Space: its datasets are under `lance/`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    lance: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -67,8 +73,11 @@ struct ReplicaTable {
     snapshot_id: Option<i64>,
     /// Arrow schema as encoded by the owner (`protocol::encode_schema`).
     schema: String,
-    /// BLAKE3 hashes of the data files.
+    /// BLAKE3 hashes of the data files (Iceberg).
     files: Vec<String>,
+    /// Files of the Lance version held, relative to the dataset directory.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    paths: Vec<String>,
 }
 
 /// One table of a [`RefreshReport`].
@@ -187,6 +196,16 @@ async fn write_manifest(dir: &Path, manifest: &ReplicaManifest) -> Result<(), Se
     written.map_err(io)
 }
 
+/// The directory of datasets of a replica of a Lance Space, or `None` for a
+/// replica of an Iceberg Space.
+pub(crate) fn replica_lance_root(
+    catalog: &OikomeCatalog,
+    location: &Location,
+) -> Result<Option<PathBuf>, SessionError> {
+    let dir = catalog.replica_dir(&location.id);
+    Ok(read_manifest(&dir)?.lance.then(|| dir.join(LANCE_DIR)))
+}
+
 /// The tables of the replica Location `location`: name, local files and
 /// schema, ready to attach to DuckDB.
 pub(crate) fn replica_tables(
@@ -216,15 +235,17 @@ pub(crate) fn replica_tables(
         .collect()
 }
 
-/// Write `entry` from `chunks` to `files_dir/<hash>.parquet`, checking its
-/// size and hash; nothing is left behind on failure. Returns the bytes
-/// written.
+/// Write `entry` from `chunks` to `target`, checking its size and hash;
+/// nothing is left behind on failure. Returns the bytes written.
 async fn download(
     mut chunks: ChunkStream,
     entry: &FileEntry,
-    files_dir: &Path,
+    target: &Path,
 ) -> Result<u64, SessionError> {
-    let tmp = files_dir.join(format!(".tmp-{}-{}", entry.hash, unique_suffix()));
+    let parent = target
+        .parent()
+        .ok_or_else(|| bad_peer("a file without a directory"))?;
+    let tmp = parent.join(format!(".tmp-{}-{}", entry.hash, unique_suffix()));
     let result = async {
         let mut out = tokio::fs::File::create(&tmp).await.map_err(io)?;
         let mut hasher = blake3::Hasher::new();
@@ -253,9 +274,7 @@ async fn download(
                 entry.hash
             )));
         }
-        tokio::fs::rename(&tmp, file_path(files_dir, &entry.hash))
-            .await
-            .map_err(io)?;
+        tokio::fs::rename(&tmp, target).await.map_err(io)?;
         Ok(written)
     }
     .await;
@@ -297,9 +316,22 @@ async fn refresh(
     let files_dir = dir.join(FILES_DIR);
     tokio::fs::create_dir_all(&files_dir).await.map_err(io)?;
     let previous = read_manifest(dir)?;
+    let lance = snapshot
+        .tables
+        .first()
+        .is_some_and(|t| t.format == TableFormat::Lance);
+    if snapshot
+        .tables
+        .iter()
+        .any(|t| (t.format == TableFormat::Lance) != lance)
+        || (!previous.tables.is_empty() && previous.lance != lance)
+    {
+        return Err(bad_peer("the space changed its storage format"));
+    }
     let mut manifest = ReplicaManifest {
         tables: BTreeMap::new(),
         refreshed_at_ms: unix_now_ms(),
+        lance: lance || previous.lance,
     };
     let mut report = Vec::new();
     for table in snapshot.tables {
@@ -307,6 +339,20 @@ async fn refresh(
             return Err(bad_peer(format!("invalid table name '{}'", table.name)));
         }
         decode_schema(&table.schema)?;
+        if lance {
+            let (copied, paths) = refresh_lance_table(client, remote, dir, &table).await?;
+            report.push(copied);
+            manifest.tables.insert(
+                table.name,
+                ReplicaTable {
+                    snapshot_id: table.snapshot_id,
+                    schema: table.schema,
+                    files: Vec::new(),
+                    paths,
+                },
+            );
+            continue;
+        }
         let (mut fetched, mut bytes) = (0, 0);
         for file in &table.files {
             if !is_file_hash(&file.hash) {
@@ -329,7 +375,7 @@ async fn refresh(
                     hash: file.hash.clone(),
                 })
                 .await?;
-            bytes += download(chunks, file, &files_dir).await?;
+            bytes += download(chunks, file, &file_path(&files_dir, &file.hash)).await?;
             fetched += 1;
         }
         report.push(RefreshedTable {
@@ -345,6 +391,7 @@ async fn refresh(
                 snapshot_id: table.snapshot_id,
                 schema: table.schema,
                 files: table.files.into_iter().map(|f| f.hash).collect(),
+                paths: Vec::new(),
             },
         );
     }
@@ -359,7 +406,127 @@ async fn refresh(
     }
     write_manifest(dir, &manifest).await?;
     remove_unreferenced(&files_dir, &manifest, &previous).await?;
+    if manifest.lance {
+        remove_unreferenced_lance(&dir.join(LANCE_DIR), &manifest, &previous).await?;
+    }
     Ok(report)
+}
+
+/// Copy one version of a Lance table into `dir/lance/<table>.lance`: data,
+/// deletion and index files first, the version's manifest last, so readers
+/// see either the previous version or the whole new one. Files already held
+/// are not fetched again; Lance never rewrites a file under the same name.
+async fn refresh_lance_table(
+    client: &PeerClient,
+    remote: &str,
+    dir: &Path,
+    table: &TableSnapshot,
+) -> Result<(RefreshedTable, Vec<String>), SessionError> {
+    let version = table
+        .snapshot_id
+        .ok_or_else(|| bad_peer("a Lance table without a version"))?;
+    let mut entries: Vec<(&FileEntry, &str)> = Vec::with_capacity(table.files.len());
+    for file in &table.files {
+        let path = file
+            .path
+            .as_deref()
+            .filter(|p| is_lance_file_path(p) && is_file_hash(&file.hash))
+            .ok_or_else(|| bad_peer("invalid file in a Lance version"))?;
+        entries.push((file, path));
+    }
+    let is_manifest = |path: &str| path.starts_with("_versions/");
+    if entries.iter().filter(|(_, p)| is_manifest(p)).count() != 1 {
+        return Err(bad_peer("a Lance version needs exactly one manifest"));
+    }
+    entries.sort_by_key(|(_, p)| is_manifest(p));
+    let dataset = dir.join(LANCE_DIR).join(format!(
+        "{}{}",
+        table.name,
+        oikome_catalog::lance::DATASET_SUFFIX
+    ));
+    let (mut fetched, mut bytes) = (0, 0);
+    for (file, path) in &entries {
+        let target = dataset.join(path);
+        if tokio::fs::metadata(&target)
+            .await
+            .is_ok_and(|m| m.len() == file.size)
+        {
+            continue;
+        }
+        if let Some(parent) = target.parent() {
+            tokio::fs::create_dir_all(parent).await.map_err(io)?;
+        }
+        let chunks = client
+            .fetch_file(&FetchFileRequest {
+                space: remote.to_string(),
+                table: table.name.clone(),
+                snapshot_id: version,
+                hash: file.hash.clone(),
+            })
+            .await?;
+        bytes += download(chunks, file, &target).await?;
+        fetched += 1;
+    }
+    let copied = RefreshedTable {
+        table: table.name.clone(),
+        snapshot_id: Some(version),
+        files_fetched: fetched,
+        bytes_fetched: bytes,
+        restricted: false,
+    };
+    Ok((copied, entries.iter().map(|(_, p)| p.to_string()).collect()))
+}
+
+/// Delete the datasets and files under `lance_dir` that neither `current`
+/// nor `previous` references.
+async fn remove_unreferenced_lance(
+    lance_dir: &Path,
+    current: &ReplicaManifest,
+    previous: &ReplicaManifest,
+) -> Result<(), SessionError> {
+    let suffix = oikome_catalog::lance::DATASET_SUFFIX;
+    let mut datasets = match tokio::fs::read_dir(lance_dir).await {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(io(e)),
+    };
+    while let Some(entry) = datasets.next_entry().await.map_err(io)? {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let keep: HashSet<&str> = name
+            .strip_suffix(suffix)
+            .map(|table| {
+                [current, previous]
+                    .iter()
+                    .filter_map(|m| m.tables.get(table))
+                    .flat_map(|t| t.paths.iter().map(String::as_str))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if keep.is_empty() {
+            tokio::fs::remove_dir_all(entry.path()).await.map_err(io)?;
+            continue;
+        }
+        let dataset = entry.path();
+        let mut pending = vec![dataset.clone()];
+        while let Some(dir) = pending.pop() {
+            let mut files = tokio::fs::read_dir(&dir).await.map_err(io)?;
+            while let Some(file) = files.next_entry().await.map_err(io)? {
+                let path = file.path();
+                if file.file_type().await.map_err(io)?.is_dir() {
+                    pending.push(path);
+                    continue;
+                }
+                let relative = path
+                    .strip_prefix(&dataset)
+                    .map(|p| p.to_string_lossy().replace('\\', "/"))
+                    .unwrap_or_default();
+                if !keep.contains(relative.as_str()) {
+                    tokio::fs::remove_file(&path).await.map_err(io)?;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 impl OikomeSession {
@@ -423,6 +590,9 @@ impl OikomeSession {
         let lock = refresh_lock(&dir);
         let _guard = lock.lock().await;
         let tables = refresh(&client, remote, &dir).await?;
+        // A copy of a Lance Space is attached whole; attach it afresh so the
+        // new version is read.
+        self.engines().duckdb()?.detach_space(name).await?;
         Ok(RefreshReport {
             space: name.to_string(),
             tables,
@@ -472,6 +642,7 @@ mod tests {
         FileEntry {
             hash: blake3::hash(data).to_hex().to_string(),
             size: data.len() as u64,
+            path: None,
         }
     }
 
@@ -495,7 +666,8 @@ mod tests {
     async fn downloads_are_checked_against_size_and_hash() {
         let dir = tempfile::tempdir().unwrap();
         let good = entry(b"parquet bytes");
-        let n = download(chunks(&[b"parquet ", b"bytes"]), &good, dir.path())
+        let target = file_path(dir.path(), &good.hash);
+        let n = download(chunks(&[b"parquet ", b"bytes"]), &good, &target)
             .await
             .unwrap();
         assert_eq!(n, 13);
@@ -505,13 +677,13 @@ mod tests {
         );
 
         // Same size, other bytes: the hash catches it.
-        let tampered = download(chunks(&[b"parquet bytez"]), &good, dir.path()).await;
+        let tampered = download(chunks(&[b"parquet bytez"]), &good, &target).await;
         assert!(tampered.unwrap_err().to_string().contains("hash"));
         // Truncated, then padded.
-        assert!(download(chunks(&[b"parquet"]), &good, dir.path())
+        assert!(download(chunks(&[b"parquet"]), &good, &target)
             .await
             .is_err());
-        assert!(download(chunks(&[b"parquet bytes!"]), &good, dir.path())
+        assert!(download(chunks(&[b"parquet bytes!"]), &good, &target)
             .await
             .is_err());
         // A failing stream.
@@ -519,7 +691,7 @@ mod tests {
             Ok(Bytes::from_static(b"par")),
             Err(EngineError::Remote("connection reset".to_string())),
         ]));
-        assert!(download(failing, &good, dir.path()).await.is_err());
+        assert!(download(failing, &good, &target).await.is_err());
 
         // Only the verified file is left.
         assert_eq!(
@@ -542,9 +714,11 @@ mod tests {
                     snapshot_id: Some(1),
                     schema: String::new(),
                     files: files.iter().map(|f| f.to_string()).collect(),
+                    paths: Vec::new(),
                 },
             )]),
             refreshed_at_ms: 0,
+            lance: false,
         };
         remove_unreferenced(dir.path(), &manifest(&["c"]), &manifest(&["b"]))
             .await
@@ -552,6 +726,78 @@ mod tests {
         let mut left = leftovers(dir.path());
         left.sort();
         assert_eq!(left, vec!["b.parquet", "c.parquet"]);
+    }
+
+    #[tokio::test]
+    async fn lance_files_of_older_versions_are_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let lance = dir.path().join(LANCE_DIR);
+        for path in [
+            "items.lance/data/a.lance",
+            "items.lance/data/b.lance",
+            "items.lance/data/c.lance",
+            "items.lance/_versions/3.manifest",
+            "items.lance/_versions/2.manifest",
+            "items.lance/_versions/1.manifest",
+            "items.lance/_indices/u1/index.idx",
+            "gone.lance/data/x.lance",
+        ] {
+            let file = lance.join(path);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, path).unwrap();
+        }
+        let manifest = |paths: &[&str]| ReplicaManifest {
+            tables: BTreeMap::from([(
+                "items".to_string(),
+                ReplicaTable {
+                    snapshot_id: Some(1),
+                    schema: String::new(),
+                    files: Vec::new(),
+                    paths: paths.iter().map(|p| p.to_string()).collect(),
+                },
+            )]),
+            refreshed_at_ms: 0,
+            lance: true,
+        };
+        let current = manifest(&[
+            "data/b.lance",
+            "data/c.lance",
+            "_indices/u1/index.idx",
+            "_versions/3.manifest",
+        ]);
+        let previous = manifest(&["data/a.lance", "data/b.lance", "_versions/2.manifest"]);
+        remove_unreferenced_lance(&lance, &current, &previous)
+            .await
+            .unwrap();
+        let mut left = Vec::new();
+        let mut pending = vec![lance.clone()];
+        while let Some(d) = pending.pop() {
+            for e in std::fs::read_dir(d).unwrap() {
+                let p = e.unwrap().path();
+                if p.is_dir() {
+                    pending.push(p);
+                } else {
+                    left.push(
+                        p.strip_prefix(&lance)
+                            .unwrap()
+                            .to_string_lossy()
+                            .into_owned(),
+                    );
+                }
+            }
+        }
+        left.sort();
+        assert_eq!(
+            left,
+            vec![
+                "items.lance/_indices/u1/index.idx",
+                "items.lance/_versions/2.manifest",
+                "items.lance/_versions/3.manifest",
+                "items.lance/data/a.lance",
+                "items.lance/data/b.lance",
+                "items.lance/data/c.lance",
+            ]
+        );
     }
 
     #[tokio::test]
@@ -568,9 +814,11 @@ mod tests {
                     snapshot_id: Some(42),
                     schema: "s".to_string(),
                     files: vec!["h".to_string()],
+                    paths: Vec::new(),
                 },
             )]),
             refreshed_at_ms: 7,
+            lance: false,
         };
         write_manifest(dir.path(), &manifest).await.unwrap();
         assert_eq!(read_manifest(dir.path()).unwrap(), manifest);

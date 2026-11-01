@@ -21,7 +21,8 @@
 //!                           ENGINE = 'duckdb' | 'sqlite',
 //!                           LOCATION = '<location id>',
 //!                           ACCESS = 'writable' | 'readonly',
-//!                           STORAGE = 'disk']
+//!                           STORAGE = 'disk',
+//!                           FORMAT = 'iceberg' | 'lance']
 //! CREATE SPACE <name> WITH TOKEN = '<ucan>' [, PEER = 'https://host:port'
 //!                                             | 'webrtc:<record>' (browser node)]
 //!                          [, REMOTE = '<space on the peer>'] [, KIND = 'remote']
@@ -216,6 +217,7 @@ fn parse_create_space(stmt: &str) -> Result<OikomeStatement, SemanticError> {
             "ACCESS" => request.access = Some(value.parse().map_err(invalid)?),
             "LOCATION" => request.location = Some(value),
             "STORAGE" => request.storage = Some(value),
+            "FORMAT" => request.format = Some(value.parse().map_err(invalid)?),
             "PEER" => request.peer = Some(value),
             "REMOTE" => request.remote = Some(validate_name(&value)?),
             "TOKEN" => request.token = Some(value),
@@ -223,7 +225,7 @@ fn parse_create_space(stmt: &str) -> Result<OikomeStatement, SemanticError> {
             other => {
                 return Err(SemanticError::InvalidProperty(format!(
                     "unknown CREATE SPACE property '{other}' \
-                     (expected KIND, ENGINE, LOCATION, ACCESS, STORAGE, PEER, REMOTE, TOKEN or MODE)"
+                     (expected KIND, ENGINE, LOCATION, ACCESS, STORAGE, FORMAT, PEER, REMOTE, TOKEN or MODE)"
                 )))
             }
         }
@@ -248,6 +250,7 @@ fn parse_create_space(stmt: &str) -> Result<OikomeStatement, SemanticError> {
             || request.location.is_some()
             || request.access.is_some()
             || request.storage.is_some()
+            || request.format.is_some()
         {
             return Err(SemanticError::InvalidProperty(
                 "a remote space only takes PEER, REMOTE, TOKEN, MODE and KIND = 'remote'"

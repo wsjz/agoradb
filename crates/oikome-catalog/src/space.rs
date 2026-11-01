@@ -15,7 +15,9 @@
 //! Space (logical) and Location (physical) definitions plus the binding rules
 //! of architecture v3 §3.2.
 
-use oikome_core::{AccessMode, CatalogError, CreateSpaceRequest, EngineKind, SpaceKind, SpaceUri};
+use oikome_core::{
+    AccessMode, CatalogError, CreateSpaceRequest, EngineKind, SpaceFormat, SpaceKind, SpaceUri,
+};
 use serde::{Deserialize, Serialize};
 
 /// Identifier of a [`Location`]; defaults to the name of the Space that created it.
@@ -26,6 +28,11 @@ pub const RESIDENCY_REMOTE: &str = "remote";
 
 /// Relative (to the catalog root) directory that holds SQLite Space files.
 pub const SQLITE_DIR: &str = ".oikome/sqlite";
+
+/// Relative (to the catalog root) directory that holds Lance Locations, one
+/// directory of `<table>.lance` datasets each. It is under `.oikome/` so it
+/// is never listed as an Iceberg namespace.
+pub const LANCE_DIR: &str = ".oikome/lance";
 
 /// The only storage strategy supported in 3.0.
 pub const STORAGE_DISK: &str = "disk";
@@ -57,6 +64,9 @@ pub enum LocationFormat {
     IcebergParquet { namespace: String },
     /// A single SQLite database file, path relative to the catalog root.
     SqliteFile { path: String },
+    /// A directory of Lance datasets (`<table>.lance`), path relative to the
+    /// catalog root (§7.6).
+    Lance { root: String },
     /// A Space on another node, served over Arrow Flight.
     Remote {
         /// Flight endpoint, `https://host:port`; `None` looks the owner's
@@ -87,6 +97,7 @@ impl LocationFormat {
         match self {
             LocationFormat::IcebergParquet { .. } => "iceberg_parquet",
             LocationFormat::SqliteFile { .. } => "sqlite_file",
+            LocationFormat::Lance { .. } => "lance",
             LocationFormat::Remote { .. } => "remote",
             LocationFormat::Replica { .. } => "replica",
         }
@@ -126,7 +137,9 @@ pub fn engine_reads(engine: EngineKind, format: &LocationFormat) -> bool {
         (EngineKind::Sqlite, LocationFormat::SqliteFile { .. }) => true,
         (
             EngineKind::Sqlite,
-            LocationFormat::IcebergParquet { .. } | LocationFormat::Replica { .. },
+            LocationFormat::IcebergParquet { .. }
+            | LocationFormat::Lance { .. }
+            | LocationFormat::Replica { .. },
         ) => false,
     }
 }
@@ -167,14 +180,24 @@ pub fn validate_binding(
         ));
     }
     let engine = request.engine.unwrap_or_else(|| kind.default_engine());
+    if request.format.is_some() && (kind != SpaceKind::Analytical || existing.is_some()) {
+        return Err(CatalogError::InvalidProperty(
+            "FORMAT applies to a new analytical space only".to_string(),
+        ));
+    }
 
     let mut location = match existing {
         Some(loc) => loc.clone(),
         None => Location {
             id: request.name.clone(),
             format: match kind {
-                SpaceKind::Analytical => LocationFormat::IcebergParquet {
-                    namespace: request.name.clone(),
+                SpaceKind::Analytical => match request.format.unwrap_or_default() {
+                    SpaceFormat::Iceberg => LocationFormat::IcebergParquet {
+                        namespace: request.name.clone(),
+                    },
+                    SpaceFormat::Lance => LocationFormat::Lance {
+                        root: format!("{LANCE_DIR}/{}", request.name),
+                    },
                 },
                 SpaceKind::Transactional | SpaceKind::Remote => LocationFormat::SqliteFile {
                     path: format!("{SQLITE_DIR}/{}.sqlite", request.name),
@@ -193,7 +216,10 @@ pub fn validate_binding(
                 format: location.format.name().to_string(),
             })
         }
-        (SpaceKind::Transactional, LocationFormat::IcebergParquet { .. }) => {
+        (
+            SpaceKind::Transactional,
+            LocationFormat::IcebergParquet { .. } | LocationFormat::Lance { .. },
+        ) => {
             return Err(CatalogError::KindFormatMismatch {
                 kind: kind.to_string(),
                 format: location.format.name().to_string(),
@@ -217,13 +243,14 @@ pub fn validate_binding(
             }
             AccessMode::ReadOnly
         }
-        (SpaceKind::Analytical, LocationFormat::IcebergParquet { .. }) => {
-            request.access.unwrap_or(if existing.is_some() {
-                AccessMode::ReadOnly
-            } else {
-                AccessMode::Writable
-            })
-        }
+        (
+            SpaceKind::Analytical,
+            LocationFormat::IcebergParquet { .. } | LocationFormat::Lance { .. },
+        ) => request.access.unwrap_or(if existing.is_some() {
+            AccessMode::ReadOnly
+        } else {
+            AccessMode::Writable
+        }),
     };
 
     if !engine_reads(engine, &location.format) {

@@ -68,6 +68,9 @@ pub enum SessionError {
     #[error("already exists: {0}")]
     AlreadyExists(String),
 
+    #[error("space '{0}' is read-only (ACCESS = 'readonly'); write through the space that owns its location")]
+    ReadOnlySpace(String),
+
     #[error("space '{space}' is published from '{origin}'; change '{origin}' and run PUBLISH SPACE {origin}")]
     PublishedSpace { space: String, origin: String },
 }
