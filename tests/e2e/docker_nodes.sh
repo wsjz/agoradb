@@ -15,8 +15,9 @@
 
 # End-to-end check of the network phase (3.1) on the three nodes of
 # docker/compose.yml: discovery, TLS pinned to DIDs, a UCAN-gated federated
-# query, subscription, revocation cutting access, and Lance search on a
-# Space and on a subscribed copy of it. Every step prints what
+# query, subscription, revocation cutting access, Lance search on a Space
+# and on a subscribed copy of it, and FTS5 / sqlite-vec search on a
+# transactional Space. Every step prints what
 # was expected and what happened; the first mismatch fails the run.
 #
 #   E2E_BUILD=1     build the image first (default)
@@ -176,6 +177,16 @@ check "node-b's copy holds node-a's indexes (none built on node-b)" \
     "$(indexes node-b /data/.oikome/replicas/notes_copy/lance)"
 check "vector search on node-b's copy" "$(printf '0\n105\n210')" "$(sql node-b "$(printf "$NEAREST" notes_copy)")"
 check "full-text search on node-b's copy" "5" "$(sql node-b "$(printf "$BANANAS" notes_copy)")"
+
+echo "== FTS5 and sqlite-vec (3.3): search in node-b's transactional Space"
+sql node-b "CREATE VIRTUAL TABLE orders.notes USING fts5(body, tokenize = 'porter')" >/dev/null
+sql node-b "INSERT INTO orders.notes (rowid, body) VALUES (1, 'red apples'), (2, 'yellow bananas'), (3, 'apples and bananas')" >/dev/null
+sql node-b "CREATE VIRTUAL TABLE orders.embeddings USING vec0(embedding float[4])" >/dev/null
+sql node-b "INSERT INTO orders.embeddings (rowid, embedding) VALUES (1, '[1, 0, 0, 0]'), (2, '[0, 1, 0, 0]'), (3, '[0.9, 0.1, 0, 0]')" >/dev/null
+check "full-text search on node-b" "$(printf '1\n3')" \
+    "$(sql node-b "SELECT rowid FROM orders.notes WHERE notes MATCH 'apple' ORDER BY bm25(notes)")"
+check "vector search on node-b" "$(printf '1\n3')" \
+    "$(sql node-b "SELECT rowid FROM orders.embeddings WHERE embedding MATCH '[1, 0, 0, 0]' AND k = 2 ORDER BY distance")"
 
 echo "== mDNS (node-c was given no address)"
 wait_for "node-c discovers node-a by mDNS" 60 knows_peer node-c "$DID_A"

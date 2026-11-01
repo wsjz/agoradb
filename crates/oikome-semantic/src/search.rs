@@ -28,8 +28,8 @@
 use std::ops::ControlFlow;
 
 use sqlparser::ast::{
-    Expr, FunctionArg, FunctionArgExpr, Ident, ObjectName, Statement, TableFactor, Value, Visit,
-    VisitMut, Visitor, VisitorMut,
+    BinaryOperator, Expr, FunctionArg, FunctionArgExpr, Ident, ObjectName, Statement, TableFactor,
+    Value, Visit, VisitMut, Visitor, VisitorMut,
 };
 
 use crate::classify::part_value;
@@ -123,6 +123,25 @@ pub(crate) fn qualify_search_calls(
         ControlFlow::Break(e) => Err(e),
         ControlFlow::Continue(()) => Ok(visitor.found),
     }
+}
+
+/// Whether `stmt` uses the `MATCH` operator: full-text search of an FTS5
+/// table or vector search of a sqlite-vec `vec0` table.
+pub fn uses_match(stmt: &Statement) -> bool {
+    struct Find;
+    impl Visitor for Find {
+        type Break = ();
+        fn pre_visit_expr(&mut self, expr: &Expr) -> ControlFlow<()> {
+            match expr {
+                Expr::BinaryOp {
+                    op: BinaryOperator::Match,
+                    ..
+                } => ControlFlow::Break(()),
+                _ => ControlFlow::Continue(()),
+            }
+        }
+    }
+    stmt.visit(&mut Find).is_break()
 }
 
 /// The `(space, table)` each search call in a classified statement reads.

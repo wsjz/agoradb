@@ -21,11 +21,13 @@ use arrow_schema::SchemaRef;
 use futures::TryStreamExt;
 use oikome_catalog::{LocationFormat, OikomeCatalog, Space};
 use oikome_core::{AccessMode, EngineKind, RemoteMode, SpaceKind};
+use oikome_engine::name::quote_ident;
 use oikome_engine::{Capabilities, QualifiedName, QueryEngine, RecordBatchStream, TxHandle};
 use oikome_federation::{BoundSpace, BoundTable, Coordinator};
 use oikome_semantic::{
     apply_access_control, bind_search_tables, classify, collect_spaces, inline_views, parse_single,
-    search_tables, DmlKind, OikomeStatement, StatementClass, TclKind,
+    search_tables, uses_match, DmlKind, OikomeStatement, StatementClass, TclKind,
+    VirtualTableRequest,
 };
 use sqlparser::ast::{ObjectType, Statement};
 
@@ -80,8 +82,9 @@ pub(crate) struct Routed {
     /// The SQL text to hand to an engine: the user's text when qualification
     /// changed nothing, otherwise the re-rendered, fully qualified statement.
     text: String,
-    /// Whether the statement calls a search function (§7.6).
-    searches: bool,
+    /// What the engine must be able to do for the statement's searches:
+    /// Lance search functions (§7.6) or `MATCH` on FTS5 / vec0 tables (§8).
+    needs: Capabilities,
 }
 
 impl OikomeSession {
@@ -164,6 +167,10 @@ impl OikomeSession {
             OikomeStatement::ShowPeers => {
                 self.deny_principal("SHOW PEERS")?;
                 self.show_peers()
+            }
+            OikomeStatement::CreateVirtualTable(request) => {
+                self.deny_principal("CREATE VIRTUAL TABLE")?;
+                self.create_virtual_table(request).await
             }
             OikomeStatement::DropSpace(name) => {
                 self.deny_principal("DROP SPACE")?;
@@ -252,13 +259,14 @@ impl OikomeSession {
         let default = self.default_space();
         let mut class = classify(&mut stmt, default.as_deref())?;
         let searches = !search_tables(&stmt).is_empty();
+        let matches = uses_match(&stmt);
         if let Some(principal) = &self.principal {
             if !matches!(class, StatementClass::Query { .. }) {
                 return Err(SessionError::PermissionDenied(format!(
                     "principal '{principal}' is read-only"
                 )));
             }
-            if searches {
+            if searches || matches {
                 // A search reads the dataset itself, past column grants and
                 // row policies.
                 return Err(SessionError::PermissionDenied(format!(
@@ -281,6 +289,14 @@ impl OikomeSession {
         if searches {
             self.bind_search_calls(&mut stmt, &class)?;
         }
+        if matches {
+            self.check_match_spaces(&class)?;
+        }
+        let needs = match (searches, matches) {
+            (true, _) => Capabilities::READ_LANCE,
+            (false, true) => Capabilities::EXT_FTS | Capabilities::EXT_VECTOR,
+            (false, false) => Capabilities::empty(),
+        };
         let after = stmt.to_string();
         let text = if before == after {
             original.trim().trim_end_matches(';').to_string()
@@ -291,8 +307,58 @@ impl OikomeSession {
             class,
             stmt,
             text,
-            searches,
+            needs,
         })
+    }
+
+    /// `MATCH` searches FTS5 and vec0 tables, which live in SQLite: a
+    /// statement using it runs on one transactional Space.
+    fn check_match_spaces(&self, class: &StatementClass) -> Result<(), SessionError> {
+        let spaces = match class {
+            StatementClass::Query { spaces } | StatementClass::Dml { spaces, .. } => spaces,
+            _ => return Ok(()),
+        };
+        let mut iter = spaces.iter();
+        match (iter.next(), iter.next()) {
+            (Some(name), None) if self.space(name)?.kind == SpaceKind::Transactional => Ok(()),
+            _ => Err(SessionError::Unsupported(
+                "MATCH searches the FTS5 and vec0 tables of one transactional space".to_string(),
+            )),
+        }
+    }
+
+    /// `CREATE VIRTUAL TABLE ... USING fts5(...) | vec0(...)` in a
+    /// transactional Space; the module arguments go to SQLite as written.
+    async fn create_virtual_table(
+        &self,
+        request: VirtualTableRequest,
+    ) -> Result<QueryResult, SessionError> {
+        let name = match request.space {
+            Some(space) => space,
+            None => self.default_space().ok_or(SessionError::NoDefaultSpace)?,
+        };
+        let space = self.space(&name)?;
+        if space.kind != SpaceKind::Transactional {
+            return Err(SessionError::Unsupported(format!(
+                "virtual tables (FTS5, vec0) belong to transactional spaces; '{name}' is {}",
+                space.kind
+            )));
+        }
+        self.require_writable(&space)?;
+        let sql = format!(
+            "CREATE VIRTUAL TABLE {}{}.{} USING {}({})",
+            if request.if_not_exists {
+                "IF NOT EXISTS "
+            } else {
+                ""
+            },
+            quote_ident(&name),
+            quote_ident(&request.table),
+            request.module,
+            request.args
+        );
+        self.bind(&space).await?.execute(&sql, &[]).await?;
+        Ok(QueryResult::Empty)
     }
 
     /// Replace each search call's table with its dataset path. A search runs
@@ -327,21 +393,23 @@ impl OikomeSession {
         })
     }
 
-    /// A search needs the `lance` extension on the Space's engine; binding
-    /// the Space loads it, or fails with how to install it.
+    /// A search needs its extension on the Space's engine: `lance` for the
+    /// search functions (binding the Space loads it, or fails with how to
+    /// install it), FTS5 and sqlite-vec for `MATCH`.
     async fn check_search(
         &self,
         routed: &Routed,
         spaces: &BTreeSet<String>,
     ) -> Result<(), SessionError> {
-        if !routed.searches {
+        if routed.needs.is_empty() {
             return Ok(());
         }
         for name in spaces {
             let engine = self.bind(&self.space(name)?).await?;
-            if !engine.capabilities().contains(Capabilities::READ_LANCE) {
+            if !engine.capabilities().contains(routed.needs) {
                 return Err(SessionError::Unsupported(format!(
-                    "search functions need the lance extension, which engine {} lacks",
+                    "this search needs {:?}, which engine {} lacks",
+                    routed.needs,
                     engine.kind()
                 )));
             }

@@ -34,5 +34,8 @@ pub use error::SemanticError;
 pub use rewrite::{
     apply_access_control, inline_views, AccessResolver, RelationAccess, ViewResolver,
 };
-pub use search::{bind_search_tables, search_tables, SEARCH_FUNCTIONS};
-pub use sql_parser::{parse, parse_single, split_statements, OikomeStatement, PublishRequest};
+pub use search::{bind_search_tables, search_tables, uses_match, SEARCH_FUNCTIONS};
+pub use sql_parser::{
+    parse, parse_single, split_statements, OikomeStatement, PublishRequest, VirtualTableRequest,
+    VIRTUAL_TABLE_MODULES,
+};

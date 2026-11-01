@@ -214,7 +214,7 @@ bitflags! Capabilities {
 | Engine | Crate (license) | Notes |
 |--------|-----------------|-------|
 | `DuckDbEngine` | `duckdb` 1.10506 (DuckDB 1.5.6, MIT, prebuilt `libduckdb`) | Parquet via `read_parquet([...])`; SQLite via the `sqlite` extension; Lance via the `lance` extension (§7.6); Arrow out natively. Extensions are loaded on demand from the node's extension directory and never downloaded by a query (`oikome extensions install` fetches them, signed by DuckDB). Each statement runs on a fresh connection to the shared database, because the `lance` extension caches datasets per connection. |
-| `SqliteEngine` | `rusqlite` 0.40 (MIT, `bundled`) | WAL mode; FTS5 built in; `sqlite-vec` loadable. Row results converted to Arrow batches (small result sets by design — OLTP). |
+| `SqliteEngine` | `rusqlite` 0.40 (MIT, `bundled`) | WAL mode; FTS5 built in; `sqlite-vec` 0.1.9 compiled in and registered for every connection, a transaction's private one included. Row results converted to Arrow batches (small result sets by design — OLTP). |
 | `HostEngine` | wasm-bindgen bridge | The JS host implements the same contract; Arrow IPC over the boundary. |
 
 Both native engines are `feature`-gated (`engine-duckdb`, `engine-sqlite`) so a node can be built with only what it needs. DuckDB `bundled` compile time (minutes) and binary size (~tens of MB) are accepted for Full/Edge nodes.
@@ -244,6 +244,8 @@ Every statement is classified before planning:
 | Query (`SELECT`) touching **one** local Space | any | **Pushed entirely** to that Space's engine; DataFusion is a pass-through |
 | Query touching **N** Spaces / remote Spaces queried over Flight | any | Federation Layer (§5) |
 | Query calling a search function (`lance_vector_search`, `lance_fts`, `lance_hybrid_search`) | one Lance Space or a copy of one; the node's owner only | **Pushed entirely** to DuckDB, the table argument replaced by its dataset path (§7.6) |
+| `CREATE VIRTUAL TABLE ... USING fts5(...)` / `vec0(...)` | transactional; the node's owner only | `SqliteEngine`, the module arguments as written |
+| Statement using `MATCH` (FTS5 full text, sqlite-vec nearest neighbours) | one transactional Space; the node's owner only | **Pushed entirely** to `SqliteEngine` |
 
 A Space bound `ACCESS = 'readonly'` refuses every DDL and DML statement.
 
@@ -460,7 +462,18 @@ Not done yet: reading a pinned version (waits for the extension), `PUBLISH` (§7
 
 Indexes inside a Lance dataset are part of its versions and **travel with it**, so a subscribing node searches without rebuilding. Indexes built by other extensions are engine-local and **not synchronized**; a subscribing node rebuilds them.
 
-A Space does not declare the extensions it needs. They follow from its format and from the statement: a Lance Location needs `lance` (`Capabilities::READ_LANCE`), a search function needs it on the Space's engine. The check happens before the statement runs; a node without the extension answers with how to install it.
+In a transactional Space:
+
+```sql
+CREATE VIRTUAL TABLE shop.docs USING fts5(title, body, content = 'notes', content_rowid = 'id', tokenize = 'porter');
+SELECT rowid, title FROM shop.docs WHERE docs MATCH 'apple' ORDER BY bm25(docs);
+CREATE VIRTUAL TABLE shop.vecs USING vec0(embedding float[768]);
+SELECT rowid, distance FROM shop.vecs WHERE embedding MATCH '[...]' AND k = 10 ORDER BY distance;
+```
+
+FTS5 and vec0 tables are listed as relations of the Space; the tables SQLite keeps behind them are not. `PUBLISH` (§7.3) skips them: they index other tables, which are published. `MATCH`, like the Lance search functions, is for the node's owner within one Space. sqlparser's generic dialect has no `MATCH` operator, so a statement using it is parsed with the SQLite dialect.
+
+A Space does not declare the extensions it needs. They follow from its format and from the statement: a Lance Location needs `lance` (`Capabilities::READ_LANCE`), a search function needs it on the Space's engine; `MATCH` needs FTS5 and sqlite-vec (`EXT_FTS`, `EXT_VECTOR`), which every SQLite engine has. The check happens before the statement runs; a node without the extension answers with how to install it.
 
 ---
 
@@ -693,6 +706,7 @@ The Arrow-line crates must move together: DataFusion 55 and `datafusion-federati
 | Add | `duckdb` | **=1.10506.1** (DuckDB 1.5.6, prebuilt `libduckdb`) | MIT |
 | Add | `lance-table`, `lance-io` | **=12.0.0** (Lance manifests only; `protoc` built from source; no cloud stores) | Apache-2.0 |
 | Add | `rusqlite` | **0.40** (`bundled`, `column_decltype`) | MIT |
+| Add | `sqlite-vec` | **=0.1.9** (compiled with the bundled SQLite) | MIT / Apache-2.0 |
 | Remove | `datafusion-datasource/-common/-execution/-physical-plan` direct deps, `dashmap`, `memmap2` | — | — |
 
 `datafusion-table-providers` was evaluated and **not** used: it brings its own connection pools (a second path to each engine besides `QueryEngine`) and pins an older `rusqlite`. Licenses are checked by `cargo deny check licenses` (`deny.toml`).
@@ -717,7 +731,7 @@ Roughly 1,100 of the current ~4,300 lines are engine-bridge code that goes away;
 | **3.0-D Publish** ✅ | `PUBLISH SPACE` → `orders_published` analytical read-only Space; scheduled publisher | Publish → query via DuckDB matches SQLite source |
 | **3.1 Network** ✅ | DID/UCAN, Arrow Flight remote Spaces (3.1a ✅), snapshot subscription (3.1b ✅), libp2p discovery and TLS (3.1c ✅), two Docker nodes plus an mDNS-only node, run in CI (3.1d ✅) | Two Docker nodes: UCAN-gated federated query; revocation cuts access |
 | **3.2 Browser** ✅ | WASM core + `HostEngine` on duckdb-wasm (3.2a ✅); federated queries via a Full Node over WebRTC (3.2b ✅); browser SQLite later | Browser node runs a local query and a federated query via a Full Node |
-| **3.3 Multimodal** | Lance Locations through DuckDB's `lance` extension: vector, full-text and hybrid search, indexes, version sync (3.3a ✅); FTS5/`sqlite-vec` on transactional Spaces (3.3b); DuckPGQ (3.3c); capability checks | Vector + FTS query on a Lance Space and on a transactional Space; a subscribed Lance Space is searchable without rebuilding its index |
+| **3.3 Multimodal** | Lance Locations through DuckDB's `lance` extension: vector, full-text and hybrid search, indexes, version sync (3.3a ✅); FTS5/`sqlite-vec` on transactional Spaces (3.3b ✅); DuckPGQ (3.3c); capability checks | Vector + FTS query on a Lance Space and on a transactional Space; a subscribed Lance Space is searchable without rebuilding its index |
 | **3.4 Cloud drives** | opendal drive services behind feature flags; one writing node per drive Location; newest-complete-snapshot reads; bounded local cache; client-side encryption; transactional Spaces rejected on drive Locations | An analytical Space on a WebDAV Location is written by one node and read by another; a transactional Space on a drive Location is rejected at DDL; files on the drive cannot be read without the key |
 | **3.5 Connectors** | `Connector` contract; upsert and cursor in one SQLite transaction; scheduled and on-demand pulls; credentials from the OS keychain; file import and flomo connectors | flomo memos land in `flomo.memos`; a second pull touches only changed memos; an edited memo is updated, not duplicated; a failed pull leaves data and cursor unchanged |
 | **3.6 Compute sharing** | `compute/<runtime>` UCAN abilities with limits; task routing over Arrow Flight; host-registered runtimes; per-peer quotas | Node B runs a task for node A within its quota; a task over its limits is refused; revoking the UCAN drops A's queued tasks; A's compute grant gives no access to B's Spaces, and a data grant does not let A run tasks |
@@ -749,6 +763,7 @@ No phase skipping (AGENT.md §4.1).
 | The extension and `lance-table` disagree about a dataset after one of them is upgraded | Both pinned to the same lance release (12, DuckDB 1.5.6) and upgraded together; the subscription test copies a version listed by `lance-table` and searches it with the extension |
 | The extension caches each dataset per DuckDB connection, so a long-lived connection reads a stale version | Every statement runs on a fresh connection; a test reads through a second DuckDB after writes by the first |
 | `lance-io` uses `object_store` 0.14, DataFusion 54 uses 0.13 | Two copies, native nodes only; they share nothing at run time |
+| sqlite-vec is pre-1.0, and 0.1.9 searches by brute force | Pinned exactly; fine at personal scale; its DiskANN and IVF indexes arrive with later releases, which change only the `vec0(...)` options |
 | Fewer external tools read Lance than Parquet / Iceberg | Lance only for data that is searched; tables that are aggregated stay Iceberg + Parquet |
 
 ---
@@ -787,6 +802,7 @@ No phase skipping (AGENT.md §4.1).
 | 2026-11-01 | Lance Spaces read the latest version; subscriptions ship one version, listed with `lance-table` | The extension cannot read a given version or list its files; shipping exactly one version keeps deleted rows on the owner and lets indexes travel |
 | 2026-11-01 | Search functions only for the owner (and on subscribed copies), within one Space; peers subscribe to search | A search reads the dataset past column grants and row policies; subscription copies only tables the peer may read in full |
 | 2026-11-01 | No `MODES` declaration on Spaces: required extensions follow from the format and the statement, checked against `Capabilities` | A declaration could drift from what the Space actually holds |
+| 2026-11-01 | FTS5 and sqlite-vec in transactional Spaces: `CREATE VIRTUAL TABLE` read by Oikome (module arguments as written, fts5 and vec0 only), `MATCH` parsed with the SQLite dialect, for the owner within one Space; `PUBLISH` skips virtual tables | sqlparser cannot read the module arguments, and its generic dialect has no `MATCH`; a dialect of our own would change how other statements parse |
 | 2026-11-01 | DuckDB extensions are fetched only by `oikome extensions install` (and in the Docker image build), never by a query | A query never downloads code; the node's extension directory is explicit |
 | 2026-10-30 | The 3.1 exit run is three Docker nodes on GitHub Actions (`docker-e2e`), one of them found only by mDNS | Development machines may have no container runtime; CI runs it on every push, and the Docker bridge network gives mDNS the multicast a firewalled laptop may block |
 | 2026-10-30 | VFS `materialize()` moves from 3.1 to 3.4 | Subscription copies live on local disk; the VFS is first needed for cloud drives |

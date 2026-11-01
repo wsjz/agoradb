@@ -79,6 +79,8 @@ lance-table = { version = "=12.0.0", features = ["protoc"] }
 lance-io = { version = "=12.0.0", default-features = false }
 lance-file = { version = "=12.0.0", features = ["protoc"] }
 lance-encoding = { version = "=12.0.0", features = ["protoc"] }
+# Vector search in transactional Spaces (vec0 tables), compiled into SQLite.
+sqlite-vec = "=0.1.9"
 # WebRTC endpoint of a Full Node for browsers (crates/oikome-webrtc): pure
 # Rust crypto (dimpl DTLS, sctp-proto), no C library.
 str0m = { version = "=0.24.1", default-features = false, features = ["rust-crypto"] }

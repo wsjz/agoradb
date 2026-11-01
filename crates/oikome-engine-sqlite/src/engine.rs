@@ -77,12 +77,35 @@ fn owned_value(v: ValueRef<'_>) -> SqlValue {
     }
 }
 
+/// Make sqlite-vec available to every connection this process opens, so a
+/// transaction's private connection has `vec0` tables too.
+fn register_sqlite_vec() -> Result<(), EngineError> {
+    static REGISTERED: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
+    REGISTERED
+        .get_or_init(|| {
+            // SAFETY: `sqlite3_vec_init` is SQLite's extension entry point
+            // (`int (sqlite3*, char**, const sqlite3_api_routines*)`); the
+            // crate declares it without arguments, so it is cast to that.
+            let init = unsafe {
+                std::mem::transmute::<*const (), rusqlite::auto_extension::RawAutoExtension>(
+                    sqlite_vec::sqlite3_vec_init as *const (),
+                )
+            };
+            // SAFETY: registered once, before connections that use it open.
+            unsafe { rusqlite::auto_extension::register_auto_extension(init) }
+                .map_err(|e| e.to_string())
+        })
+        .clone()
+        .map_err(|e| EngineError::ExtensionUnavailable("sqlite-vec".to_string(), e))
+}
+
 impl SqliteEngine {
     /// Open (creating if necessary) the database file at `path` for `space`.
     pub fn open(space: &str, path: &Path) -> Result<Self, EngineError> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
+        register_sqlite_vec()?;
         let conn = Connection::open_in_memory_with_flags(
             OpenFlags::SQLITE_OPEN_READ_WRITE
                 | OpenFlags::SQLITE_OPEN_CREATE
@@ -167,6 +190,8 @@ impl QueryEngine for SqliteEngine {
             | Capabilities::ARROW_OUT
             | Capabilities::PUSHDOWN_JOIN
             | Capabilities::PUSHDOWN_AGG
+            | Capabilities::EXT_FTS
+            | Capabilities::EXT_VECTOR
     }
 
     fn instance_id(&self) -> &str {
@@ -205,15 +230,23 @@ impl QueryEngine for SqliteEngine {
         if space != self.space {
             return Ok(Vec::new());
         }
-        let sql = format!(
-            "SELECT name FROM {}.sqlite_master WHERE type = 'table' ORDER BY name",
-            quote_ident(space)
-        );
+        // Tables and virtual tables (FTS5, vec0), not the shadow tables
+        // that back virtual tables nor SQLite's own `sqlite_*` tables.
+        // sqlite-vec 0.1.9 does not mark `<t>_vector_chunksNN` as shadow.
+        let sql = "SELECT t.name FROM pragma_table_list t \
+                   WHERE t.schema = ?1 AND t.type IN ('table', 'virtual') \
+                     AND t.name NOT LIKE 'sqlite\\_%' ESCAPE '\\' \
+                     AND NOT EXISTS ( \
+                         SELECT 1 FROM pragma_table_list v \
+                         WHERE v.schema = ?1 AND v.type = 'virtual' \
+                           AND t.name GLOB v.name || '_vector_chunks[0-9]*') \
+                   ORDER BY t.name";
+        let space = space.to_string();
         self.worker
             .run(move |conn| {
-                let mut stmt = conn.prepare(&sql).map_err(sql_err)?;
+                let mut stmt = conn.prepare(sql).map_err(sql_err)?;
                 let names = stmt
-                    .query_map([], |row| row.get::<_, String>(0))
+                    .query_map([&space], |row| row.get::<_, String>(0))
                     .map_err(sql_err)?
                     .collect::<Result<Vec<_>, _>>()
                     .map_err(sql_err)?;

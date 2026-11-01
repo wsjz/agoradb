@@ -38,6 +38,10 @@ bitflags::bitflags! {
         /// Can attach a Lance namespace ([`SpaceSource::LanceNamespace`](crate::SpaceSource::LanceNamespace))
         /// and run Lance vector and full-text search.
         const READ_LANCE = 1 << 8;
+        /// Full-text search (`MATCH` on FTS5 tables).
+        const EXT_FTS = 1 << 9;
+        /// Vector search (`MATCH` on sqlite-vec `vec0` tables).
+        const EXT_VECTOR = 1 << 10;
     }
 }
 

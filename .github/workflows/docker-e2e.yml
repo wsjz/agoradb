@@ -23,7 +23,7 @@ jobs:
       - name: Build the node image
         run: docker compose -f docker/compose.yml build
 
-      - name: Discovery, TLS, federated query, subscription, revocation, Lance search
+      - name: Discovery, TLS, federated query, subscription, revocation, search
         run: bash tests/e2e/docker_nodes.sh
         env:
           E2E_BUILD: "0"

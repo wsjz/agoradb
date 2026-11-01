@@ -120,6 +120,10 @@ Lance (lance-table, lance-io, lance-core, lance-file, lance-encoding and the oth
   https://github.com/lance-format/lance  -  Apache License 2.0
   Copyright The Lance Authors
 
+sqlite-vec (sqlite-vec; vector search in transactional Spaces, compiled into SQLite)
+  https://github.com/asg017/sqlite-vec  -  MIT License (also Apache-2.0)
+  Copyright (c) 2024 Alex Garcia
+
 LZ4 (bundled by lz4-sys, used by lance-encoding)
   https://github.com/lz4/lz4  -  BSD 2-Clause License
   Copyright (c) 2011-2020, Yann Collet
