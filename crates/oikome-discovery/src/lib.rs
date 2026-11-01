@@ -56,6 +56,10 @@ pub const ENDPOINT_PROTOCOL: &str = "/oikome/endpoint/1";
 const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 /// How long [`Discovery::start`] waits for the listener to come up.
 const LISTEN_TIMEOUT: Duration = Duration::from_secs(10);
+/// How often mDNS asks the local network for peers. libp2p's default is five
+/// minutes, so a node whose first query went unanswered (a peer still
+/// starting, a dropped multicast packet) stayed alone that long.
+const MDNS_QUERY_INTERVAL: Duration = Duration::from_secs(10);
 
 /// `/oikome/endpoint/1` request: "where do you serve Flight?"
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -182,7 +186,10 @@ impl Discovery {
                 let peer_id = key.public().to_peer_id();
                 let mdns = if use_mdns {
                     Some(mdns::tokio::Behaviour::new(
-                        mdns::Config::default(),
+                        mdns::Config {
+                            query_interval: MDNS_QUERY_INTERVAL,
+                            ..Default::default()
+                        },
                         peer_id,
                     )?)
                 } else {
