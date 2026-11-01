@@ -16,6 +16,16 @@ futures = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }
+lance-table = { workspace = true, optional = true }
+lance-io = { workspace = true, optional = true }
+# Only to build their protobuf definitions with the vendored protoc.
+lance-file = { workspace = true, optional = true }
+lance-encoding = { workspace = true, optional = true }
+
+[features]
+default = ["lance"]
+# Read Lance manifests, to ship one version of a dataset to subscribers.
+lance = ["dep:lance-table", "dep:lance-io", "dep:lance-file", "dep:lance-encoding"]
 
 [dev-dependencies]
 oikome-storage = { path = "../oikome-storage" }

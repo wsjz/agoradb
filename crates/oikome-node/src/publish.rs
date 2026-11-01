@@ -147,11 +147,24 @@ impl OikomeSession {
         let namespace = self.catalog.space_namespace(&target)?;
 
         let engine = self.engines().sqlite_private_for(&source)?;
-        let all_tables = engine.table_names(&source.name).await?;
+        // Virtual tables (FTS5, vec0) index other tables; those are published.
+        let virtual_tables = virtual_tables(&engine, &source.name).await?;
+        let all_tables: Vec<String> = engine
+            .table_names(&source.name)
+            .await?
+            .into_iter()
+            .filter(|t| !virtual_tables.contains(t))
+            .collect();
         let selected = match &request.tables {
             None => all_tables.clone(),
             Some(tables) => {
                 for t in tables {
+                    if virtual_tables.contains(t) {
+                        return Err(SessionError::Unsupported(format!(
+                            "publishing virtual table {}.{t}; publish the table it indexes",
+                            source.name
+                        )));
+                    }
                     if !all_tables.contains(t) {
                         return Err(
                             CatalogError::TableNotFound(format!("{}.{t}", source.name)).into()
@@ -362,4 +375,27 @@ pub fn spawn_publisher(
             }
         }
     })
+}
+
+/// Names of the virtual tables (FTS5, vec0) of the SQLite Space `space`.
+async fn virtual_tables(
+    engine: &Arc<dyn QueryEngine>,
+    space: &str,
+) -> Result<Vec<String>, SessionError> {
+    let sql = format!(
+        "SELECT name FROM {}.sqlite_master WHERE type = 'table' AND sql LIKE 'CREATE VIRTUAL TABLE%'",
+        quote_ident(space)
+    );
+    let (_, stream) = engine.query(&sql, &[]).await?;
+    let batches: Vec<RecordBatch> = futures::TryStreamExt::try_collect(stream).await?;
+    let mut names = Vec::new();
+    for batch in &batches {
+        let column = arrow_cast::cast(batch.column(0), &DataType::Utf8)?;
+        let column = column
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .ok_or_else(|| SessionError::Unsupported("virtual table names".to_string()))?;
+        names.extend(column.iter().flatten().map(str::to_string));
+    }
+    Ok(names)
 }

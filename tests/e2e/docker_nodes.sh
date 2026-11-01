@@ -15,7 +15,9 @@
 
 # End-to-end check of the network phase (3.1) on the three nodes of
 # docker/compose.yml: discovery, TLS pinned to DIDs, a UCAN-gated federated
-# query, subscription, and revocation cutting access. Every step prints what
+# query, subscription, revocation cutting access, Lance search on a Space
+# and on a subscribed copy of it, FTS5 / sqlite-vec search on a
+# transactional Space, and a DuckPGQ graph query. Every step prints what
 # was expected and what happened; the first mismatch fails the run.
 #
 #   E2E_BUILD=1     build the image first (default)
@@ -153,6 +155,48 @@ check_contains "remote query after revocation" "permission denied" \
 check_contains "refresh after revocation" "permission denied" \
     "$(sql_err node-b "REFRESH SPACE copy")"
 check "the copy already taken stays readable" "3" "$(sql node-b "SELECT count(*) FROM copy.posts")"
+
+echo "== Lance (3.3): node-a searches its Lance Space, node-b a copy of it"
+sql node-a "CREATE SPACE notes WITH FORMAT = 'lance'" >/dev/null
+sql node-a "CREATE TABLE notes.items (id BIGINT, body VARCHAR, embedding FLOAT[4])" >/dev/null
+sql node-a "INSERT INTO notes.items SELECT i, CASE WHEN i % 3 = 0 THEN 'apple banana' ELSE 'cherry date' END || ' note ' || i, [i % 7, i % 5, i % 3, 1.0]::FLOAT[4] FROM (SELECT unnest(range(300)) AS i) t" >/dev/null
+sql node-a "CREATE INDEX emb ON notes.items USING IVF_FLAT (embedding) WITH (num_partitions = 2, metric_type = 'l2')" >/dev/null
+sql node-a "CREATE INDEX body ON notes.items USING INVERTED (body)" >/dev/null
+sql node-a "GRANT SELECT ON notes.items TO \"$DID_B\"" >/dev/null
+NEAREST="SELECT id FROM lance_vector_search(%s.items, 'embedding', [0, 0, 0, 1]::FLOAT[4], k => 3) ORDER BY _distance, id"
+BANANAS="SELECT count(*) FROM lance_fts(%s.items, 'body', 'banana', k => 5) WHERE id %% 3 = 0"
+check "vector search on node-a" "$(printf '0\n105\n210')" "$(sql node-a "$(printf "$NEAREST" notes)")"
+check "full-text search on node-a" "5" "$(sql node-a "$(printf "$BANANAS" notes)")"
+NOTES_READ=$(sql node-a "ISSUE UCAN ON SPACE notes TO '$DID_B' CAN 'space/read'" | cut -f4)
+sql node-b "CREATE SPACE notes_copy WITH TOKEN = '$NOTES_READ', REMOTE = 'notes', MODE = 'subscribe'" >/dev/null
+indexes() {
+    "${COMPOSE[@]}" exec -T "$1" sh -c "ls $2/items.lance/_indices | sort | tr '\n' ' '"
+}
+check "node-b's copy holds node-a's indexes (none built on node-b)" \
+    "$(indexes node-a /data/.oikome/lance/notes)" \
+    "$(indexes node-b /data/.oikome/replicas/notes_copy/lance)"
+check "vector search on node-b's copy" "$(printf '0\n105\n210')" "$(sql node-b "$(printf "$NEAREST" notes_copy)")"
+check "full-text search on node-b's copy" "5" "$(sql node-b "$(printf "$BANANAS" notes_copy)")"
+
+echo "== FTS5 and sqlite-vec (3.3): search in node-b's transactional Space"
+sql node-b "CREATE VIRTUAL TABLE orders.notes USING fts5(body, tokenize = 'porter')" >/dev/null
+sql node-b "INSERT INTO orders.notes (rowid, body) VALUES (1, 'red apples'), (2, 'yellow bananas'), (3, 'apples and bananas')" >/dev/null
+sql node-b "CREATE VIRTUAL TABLE orders.embeddings USING vec0(embedding float[4])" >/dev/null
+sql node-b "INSERT INTO orders.embeddings (rowid, embedding) VALUES (1, '[1, 0, 0, 0]'), (2, '[0, 1, 0, 0]'), (3, '[0.9, 0.1, 0, 0]')" >/dev/null
+check "full-text search on node-b" "$(printf '1\n3')" \
+    "$(sql node-b "SELECT rowid FROM orders.notes WHERE notes MATCH 'apple' ORDER BY bm25(notes)")"
+check "vector search on node-b" "$(printf '1\n3')" \
+    "$(sql node-b "SELECT rowid FROM orders.embeddings WHERE embedding MATCH '[1, 0, 0, 0]' AND k = 2 ORDER BY distance")"
+
+echo "== DuckPGQ (3.3): a shortest path in node-a's Lance Space"
+sql node-a "CREATE SPACE social WITH FORMAT = 'lance'" >/dev/null
+sql node-a "CREATE TABLE social.people (id BIGINT, name VARCHAR)" >/dev/null
+sql node-a "INSERT INTO social.people VALUES (1, 'alice'), (2, 'bob'), (3, 'carol'), (4, 'dave')" >/dev/null
+sql node-a "CREATE TABLE social.knows (src BIGINT, dst BIGINT)" >/dev/null
+sql node-a "INSERT INTO social.knows VALUES (1, 2), (2, 3), (3, 4), (1, 3)" >/dev/null
+sql node-a "CREATE PROPERTY GRAPH social.friends VERTEX TABLES (people LABEL person) EDGE TABLES (knows SOURCE KEY (src) REFERENCES people (id) DESTINATION KEY (dst) REFERENCES people (id) LABEL knows)" >/dev/null
+check "hops from alice to dave" "2" \
+    "$(sql node-a "FROM GRAPH_TABLE (social.friends MATCH p = ANY SHORTEST (a:person WHERE a.name = 'alice')-[k:knows]->+(b:person WHERE b.name = 'dave') COLUMNS (path_length(p) AS hops))")"
 
 echo "== mDNS (node-c was given no address)"
 wait_for "node-c discovers node-a by mDNS" 60 knows_peer node-c "$DID_A"

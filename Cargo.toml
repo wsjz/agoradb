@@ -56,7 +56,7 @@ sqlparser = { version = "0.62", features = ["visitor"] }
 
 # Engines
 # Prebuilt libduckdb via DUCKDB_DOWNLOAD_LIB (.cargo/config.toml); parquet is built in.
-duckdb = { version = "=1.10505.0" }
+duckdb = { version = "=1.10506.1" }
 rusqlite = { version = "0.40", features = ["bundled", "column_decltype"] }
 
 # Identity and networking
@@ -71,6 +71,16 @@ web-time = "1.1.0"
 wasm-bindgen = "=0.2.108"
 wasm-bindgen-futures = "0.4.58"
 js-sys = "0.3.85"
+# Lance manifests (crates/oikome-catalog, feature `lance`): which files make
+# up one version of a dataset. Pinned to the lance release inside DuckDB
+# 1.5.6's `lance` extension; protoc is built from source (`protoc`), so no
+# system protobuf compiler is needed. No cloud object stores.
+lance-table = { version = "=12.0.0", features = ["protoc"] }
+lance-io = { version = "=12.0.0", default-features = false }
+lance-file = { version = "=12.0.0", features = ["protoc"] }
+lance-encoding = { version = "=12.0.0", features = ["protoc"] }
+# Vector search in transactional Spaces (vec0 tables), compiled into SQLite.
+sqlite-vec = "=0.1.9"
 # WebRTC endpoint of a Full Node for browsers (crates/oikome-webrtc): pure
 # Rust crypto (dimpl DTLS, sctp-proto), no C library.
 str0m = { version = "=0.24.1", default-features = false, features = ["rust-crypto"] }

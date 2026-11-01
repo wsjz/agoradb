@@ -24,7 +24,7 @@ Oikome 是一个 **AI Native 的多模态私域数据中心**，通常使用个�
 Oikome 负责"谁能看什么、数据从哪来、存在哪、查询和任务发到哪"，**不负责"怎么算"**：计算交给可插拔的嵌入式引擎（分析型 DuckDB、事务型 SQLite，浏览器端由 JS 宿主提供），DataFusion 只作为联邦协调器合并多个引擎的 Arrow 结果。规范见 `oikome_architecture_v3.md`。
 
 - **核心语言**: Rust（WASM 可编译、内存安全）
-- **计算引擎**: DuckDB（分析型 Space）、SQLite（事务型 Space）
+- **计算引擎**: DuckDB 1.5.6（分析型 Space；Lance Space 经 `lance` 扩展读写和检索、经 `duckpgq` 做图查询，扩展用 `oikome extensions install` 下载）、SQLite（事务型 Space；FTS5 全文检索，sqlite-vec 向量检索）
 - **联邦协调**: Apache DataFusion + `datafusion-federation`（仅合并，不读文件）
 - **目录系统**: Apache Iceberg（分析型 Space）+ `.oikome/` 下的 Space/Location 注册表
 - **存储格式**: Apache Parquet（分析型、P2P 同步单元）、SQLite 文件（事务型）、Lance（向量 / 全文 / 大对象，3.3）
@@ -145,10 +145,21 @@ v3 路线图（详见 `oikome_architecture_v3.md` §14）：
 | 3.0-D 发布 | `PUBLISH SPACE`：SQLite → Iceberg 快照（覆盖式）、定时发布 | ✅ |
 | 3.1 网络 | DID/UCAN、Arrow Flight 远端表、libp2p 发现、快照订阅 | ✅（3.1a 远程查询、3.1b 快照订阅、3.1c 节点发现与加密传输、3.1d 三个 Docker 节点在 CI 跑通） |
 | 3.2 浏览器 | WASM 核心 + 宿主引擎桥（duckdb-wasm）；经 Full Node 的联邦查询走 WebRTC 数据通道 | ✅ 3.2a 本地查询；3.2b WebRTC 与联邦查询 |
-| 3.3 多模态 | Lance Location（经 DuckDB `lance` 扩展：向量、全文、大对象）、DuckPGQ、SQLite FTS5/sqlite-vec | 待开始 |
+| 3.3 多模态 | Lance Location（经 DuckDB `lance` 扩展：向量、全文、大对象）、DuckPGQ、SQLite FTS5/sqlite-vec | ✅ 3.3a Lance Space；3.3b SQLite 全文和向量检索；3.3c DuckPGQ（只在 Lance Space 上） |
 | 3.4 网盘 | opendal 网盘服务（WebDAV、Google Drive、Dropbox、OneDrive 等）、同步文件夹、客户端加密；SQLite 不放网盘 | 待开始 |
 | 3.5 数据接入 | `Connector` 合约、按来源主键 upsert + 游标同事务提交、定时拉取；首批：文件导入、flomo | 待开始 |
 | 3.6 算力共享 | `compute/<runtime>` UCAN 能力与限额（与数据授权分开）、任务经 Arrow Flight 路由到对端已注册的运行时、按对端配额 | 待开始 |
+
+用户端路线（与上面的核心阶段并行，互不阻塞；每个里程碑要等前置阶段完成，详见架构 §14.1）：
+
+| 里程碑 | 目标 | 前置 | 状态 |
+|-------|------|------|----------|
+| M1a 目录拆分 | `web/` 拆到 `packages/node` 和 `e2e/`，根目录 `package.json` 用 npm workspaces；browser-e2e 原样通过 | 3.2 | 待开始 |
+| M1b 页面 | `packages/ui`、`packages/screens`、`packages/client`、`apps/web`：9 个页面先用假数据，桌面和手机两套布局 | M1a | 待开始 |
+| M1c 能用 | `oikome-api`、`oikome serve --web`、`packages/api`；首次启动与恢复密钥、资料库、分享与收回、手机配对、访问记录、高级 SQL 接上真实数据 | 3.0–3.2、M1b | 待开始 |
+| M2 能接 | 接入页与同步状态、首页看板、内置卡片、看板插件 v1（`plugin-sdk`、数据契约、插件授权）、参考插件 | 3.5、M1c | 待开始 |
+| M3 能找 | 全文和语义搜索、照片和笔记视图、AI 助手页、`oikome-mcp` | 3.3、M2 | 待开始 |
+| M4 能扩 | 借用算力、第三方接入插件、插件目录；网盘存储待定 | 3.4、3.6、M3 | 待开始 |
 
 **规则**: 禁止跳阶段。每个阶段的退出标准必须达成后才能进入下一阶段。
 
@@ -254,6 +265,11 @@ oikome/
 ```
 
 计划中：`oikome-connect`（3.5），`oikome-cli`。
+
+用户端计划中（目录等对应工作开始时才建，结构见架构 §13.3）：
+- crate：`oikome-api`（M1c）、`oikome-mcp`（M3）。
+- 根目录：`package.json`（npm workspaces，M1a）、`apps/`（web 在 M1b；desktop、mobile 以后）、`packages/`（node 在 M1a；screens、ui、client 在 M1b；api 在 M1c；plugin-sdk 在 M2）、`plugins/`（M2）、`design/`（以后）、`e2e/`（M1a）。
+- M1a 时 `web/` 拆到 `packages/node` 和 `e2e/`，之后不再有 `web/`。
 
 ---
 
@@ -401,10 +417,14 @@ oikome/
 | 2026-10-30 | 定位改为 AI Native 的多模态私域数据中心（通常使用个人资源、支持受信的数据交换）：新增网盘接入（3.4）、数据接入（3.5）、算力共享（3.6），v3 各层不变；数据交换和算力共享同一信任机制、不同授权 | 数据和算力留在个人手里，个人之间互相调用而不交给大平台；架构见 `oikome_architecture_v3.md` §1、§7.5、§11、§12 |
 | 2026-10-31 | 3.2a 浏览器节点：duckdb-wasm 作本地引擎（SQLite 以后再做）；`HostEngine` 只存 id、JS 对象放线程本地表、结果用 Arrow IPC；DataFusion 去掉 compression/parquet 并给 datafusion-federation 0.5.5 打补丁；浏览器连 Full Node 定为 WebRTC 数据通道（3.2b） | 不改 `QueryEngine` 和 DataFusion；0.5.7 才修掉强制默认功能但要 DataFusion 55；浏览器无法按 DID 校验证书，WebRTC 能锁定 DID 签名过的指纹。见架构 §10 |
 | 2026-11-01 | 3.2b：Full Node 用 str0m（纯 Rust 加密）提供 WebRTC 端点，浏览器 WebRTC-direct 直连（不需要信令），服务端不校验浏览器的 DTLS 证书；请求是带 Flight 调用同样字段的信封，由 `serve_envelope` 走同一套认证、授权和语义层；浏览器里的协调器单任务执行（一个分区，`MergePartitionsExec` 代替会起任务的 `CoalescePartitionsExec`），chrono 开 `wasmbind` | 服务端不引入 C 加密库，也不要信令服务；浏览器靠签名的请求认证，和原生节点一样；DataFusion 54 合并分区会起 Tokio 任务、按 `std` 读时钟，在浏览器里都会 panic。见架构 §10 |
+| 2026-11-01 | 3.3c：图查询（DuckPGQ）只在 Lance Space 上；图定义存在目录里（`graphs.json`），DuckDB 里没有时先建图；只给主人、只读一个 Space | DuckPGQ 不支持在视图上建图，而 Iceberg 表在 DuckDB 里是视图；为每个快照复制成表的方案没有采用。见架构 §8 |
+| 2026-11-01 | 3.3b：事务型 Space 支持 FTS5 和 sqlite-vec 0.1.9；`CREATE VIRTUAL TABLE` 由 Oikome 自己读（只认 fts5、vec0，括号里原样交给 SQLite）；含 `MATCH` 的语句改用 SQLite 方言解析；检索只给主人、只在一个 Space 里；`PUBLISH` 跳过虚拟表 | sqlparser 读不了模块参数，通用方言没有 `MATCH`，自定义方言会改变其他语句的解析；见架构 §8 |
+| 2026-11-01 | 3.3a：DuckDB 升到 1.5.6；Lance Space（`FORMAT = 'lance'`）整体挂到 DuckDB，读写、建索引、三种检索都交给 `lance` 扩展；检索只给主人和订阅副本、只在一个 Space 里；读最新版本，订阅用 `lance-table` 列出一个版本的文件（索引一起过去）；不加 `MODES` 声明，按格式和语句检查能力；扩展只由 `oikome extensions install` 下载；DuckDB 每条语句用新连接（扩展按连接缓存数据集） | 扩展不能按版本读、也不能列出版本文件；检索会绕过列授权和行策略；见架构 §7.6、§8、§9 |
 | 2026-10-30 | 3.1d：网络阶段的完成标准在 GitHub Actions 上用三个 Docker 节点验证（其中一个只靠 mDNS 发现） | 本机没有容器环境；CI 每次推送都跑，Docker 桥接网络也能验证本机防火墙挡住的 mDNS |
 | 2026-10-30 | 3.1c：节点间默认 TLS，证书由节点 DID 密钥自签并按 DID 校验；明文 http 需 `--allow-http`；libp2p 只做发现，结果写入目录的 Peers 表，`PEER` 可不写 | DID 本来就是请求签名的身份，按它校验证书不需要 CA 和域名；发现结果放目录里，`serve` 和 `sql` 两个进程都能用。见架构 §3.4、§9 |
 | 2026-10-30 | 3.1b 快照订阅：只复制对方能看整张表的表，其余标 `restricted` 只能远程查；撤销只停止后续同步，已复制的文件收不回；VFS 接入推迟到 3.4 | 文件无法按列授权和行策略过滤；数据一旦复制就无法收回，写明而不是默认。见架构 §5.3、§9 |
 | 2026-10-30 | Lance 作为第三种 Location 格式，用于向量、全文和大对象；分析型 Space 不再用 DuckDB vss/fts | Lance 的索引存在数据集里、随版本同步，订阅方不用重建；表格数据仍用 Iceberg + Parquet。见 §7.6 |
+| 2026-11-01 | 用户端：只服务主人的个人私域数据中心，不做运维和开发者页面，成员以后做，界面统一英文（以后 i18n）；根目录新增 `apps/`（各端薄外壳）、`packages/`（共享 TypeScript）、`plugins/`、`design/`、`e2e/`，根目录 `package.json` 用 npm workspaces；目录等对应工作开始时才建；新 crate `oikome-api`（不含传输层，调用者分主人和 principal），HTTP 由 `oikome serve --web` 提供，桌面端进程内调用，以后 `oikome-mcp` 只暴露 principal 能做的操作；桌面和手机以后用 Tauri；存储位置只给本地文件夹和 NAS，网盘做存储位置待定 | 网页、桌面、手机是同一层的端，页面放共享包里各端复用；同一套处理逻辑服务所有端，AI 助手碰不到主人才有的命令；产品原则是数据不出家门，和把数据放在网盘服务商那里冲突，架构 §7.5 和 3.4 先不动，等决定。见架构 §13.3、§13.4、§14.1 |
 
 ---
 

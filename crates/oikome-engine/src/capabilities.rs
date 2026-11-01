@@ -35,6 +35,15 @@ bitflags::bitflags! {
         const PUSHDOWN_JOIN = 1 << 6;
         /// Aggregates may be pushed down.
         const PUSHDOWN_AGG = 1 << 7;
+        /// Can attach a Lance namespace ([`SpaceSource::LanceNamespace`](crate::SpaceSource::LanceNamespace))
+        /// and run Lance vector and full-text search.
+        const READ_LANCE = 1 << 8;
+        /// Full-text search (`MATCH` on FTS5 tables).
+        const EXT_FTS = 1 << 9;
+        /// Vector search (`MATCH` on sqlite-vec `vec0` tables).
+        const EXT_VECTOR = 1 << 10;
+        /// Property graphs and SQL/PGQ `GRAPH_TABLE` queries (DuckPGQ).
+        const EXT_GRAPH = 1 << 11;
     }
 }
 

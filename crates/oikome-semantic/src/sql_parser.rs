@@ -21,7 +21,8 @@
 //!                           ENGINE = 'duckdb' | 'sqlite',
 //!                           LOCATION = '<location id>',
 //!                           ACCESS = 'writable' | 'readonly',
-//!                           STORAGE = 'disk']
+//!                           STORAGE = 'disk',
+//!                           FORMAT = 'iceberg' | 'lance']
 //! CREATE SPACE <name> WITH TOKEN = '<ucan>' [, PEER = 'https://host:port'
 //!                                             | 'webrtc:<record>' (browser node)]
 //!                          [, REMOTE = '<space on the peer>'] [, KIND = 'remote']
@@ -36,16 +37,29 @@
 //!
 //! plus the identity and capability statements of [`crate::capability`].
 //!
+//! `CREATE VIRTUAL TABLE [IF NOT EXISTS] <space>.<table> USING fts5(...)`
+//! (or `vec0(...)`) is read here too: sqlparser accepts only plain names as
+//! module arguments, and FTS5 and sqlite-vec take options such as
+//! `tokenize = 'porter'` or `embedding float[768]`.
+//!
 //! Everything else is parsed by `sqlparser` with the generic dialect and
-//! returned as an AST for classification and routing.
+//! returned as an AST for classification and routing. A statement using the
+//! `MATCH` operator of FTS5 and sqlite-vec, which the generic dialect lacks,
+//! is parsed with the SQLite dialect instead.
 
 use oikome_core::CreateSpaceRequest;
 use sqlparser::ast::Statement;
-use sqlparser::dialect::GenericDialect;
+use sqlparser::dialect::{GenericDialect, SQLiteDialect};
+use sqlparser::keywords::Keyword;
 use sqlparser::parser::Parser;
+use sqlparser::tokenizer::{Token, Tokenizer};
 
 use crate::capability::{parse_issue_ucan, parse_revoke_ucan, IssueUcanRequest};
 use crate::error::SemanticError;
+use crate::graph::{
+    mentions_graph_table, parse_create_graph, parse_drop_graph, parse_graph_query,
+    CreateGraphRequest, DropGraphRequest, GraphQuery,
+};
 
 /// One parsed statement.
 #[derive(Debug, Clone, PartialEq)]
@@ -73,6 +87,14 @@ pub enum OikomeStatement {
     ShowPeers,
     /// `SHOW WEBRTC`: the signed access record browsers connect with.
     ShowWebrtc,
+    /// `CREATE VIRTUAL TABLE ... USING fts5(...) | vec0(...)`
+    CreateVirtualTable(VirtualTableRequest),
+    /// `CREATE PROPERTY GRAPH ...` (DuckPGQ)
+    CreatePropertyGraph(CreateGraphRequest),
+    /// `DROP PROPERTY GRAPH ...`
+    DropPropertyGraph(DropGraphRequest),
+    /// A query using `GRAPH_TABLE (...)`
+    GraphQuery(GraphQuery),
     /// Any standard SQL statement.
     Sql(Box<Statement>),
 }
@@ -87,6 +109,23 @@ pub struct PublishRequest {
     /// Target analytical Space; `None` means `<space>_published`.
     pub target: Option<String>,
 }
+
+/// What `CREATE VIRTUAL TABLE` asks for: an FTS5 or sqlite-vec table in a
+/// transactional Space.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VirtualTableRequest {
+    /// `None` when the name is not qualified (`SET SPACE` applies).
+    pub space: Option<String>,
+    pub table: String,
+    /// `fts5` or `vec0`.
+    pub module: String,
+    /// The module arguments as written, without the parentheses.
+    pub args: String,
+    pub if_not_exists: bool,
+}
+
+/// Virtual table modules a transactional Space may use.
+pub const VIRTUAL_TABLE_MODULES: [&str; 2] = ["fts5", "vec0"];
 
 /// Parse `sql` into one or more statements.
 pub fn parse(sql: &str) -> Result<Vec<OikomeStatement>, SemanticError> {
@@ -110,6 +149,21 @@ fn parse_one(stmt: &str) -> Result<OikomeStatement, SemanticError> {
     let upper = |i: usize| words.get(i).map(|w| w.to_ascii_uppercase());
     match (upper(0).as_deref(), upper(1).as_deref()) {
         (Some("CREATE"), Some("SPACE")) => parse_create_space(stmt),
+        (Some("CREATE"), Some("VIRTUAL")) => parse_create_virtual_table(stmt),
+        (Some("CREATE"), Some("PROPERTY")) => Ok(OikomeStatement::CreatePropertyGraph(
+            parse_create_graph(stmt)?,
+        )),
+        (Some("CREATE"), Some("OR"))
+            if upper(2).as_deref() == Some("REPLACE")
+                && upper(3).as_deref() == Some("PROPERTY") =>
+        {
+            Ok(OikomeStatement::CreatePropertyGraph(parse_create_graph(
+                stmt,
+            )?))
+        }
+        (Some("DROP"), Some("PROPERTY")) => {
+            Ok(OikomeStatement::DropPropertyGraph(parse_drop_graph(stmt)?))
+        }
         (Some(verb @ ("DROP" | "REFRESH")), Some("SPACE")) => {
             let name = words.get(2).ok_or_else(|| {
                 SemanticError::Parse(format!("{verb} SPACE: expected a space name"))
@@ -159,9 +213,17 @@ fn parse_one(stmt: &str) -> Result<OikomeStatement, SemanticError> {
             };
             Ok(OikomeStatement::SetSpace(validate_name(unquote(raw))?))
         }
+        _ if mentions_graph_table(stmt) => {
+            Ok(OikomeStatement::GraphQuery(parse_graph_query(stmt)?))
+        }
         _ => {
-            let mut parsed = Parser::parse_sql(&GenericDialect {}, stmt)
-                .map_err(|e| SemanticError::Parse(e.to_string()))?;
+            let mut parsed = match Parser::parse_sql(&GenericDialect {}, stmt) {
+                Ok(parsed) => parsed,
+                // Only the SQLite dialect has the MATCH operator.
+                Err(e) if mentions_match(stmt) => Parser::parse_sql(&SQLiteDialect {}, stmt)
+                    .map_err(|_| SemanticError::Parse(e.to_string()))?,
+                Err(e) => return Err(SemanticError::Parse(e.to_string())),
+            };
             match parsed.len() {
                 1 => Ok(OikomeStatement::Sql(Box::new(parsed.remove(0)))),
                 0 => Err(SemanticError::Parse("empty statement".into())),
@@ -169,6 +231,113 @@ fn parse_one(stmt: &str) -> Result<OikomeStatement, SemanticError> {
             }
         }
     }
+}
+
+/// Whether `stmt` uses the `MATCH` keyword outside quotes and comments.
+fn mentions_match(stmt: &str) -> bool {
+    Tokenizer::new(&GenericDialect {}, stmt)
+        .tokenize()
+        .is_ok_and(|tokens| {
+            tokens
+                .iter()
+                .any(|t| matches!(t, Token::Word(w) if w.keyword == Keyword::MATCH && w.quote_style.is_none()))
+        })
+}
+
+/// `CREATE VIRTUAL TABLE [IF NOT EXISTS] [<space>.]<table> USING <module>(<args>)`.
+fn parse_create_virtual_table(stmt: &str) -> Result<OikomeStatement, SemanticError> {
+    let usage = || {
+        SemanticError::Parse(
+            "CREATE VIRTUAL TABLE: expected CREATE VIRTUAL TABLE [IF NOT EXISTS] \
+             <space>.<table> USING fts5(...) | vec0(...)"
+                .into(),
+        )
+    };
+    let tokens = Tokenizer::new(&GenericDialect {}, stmt)
+        .tokenize()
+        .map_err(|e| SemanticError::Parse(e.to_string()))?;
+    let mut iter = tokens
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| !matches!(t, Token::Whitespace(_)));
+    let mut next = || iter.next();
+    let keyword = |t: Option<(usize, &Token)>, k: Keyword| matches!(t, Some((_, Token::Word(w))) if w.keyword == k && w.quote_style.is_none());
+    let name = |t: Option<(usize, &Token)>| match t {
+        Some((_, Token::Word(w))) => Some(w.value.clone()),
+        _ => None,
+    };
+    if !(keyword(next(), Keyword::CREATE)
+        && keyword(next(), Keyword::VIRTUAL)
+        && keyword(next(), Keyword::TABLE))
+    {
+        return Err(usage());
+    }
+    let mut token = next();
+    let mut if_not_exists = false;
+    if keyword(token, Keyword::IF) {
+        if !(keyword(next(), Keyword::NOT) && keyword(next(), Keyword::EXISTS)) {
+            return Err(usage());
+        }
+        if_not_exists = true;
+        token = next();
+    }
+    let first = name(token).ok_or_else(usage)?;
+    token = next();
+    let (space, table) = if matches!(token, Some((_, Token::Period))) {
+        let table = name(next()).ok_or_else(usage)?;
+        token = next();
+        (Some(validate_name(&first)?), validate_name(&table)?)
+    } else {
+        (None, validate_name(&first)?)
+    };
+    if !keyword(token, Keyword::USING) {
+        return Err(usage());
+    }
+    let module = name(next()).ok_or_else(usage)?.to_ascii_lowercase();
+    if !VIRTUAL_TABLE_MODULES.contains(&module.as_str()) {
+        return Err(SemanticError::Unsupported(format!(
+            "virtual table module '{module}' (expected {})",
+            VIRTUAL_TABLE_MODULES.join(" or ")
+        )));
+    }
+    let Some((open, Token::LParen)) = next() else {
+        return Err(usage());
+    };
+    // The arguments as written: every token up to the matching parenthesis,
+    // which must end the statement.
+    let mut depth = 0usize;
+    let mut close = None;
+    for (i, t) in tokens.iter().enumerate().skip(open) {
+        match t {
+            Token::LParen => depth += 1,
+            Token::RParen => {
+                depth -= 1;
+                if depth == 0 {
+                    close = Some(i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let close = close.ok_or_else(usage)?;
+    if tokens[close + 1..]
+        .iter()
+        .any(|t| !matches!(t, Token::Whitespace(_) | Token::SemiColon))
+    {
+        return Err(usage());
+    }
+    let args: String = tokens[open + 1..close]
+        .iter()
+        .map(|t| t.to_string())
+        .collect();
+    Ok(OikomeStatement::CreateVirtualTable(VirtualTableRequest {
+        space,
+        table,
+        module,
+        args: args.trim().to_string(),
+        if_not_exists,
+    }))
 }
 
 fn parse_create_space(stmt: &str) -> Result<OikomeStatement, SemanticError> {
@@ -216,6 +385,7 @@ fn parse_create_space(stmt: &str) -> Result<OikomeStatement, SemanticError> {
             "ACCESS" => request.access = Some(value.parse().map_err(invalid)?),
             "LOCATION" => request.location = Some(value),
             "STORAGE" => request.storage = Some(value),
+            "FORMAT" => request.format = Some(value.parse().map_err(invalid)?),
             "PEER" => request.peer = Some(value),
             "REMOTE" => request.remote = Some(validate_name(&value)?),
             "TOKEN" => request.token = Some(value),
@@ -223,7 +393,7 @@ fn parse_create_space(stmt: &str) -> Result<OikomeStatement, SemanticError> {
             other => {
                 return Err(SemanticError::InvalidProperty(format!(
                     "unknown CREATE SPACE property '{other}' \
-                     (expected KIND, ENGINE, LOCATION, ACCESS, STORAGE, PEER, REMOTE, TOKEN or MODE)"
+                     (expected KIND, ENGINE, LOCATION, ACCESS, STORAGE, FORMAT, PEER, REMOTE, TOKEN or MODE)"
                 )))
             }
         }
@@ -248,6 +418,7 @@ fn parse_create_space(stmt: &str) -> Result<OikomeStatement, SemanticError> {
             || request.location.is_some()
             || request.access.is_some()
             || request.storage.is_some()
+            || request.format.is_some()
         {
             return Err(SemanticError::InvalidProperty(
                 "a remote space only takes PEER, REMOTE, TOKEN, MODE and KIND = 'remote'"
@@ -304,7 +475,7 @@ fn parse_publish(stmt: &str) -> Result<OikomeStatement, SemanticError> {
     }))
 }
 
-fn validate_name(raw: &str) -> Result<String, SemanticError> {
+pub(crate) fn validate_name(raw: &str) -> Result<String, SemanticError> {
     let name = unquote(raw.trim_end_matches(';'));
     let ok = !name.is_empty()
         && name
@@ -374,6 +545,56 @@ mod tests {
             OikomeStatement::CreateSpace(req) => req,
             other => panic!("expected CREATE SPACE, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn virtual_tables_keep_their_module_arguments() {
+        let parsed = parse_single(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS shop.docs USING FTS5(title, body, tokenize = 'porter ascii')",
+        )
+        .unwrap();
+        assert_eq!(
+            parsed,
+            OikomeStatement::CreateVirtualTable(VirtualTableRequest {
+                space: Some("shop".into()),
+                table: "docs".into(),
+                module: "fts5".into(),
+                args: "title, body, tokenize = 'porter ascii'".into(),
+                if_not_exists: true,
+            })
+        );
+        let OikomeStatement::CreateVirtualTable(req) = parse_single(
+            "create virtual table vecs using vec0(embedding float[768] distance_metric=cosine)",
+        )
+        .unwrap() else {
+            panic!("expected a virtual table");
+        };
+        assert_eq!(req.space, None);
+        assert_eq!(req.args, "embedding float[768] distance_metric=cosine");
+        for sql in [
+            "CREATE VIRTUAL TABLE shop.t USING rtree(id, a, b)",
+            "CREATE VIRTUAL TABLE shop.t USING fts5(a) WITHOUT ROWID",
+            "CREATE VIRTUAL TABLE shop.t USING fts5(a",
+            "CREATE VIRTUAL TABLE shop.t fts5(a)",
+        ] {
+            assert!(parse_single(sql).is_err(), "{sql}");
+        }
+    }
+
+    #[test]
+    fn match_queries_parse_and_print_back() {
+        for sql in [
+            "SELECT rowid FROM shop.docs WHERE docs MATCH 'apple OR banana' ORDER BY bm25(docs)",
+            "SELECT rowid, distance FROM shop.vecs WHERE embedding MATCH '[1, 0]' AND k = 3",
+        ] {
+            let OikomeStatement::Sql(stmt) = parse_single(sql).unwrap() else {
+                panic!("{sql}");
+            };
+            assert_eq!(stmt.to_string(), sql);
+        }
+        // Without MATCH, errors still come from the generic dialect.
+        assert!(parse_single("SELEC 1").is_err());
+        assert!(parse_single("SELECT 'MATCH' FROM t WHERE").is_err());
     }
 
     #[test]

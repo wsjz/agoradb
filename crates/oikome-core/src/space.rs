@@ -177,6 +177,40 @@ impl FromStr for AccessMode {
     }
 }
 
+/// The storage format of a new analytical Space's Location (§7.6).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SpaceFormat {
+    /// Iceberg tables of Parquet files: scanned and aggregated.
+    #[default]
+    Iceberg,
+    /// Lance datasets: searched (vector, full text) or read row by row.
+    Lance,
+}
+
+impl fmt::Display for SpaceFormat {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SpaceFormat::Iceberg => f.write_str("iceberg"),
+            SpaceFormat::Lance => f.write_str("lance"),
+        }
+    }
+}
+
+impl FromStr for SpaceFormat {
+    type Err = crate::error::OikomeError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "iceberg" => Ok(SpaceFormat::Iceberg),
+            "lance" => Ok(SpaceFormat::Lance),
+            other => Err(crate::error::OikomeError::InvalidArgument(format!(
+                "unknown format '{other}' (expected 'iceberg' or 'lance')"
+            ))),
+        }
+    }
+}
+
 /// How a remote Space reads its owner's data (§5.3).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -230,6 +264,8 @@ pub struct CreateSpaceRequest {
     pub access: Option<AccessMode>,
     /// Storage strategy (`'disk'` only in 3.0).
     pub storage: Option<String>,
+    /// Format of a new analytical Location (default Iceberg).
+    pub format: Option<SpaceFormat>,
     /// Flight endpoint of the node owning a remote Space (`http://host:port`).
     pub peer: Option<String>,
     /// Name of the Space on the peer.
@@ -250,6 +286,7 @@ impl fmt::Debug for CreateSpaceRequest {
             .field("location", &self.location)
             .field("access", &self.access)
             .field("storage", &self.storage)
+            .field("format", &self.format)
             .field("peer", &self.peer)
             .field("remote", &self.remote)
             .field("token", &self.token.as_ref().map(|_| "<redacted>"))

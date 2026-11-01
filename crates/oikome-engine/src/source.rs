@@ -37,6 +37,14 @@ pub enum TableSource {
     },
 }
 
+/// A physical source an engine exposes as a whole Space: its tables appear as
+/// `<space>.<table>` and are read and written through the engine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SpaceSource {
+    /// A directory of Lance datasets, one `<table>.lance` per table.
+    LanceNamespace { root: PathBuf },
+}
+
 impl TableSource {
     /// Short human-readable kind, for error messages.
     pub fn kind_name(&self) -> &'static str {

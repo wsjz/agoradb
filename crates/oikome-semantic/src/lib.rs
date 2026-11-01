@@ -22,7 +22,9 @@
 pub mod capability;
 pub mod classify;
 pub mod error;
+pub mod graph;
 pub mod rewrite;
+pub mod search;
 pub mod sql_parser;
 
 pub use capability::IssueUcanRequest;
@@ -30,7 +32,12 @@ pub use classify::{
     classify, collect_spaces, cte_names, qualify_tables, DmlKind, StatementClass, TclKind,
 };
 pub use error::SemanticError;
+pub use graph::{render_graph_parts, CreateGraphRequest, DropGraphRequest, GraphPart, GraphQuery};
 pub use rewrite::{
     apply_access_control, inline_views, AccessResolver, RelationAccess, ViewResolver,
 };
-pub use sql_parser::{parse, parse_single, split_statements, OikomeStatement, PublishRequest};
+pub use search::{bind_search_tables, search_tables, uses_match, SEARCH_FUNCTIONS};
+pub use sql_parser::{
+    parse, parse_single, split_statements, OikomeStatement, PublishRequest, VirtualTableRequest,
+    VIRTUAL_TABLE_MODULES,
+};

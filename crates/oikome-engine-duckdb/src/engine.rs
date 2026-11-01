@@ -12,9 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use arrow_schema::SchemaRef;
@@ -26,7 +25,7 @@ use oikome_engine::name::{quote_ident, quote_literal};
 use oikome_engine::stream::DEFAULT_STREAM_CAPACITY;
 use oikome_engine::{
     BlockingWorker, Capabilities, EngineError, QualifiedName, QueryEngine, RecordBatchStream,
-    SqlDialect, TableSource, TxHandle, Value,
+    SpaceSource, SqlDialect, TableSource, TxHandle, Value,
 };
 
 use crate::types::arrow_to_duckdb_type;
@@ -45,6 +44,51 @@ pub struct DuckDbConfig {
     pub extension_dir: Option<PathBuf>,
 }
 
+/// A DuckDB extension Oikome loads on demand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Extension {
+    /// Reads SQLite files (`sqlite_scanner`), for analytical Spaces over a
+    /// transactional Location.
+    Sqlite,
+    /// Lance datasets: reads, writes, indexes and search (§7.6).
+    Lance,
+    /// Property graphs and SQL/PGQ queries (community extension, §8).
+    Duckpgq,
+}
+
+impl Extension {
+    /// Extensions `oikome extensions install` fetches.
+    pub const INSTALLABLE: [Extension; 3] =
+        [Extension::Sqlite, Extension::Lance, Extension::Duckpgq];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Extension::Sqlite => "sqlite",
+            Extension::Lance => "lance",
+            Extension::Duckpgq => "duckpgq",
+        }
+    }
+
+    /// The capability the extension brings.
+    fn capability(self) -> Capabilities {
+        match self {
+            Extension::Sqlite => Capabilities::READ_SQLITE,
+            Extension::Lance => Capabilities::READ_LANCE,
+            Extension::Duckpgq => Capabilities::EXT_GRAPH,
+        }
+    }
+
+    /// `INSTALL` statement. Core extensions come from DuckDB's default
+    /// repository, community ones from DuckDB's community repository;
+    /// DuckDB checks the signature of both.
+    fn install_sql(self) -> String {
+        match self {
+            Extension::Duckpgq => format!("INSTALL {} FROM community;", self.name()),
+            _ => format!("INSTALL {};", self.name()),
+        }
+    }
+}
+
 /// What is currently attached under a name; used to make re-attaching a no-op.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Attached {
@@ -59,12 +103,36 @@ pub struct DuckDbEngine {
     worker: BlockingWorker<Connection>,
     instance_id: String,
     attached: Mutex<HashMap<QualifiedName, Attached>>,
-    sqlite_ext_loaded: AtomicBool,
+    /// Spaces attached whole (`ATTACH ... (TYPE LANCE)`), by name.
+    spaces: Mutex<HashMap<String, SpaceSource>>,
+    loaded: Mutex<BTreeSet<Extension>>,
     cfg: DuckDbConfig,
 }
 
 fn sql_err(e: duckdb::Error) -> EngineError {
     EngineError::Sql(e.to_string())
+}
+
+/// A statement's error, with a missing table reported as
+/// [`EngineError::TableNotFound`] like the other engines do.
+fn statement_err(e: duckdb::Error) -> EngineError {
+    let msg = e.to_string();
+    if msg.starts_with("Catalog Error: Table with name") && msg.contains("does not exist") {
+        EngineError::TableNotFound(msg)
+    } else {
+        EngineError::Sql(msg)
+    }
+}
+
+/// A new connection to the engine's database for one statement.
+///
+/// Attached Spaces, views and loaded extensions belong to the database, so
+/// every connection sees them. The `lance` extension caches each dataset it
+/// opens per connection, so a statement on a long-lived connection would
+/// keep reading the version it first saw: not a copy refreshed since, nor a
+/// write by another process.
+fn fresh(conn: &Connection) -> Result<Connection, EngineError> {
+    conn.try_clone().map_err(sql_err)
 }
 
 fn to_duck(v: &Value) -> DuckValue {
@@ -109,7 +177,8 @@ impl DuckDbEngine {
             worker: BlockingWorker::new(conn),
             instance_id: format!("duckdb:{}", uuid::Uuid::new_v4()),
             attached: Mutex::new(HashMap::new()),
-            sqlite_ext_loaded: AtomicBool::new(false),
+            spaces: Mutex::new(HashMap::new()),
+            loaded: Mutex::new(BTreeSet::new()),
             cfg,
         })
     }
@@ -129,38 +198,73 @@ impl DuckDbEngine {
 
     async fn run_batch(&self, sql: String) -> Result<(), EngineError> {
         self.worker
-            .run(move |conn| conn.execute_batch(&sql).map_err(sql_err))
+            .run(move |conn| fresh(conn)?.execute_batch(&sql).map_err(sql_err))
             .await
     }
 
-    /// Load the `sqlite` extension, installing it first only when allowed.
-    async fn ensure_sqlite_extension(&self) -> Result<(), EngineError> {
-        if self.sqlite_ext_loaded.load(Ordering::SeqCst) {
+    fn is_loaded(&self, ext: Extension) -> bool {
+        self.loaded
+            .lock()
+            .map(|l| l.contains(&ext))
+            .unwrap_or(false)
+    }
+
+    /// Load `ext`, installing it first only when allowed.
+    pub async fn ensure_extension(&self, ext: Extension) -> Result<(), EngineError> {
+        if self.is_loaded(ext) {
             return Ok(());
         }
         let allow_install = self.cfg.allow_extension_install;
         let result = self
             .worker
             .run(move |conn| {
-                if let Err(load_err) = conn.execute_batch("LOAD sqlite;") {
+                let conn = &fresh(conn)?;
+                let name = ext.name();
+                if let Err(load_err) = conn.execute_batch(&format!("LOAD {name};")) {
                     if !allow_install {
                         return Err(EngineError::ExtensionUnavailable(
-                            "sqlite".to_string(),
-                            format!("{load_err} (extension install is disabled)"),
+                            name.to_string(),
+                            format!(
+                                "{load_err} (install it with `oikome extensions install`; \
+                                 queries never download extensions)"
+                            ),
                         ));
                     }
-                    conn.execute_batch("INSTALL sqlite; LOAD sqlite;")
+                    conn.execute_batch(&format!("{} LOAD {name};", ext.install_sql()))
                         .map_err(|e| {
-                            EngineError::ExtensionUnavailable("sqlite".to_string(), e.to_string())
+                            EngineError::ExtensionUnavailable(name.to_string(), e.to_string())
                         })?;
                 }
                 Ok(())
             })
             .await;
         if result.is_ok() {
-            self.sqlite_ext_loaded.store(true, Ordering::SeqCst);
+            if let Ok(mut loaded) = self.loaded.lock() {
+                loaded.insert(ext);
+            }
         }
         result
+    }
+
+    /// Download `ext` (signed by DuckDB) into the extension directory and
+    /// return its version. This is the only place an extension is fetched
+    /// unless `allow_extension_install` is set.
+    pub async fn install_extension(&self, ext: Extension) -> Result<String, EngineError> {
+        self.worker
+            .run(move |conn| {
+                let conn = &fresh(conn)?;
+                conn.execute_batch(&ext.install_sql()).map_err(|e| {
+                    EngineError::ExtensionUnavailable(ext.name().to_string(), e.to_string())
+                })?;
+                conn.query_row(
+                    "SELECT extension_version FROM duckdb_extensions() \
+                     WHERE extension_name = $1 OR list_contains(aliases, $1)",
+                    [ext.name()],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(sql_err)
+            })
+            .await
     }
 
     fn view_over_parquet(
@@ -222,8 +326,10 @@ impl QueryEngine for DuckDbEngine {
             | Capabilities::ARROW_OUT
             | Capabilities::PUSHDOWN_JOIN
             | Capabilities::PUSHDOWN_AGG;
-        if self.sqlite_ext_loaded.load(Ordering::SeqCst) {
-            caps |= Capabilities::READ_SQLITE;
+        for ext in Extension::INSTALLABLE {
+            if self.is_loaded(ext) {
+                caps |= ext.capability();
+            }
         }
         caps
     }
@@ -249,7 +355,7 @@ impl QueryEngine for DuckDbEngine {
                 if self.already_attached(name, &what) {
                     return Ok(());
                 }
-                self.ensure_sqlite_extension().await?;
+                self.ensure_extension(Extension::Sqlite).await?;
                 let alias = format!("{}__sqlite", name.space);
                 let sql = format!(
                     "ATTACH IF NOT EXISTS {} AS {} (TYPE sqlite, READ_ONLY);\n\
@@ -287,6 +393,8 @@ impl QueryEngine for DuckDbEngine {
                 let (space, table) = (name.space.clone(), name.table.clone());
                 self.worker
                     .run(move |conn| {
+                        let conn = &fresh(conn)?;
+                        let conn = &fresh(conn)?;
                         conn.execute_batch(&ddl).map_err(sql_err)?;
                         let mut appender = conn.appender_to_db(&table, &space).map_err(sql_err)?;
                         for batch in &batches {
@@ -316,14 +424,79 @@ impl QueryEngine for DuckDbEngine {
         Ok(())
     }
 
+    async fn enable(&self, needs: Capabilities) -> Result<(), EngineError> {
+        for ext in Extension::INSTALLABLE {
+            if needs.intersects(ext.capability()) {
+                self.ensure_extension(ext).await?;
+            }
+        }
+        let missing = needs.difference(self.capabilities());
+        if missing.is_empty() {
+            Ok(())
+        } else {
+            Err(EngineError::Unsupported(
+                EngineKind::DuckDb,
+                format!("{missing:?}"),
+            ))
+        }
+    }
+
+    async fn attach_space(&self, space: &str, source: SpaceSource) -> Result<(), EngineError> {
+        let current = self.spaces.lock().ok().and_then(|m| m.get(space).cloned());
+        if current.as_ref() == Some(&source) {
+            return Ok(());
+        }
+        let SpaceSource::LanceNamespace { root } = &source;
+        self.ensure_extension(Extension::Lance).await?;
+        std::fs::create_dir_all(root)?;
+        let mut sql = String::new();
+        if current.is_some() {
+            sql.push_str(&format!(
+                "DETACH DATABASE IF EXISTS {};\n",
+                quote_ident(space)
+            ));
+        }
+        // The catalog is named after the Space, so `<space>.<table>` resolves
+        // to `<space>.main.<table>` for reads and writes alike.
+        sql.push_str(&format!(
+            "ATTACH IF NOT EXISTS {} AS {} (TYPE LANCE);",
+            path_literal(root),
+            quote_ident(space)
+        ));
+        self.run_batch(sql).await?;
+        if let Ok(mut m) = self.spaces.lock() {
+            m.insert(space.to_string(), source);
+        }
+        Ok(())
+    }
+
+    async fn detach_space(&self, space: &str) -> Result<(), EngineError> {
+        let attached = self
+            .spaces
+            .lock()
+            .ok()
+            .and_then(|mut m| m.remove(space))
+            .is_some();
+        if attached {
+            self.run_batch(format!("DETACH DATABASE IF EXISTS {};", quote_ident(space)))
+                .await?;
+        }
+        Ok(())
+    }
+
     async fn table_names(&self, space: &str) -> Result<Vec<String>, EngineError> {
         let space = space.to_string();
         self.worker
             .run(move |conn| {
+                let conn = &fresh(conn)?;
+                // Views of the in-memory database live in schema `<space>`;
+                // a Space attached whole is catalog `<space>`, schema `main`.
                 let mut stmt = conn
                     .prepare(
                         "SELECT table_name FROM information_schema.tables \
-                         WHERE table_schema = ? ORDER BY table_name",
+                         WHERE (table_catalog = current_database() AND table_schema = ?1) \
+                            OR (table_catalog = ?1 AND table_schema = 'main') \
+                         ORDER BY table_name",
                     )
                     .map_err(sql_err)?;
                 let names = stmt
@@ -341,6 +514,7 @@ impl QueryEngine for DuckDbEngine {
         let display = name.to_string();
         self.worker
             .run(move |conn| {
+                let conn = &fresh(conn)?;
                 let mut stmt = conn.prepare(&sql).map_err(|e| {
                     let msg = e.to_string();
                     if msg.contains("does not exist") {
@@ -364,7 +538,8 @@ impl QueryEngine for DuckDbEngine {
         let params: Vec<DuckValue> = params.iter().map(to_duck).collect();
         self.worker
             .query_stream(DEFAULT_STREAM_CAPACITY, move |conn, sink| {
-                let mut stmt = conn.prepare(&sql).map_err(sql_err)?;
+                let conn = &fresh(conn)?;
+                let mut stmt = conn.prepare(&sql).map_err(statement_err)?;
                 let bound: Vec<&dyn ToSql> = params.iter().map(|v| v as &dyn ToSql).collect();
                 let arrow = stmt.query_arrow(bound.as_slice()).map_err(sql_err)?;
                 sink.start(arrow.get_schema())?;
@@ -381,8 +556,11 @@ impl QueryEngine for DuckDbEngine {
         let params: Vec<DuckValue> = params.iter().map(to_duck).collect();
         self.worker
             .run(move |conn| {
+                let conn = &fresh(conn)?;
                 let bound: Vec<&dyn ToSql> = params.iter().map(|v| v as &dyn ToSql).collect();
-                let n = conn.execute(&sql, bound.as_slice()).map_err(sql_err)?;
+                let n = conn
+                    .execute(&sql, bound.as_slice())
+                    .map_err(statement_err)?;
                 Ok(n as u64)
             })
             .await

@@ -115,6 +115,28 @@ RustCrypto (sha2, p256, p384, ecdsa, elliptic-curve, hkdf, ccm, x509-cert and th
   https://github.com/RustCrypto  -  MIT License (also Apache-2.0)
   Copyright (c) RustCrypto Developers (sha2: Copyright (c) 2016 Artyom Pavlov)
 
+Lance (lance-table, lance-io, lance-core, lance-file, lance-encoding and the other lance-*
+  crates, fsst; read Lance manifests to ship one version of a dataset)
+  https://github.com/lance-format/lance  -  Apache License 2.0
+  Copyright The Lance Authors
+
+sqlite-vec (sqlite-vec; vector search in transactional Spaces, compiled into SQLite)
+  https://github.com/asg017/sqlite-vec  -  MIT License (also Apache-2.0)
+  Copyright (c) 2024 Alex Garcia
+
+LZ4 (bundled by lz4-sys, used by lance-encoding)
+  https://github.com/lz4/lz4  -  BSD 2-Clause License
+  Copyright (c) 2011-2020, Yann Collet
+
+DuckDB extensions sqlite, lance and duckpgq (downloaded by `oikome extensions
+  install`, signed by DuckDB; included in the Docker image)
+  https://github.com/duckdb/duckdb-sqlite  -  MIT License
+  Copyright 2018-2026 Stichting DuckDB Foundation
+  https://github.com/lance-format/lance-duckdb  -  Apache License 2.0
+  Copyright The Lance Authors
+  https://github.com/cwida/duckpgq-extension  -  MIT License
+  Copyright 2018-2025 Stichting DuckDB Foundation
+
 DuckDB-Wasm (@duckdb/duckdb-wasm, JavaScript, loaded by web/)
   https://github.com/duckdb/duckdb-wasm  -  MIT License
   Copyright 2018-2025 Stichting DuckDB Foundation

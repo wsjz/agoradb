@@ -41,7 +41,7 @@ pub use capabilities::Capabilities;
 pub use error::EngineError;
 pub use name::QualifiedName;
 pub use oikome_core::EngineKind;
-pub use source::TableSource;
+pub use source::{SpaceSource, TableSource};
 pub use stream::RecordBatchStream;
 #[cfg(feature = "blocking")]
 pub use stream::{BatchSink, BlockingWorker};
@@ -111,6 +111,39 @@ pub trait QueryEngine: Send + Sync + fmt::Debug {
 
     /// Remove a previously attached table. Unknown names are ignored.
     async fn detach(&self, name: &QualifiedName) -> Result<(), EngineError>;
+
+    /// Make every table of `source` visible as `<space>.<table>`.
+    ///
+    /// Attaching the same source under the same name again is a no-op.
+    /// Engines that cannot do this keep the default, which refuses.
+    async fn attach_space(&self, space: &str, source: SpaceSource) -> Result<(), EngineError> {
+        let _ = space;
+        Err(EngineError::Unsupported(
+            self.kind(),
+            format!("attaching a whole space ({source:?})"),
+        ))
+    }
+
+    /// Make sure the engine can do `needs`, loading what that takes (a
+    /// DuckDB extension, say). The default only checks
+    /// [`Self::capabilities`].
+    async fn enable(&self, needs: Capabilities) -> Result<(), EngineError> {
+        if self.capabilities().contains(needs) {
+            Ok(())
+        } else {
+            Err(EngineError::Unsupported(
+                self.kind(),
+                format!("{:?}", needs.difference(self.capabilities())),
+            ))
+        }
+    }
+
+    /// Remove a Space attached with [`Self::attach_space`]. Unknown names
+    /// are ignored.
+    async fn detach_space(&self, space: &str) -> Result<(), EngineError> {
+        let _ = space;
+        Ok(())
+    }
 
     /// Names of the tables currently visible in `space`.
     async fn table_names(&self, space: &str) -> Result<Vec<String>, EngineError>;

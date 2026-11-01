@@ -6,6 +6,9 @@ name: browser-e2e
 on:
   push:
     branches: ["main", "feat/**", "ci/**"]
+  # Pull requests from forks, which do not push to this repository.
+  pull_request:
+    branches: ["main"]
   workflow_dispatch:
 
 permissions:
