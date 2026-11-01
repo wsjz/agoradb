@@ -5,7 +5,7 @@ name: browser-e2e
 
 on:
   push:
-    branches: ["feat/**", "ci/**"]
+    branches: ["main", "feat/**", "ci/**"]
   workflow_dispatch:
 
 permissions:
