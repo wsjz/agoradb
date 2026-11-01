@@ -18,6 +18,8 @@ rustflags = ["-C", "symbol-mangling-version=v0"]
 rustflags = ["-C", "symbol-mangling-version=v0", "--cfg", 'getrandom_backend="wasm_js"']
 
 [alias]
-sweep = "sweep --time 30"
+# `cargo sweep` is cargo-sweep's own subcommand, so an alias with that name
+# would call itself. `cargo sweep-old` removes artifacts unused for 30 days.
+sweep-old = "sweep --time 30"
 
 check-tests = "test --no-run"
