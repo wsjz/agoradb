@@ -23,9 +23,11 @@
 pub mod coordinator;
 pub mod error;
 pub mod executor;
+pub mod single_task;
 pub mod table;
 
 pub use coordinator::{BoundSpace, BoundTable, Coordinator};
 pub use error::FederationError;
 pub use executor::EngineSqlExecutor;
+pub use single_task::{MergeInOneTask, MergePartitionsExec};
 pub use table::OikomeRemoteTable;

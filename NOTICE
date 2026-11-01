@@ -66,8 +66,8 @@ Tonic (tonic)
 
 dalek-cryptography (ed25519-dalek, curve25519-dalek)
   https://github.com/dalek-cryptography/curve25519-dalek  -  BSD 3-Clause License
-  ed25519-dalek: Copyright (c) 2017-2019 isis oikome lovecruft
-  curve25519-dalek: Copyright (c) 2016-2021 isis oikome lovecruft, Henry de Valence
+  ed25519-dalek: Copyright (c) 2017-2019 isis agora lovecruft
+  curve25519-dalek: Copyright (c) 2016-2021 isis agora lovecruft, Henry de Valence
 
 BLAKE3 (blake3)
   https://github.com/BLAKE3-team/BLAKE3  -  Apache License 2.0 (dual-licensed with CC0-1.0)
@@ -97,6 +97,23 @@ wasm-bindgen (wasm-bindgen, wasm-bindgen-futures, js-sys; the browser node)
 web-time (web-time; the clock in the browser node)
   https://github.com/daxpedda/web-time  -  MIT License (also Apache-2.0)
   Copyright (c) 2023 dAxpeDDa
+
+str0m (str0m, str0m-proto, str0m-rust-crypto, is; WebRTC for browsers on Full Nodes)
+  https://github.com/algesten/str0m  -  MIT License (also Apache-2.0)
+  Copyright 2022 Martin Algesten
+
+dimpl (dimpl; DTLS for str0m)
+  https://github.com/algesten/dimpl  -  MIT License (also Apache-2.0)
+  Copyright 2022 Martin Algesten
+
+sctp-proto (sctp-proto; SCTP for WebRTC data channels)
+  https://github.com/algesten/sctp-proto  -  MIT License (also Apache-2.0)
+  Copyright (c) 2021-2026 WebRTC.rs, Copyright (c) 2026 Martin Algesten
+
+RustCrypto (sha2, p256, p384, ecdsa, elliptic-curve, hkdf, ccm, x509-cert and their
+  support crates; used by str0m's DTLS)
+  https://github.com/RustCrypto  -  MIT License (also Apache-2.0)
+  Copyright (c) RustCrypto Developers (sha2: Copyright (c) 2016 Artyom Pavlov)
 
 DuckDB-Wasm (@duckdb/duckdb-wasm, JavaScript, loaded by web/)
   https://github.com/duckdb/duckdb-wasm  -  MIT License

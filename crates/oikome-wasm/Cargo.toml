@@ -12,7 +12,9 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 oikome-core = { path = "../oikome-core" }
 oikome-engine = { path = "../oikome-engine", default-features = false }
+oikome-federation = { path = "../oikome-federation" }
 oikome-identity = { path = "../oikome-identity", default-features = false }
+oikome-protocol = { path = "../oikome-protocol" }
 oikome-semantic = { path = "../oikome-semantic" }
 arrow-array = { workspace = true }
 arrow-ipc = { workspace = true }
@@ -25,11 +27,22 @@ sqlparser = { workspace = true }
 thiserror = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
+# DataFusion stamps each plan with `chrono::Utc::now()`, which panics in the
+# browser unless chrono reads the JavaScript clock (`wasmbind`).
+chrono = { version = "0.4.45", default-features = false, features = ["wasmbind"] }
 js-sys = { workspace = true }
 wasm-bindgen = { workspace = true }
 wasm-bindgen-futures = { workspace = true }
 
 [dev-dependencies]
-# Native tests stand in for duckdb-wasm with the native DuckDB engine.
+# Native tests stand in for duckdb-wasm with the native DuckDB engine, and
+# for the WebRTC channel with calls straight into a Full Node's service.
+oikome-catalog = { path = "../oikome-catalog" }
 oikome-engine-duckdb = { path = "../oikome-engine-duckdb" }
+oikome-node = { path = "../oikome-node" }
+oikome-server = { path = "../oikome-server" }
+oikome-webrtc = { path = "../oikome-webrtc" }
+base64 = { workspace = true }
+iceberg = { workspace = true }
+tempfile = { workspace = true }
 tokio = { workspace = true, features = ["full"] }

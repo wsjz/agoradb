@@ -1,5 +1,6 @@
 # Browser node (3.2): crates/oikome-wasm built to WebAssembly, run in
-# headless Chromium with duckdb-wasm by the Playwright tests in web/tests.
+# headless Chromium with duckdb-wasm by the Playwright tests in web/tests,
+# against a Full Node (the native oikome binary) for the WebRTC tests.
 name: browser-e2e
 
 on:
@@ -39,6 +40,9 @@ jobs:
           CC_wasm32_unknown_unknown: clang
           AR_wasm32_unknown_unknown: llvm-ar
         run: bash scripts/build.sh
+
+      - name: Build the Full Node
+        run: cargo build --locked -p oikome-server --bin oikome
 
       - name: Install Chromium
         working-directory: web

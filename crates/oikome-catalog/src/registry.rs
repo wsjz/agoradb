@@ -233,6 +233,12 @@ pub(crate) fn now_ms() -> u64 {
 
 impl OikomeCatalog {
     /// The hidden directory holding registries and SQLite files.
+    /// Where a serving node keeps its signed WebRTC access record (§10),
+    /// for `SHOW WEBRTC` in any process of the node.
+    pub fn webrtc_record_path(&self) -> PathBuf {
+        self.oikome_dir().join("webrtc.record")
+    }
+
     pub fn oikome_dir(&self) -> PathBuf {
         Path::new(self.root_path()).join(OIKOME_DIR)
     }

@@ -154,6 +154,10 @@ impl OikomeSession {
                 self.deny_principal("SHOW UCANS")?;
                 self.show_ucans()
             }
+            OikomeStatement::ShowWebrtc => {
+                self.deny_principal("SHOW WEBRTC")?;
+                self.show_webrtc()
+            }
             OikomeStatement::ShowPeers => {
                 self.deny_principal("SHOW PEERS")?;
                 self.show_peers()

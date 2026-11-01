@@ -18,11 +18,14 @@ oikome-engine = { path = "../oikome-engine" }
 oikome-identity = { path = "../oikome-identity" }
 oikome-network = { path = "../oikome-network" }
 oikome-node = { path = "../oikome-node" }
+oikome-webrtc = { path = "../oikome-webrtc" }
 oikome-semantic = { path = "../oikome-semantic" }
+arrow-array = { workspace = true }
 arrow-cast = { workspace = true }
 arrow-flight = { workspace = true }
 arrow-ipc = { workspace = true }
 arrow-schema = { workspace = true }
+async-trait = { workspace = true }
 blake3 = { workspace = true }
 clap = { workspace = true }
 futures = { workspace = true }
@@ -34,5 +37,4 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
-arrow-array = { workspace = true }
 tempfile = { workspace = true }

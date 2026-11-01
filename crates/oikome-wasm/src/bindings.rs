@@ -15,12 +15,14 @@
 //! The JavaScript API of the browser node:
 //!
 //! ```js
-//! const node = await OikomeNode.open(engine, store);
+//! const node = await OikomeNode.open(engine, store, transport);
 //! node.did();
 //! const { ipc, rowsAffected } = await node.sql("SELECT ...");
 //! ```
 //!
-//! `engine` is a [`HostEngineAdapter`]; `store` keeps bytes by key
+//! `engine` is a [`HostEngineAdapter`]; `transport` a
+//! [`HostTransportAdapter`], which reaches the Full Nodes of remote Spaces
+//! over WebRTC; `store` keeps bytes by key
 //! (`get(key)` resolving to a `Uint8Array` or `undefined`, `put(key, bytes)`),
 //! for the node's seed and registry. The seed is stored as bytes, readable by
 //! scripts of the same origin (architecture v3 §10).
@@ -36,6 +38,7 @@ use wasm_bindgen_futures::{future_to_promise, JsFuture};
 use crate::host::{HostEngine, HostEngineAdapter};
 use crate::ipc;
 use crate::node::{BrowserNode, Output};
+use crate::transport::{HostTransport, HostTransportAdapter};
 
 const SEED_KEY: &str = "oikome.seed";
 const REGISTRY_KEY: &str = "oikome.registry";
@@ -81,9 +84,14 @@ pub struct OikomeNode {
 
 #[wasm_bindgen]
 impl OikomeNode {
-    /// Open the node over the host's `engine` and `store`. The node's key is
-    /// created on first use and kept in `store`, as is its registry.
-    pub async fn open(engine: HostEngineAdapter, store: HostStore) -> Result<OikomeNode, JsValue> {
+    /// Open the node over the host's `engine`, `store` and `transport`. The
+    /// node's key is created on first use and kept in `store`, as is its
+    /// registry.
+    pub async fn open(
+        engine: HostEngineAdapter,
+        store: HostStore,
+        transport: HostTransportAdapter,
+    ) -> Result<OikomeNode, JsValue> {
         let identity = match load(&store, SEED_KEY).await? {
             Some(seed) => {
                 let seed: [u8; 32] = seed
@@ -104,7 +112,8 @@ impl OikomeNode {
             Arc::new(HostEngine::new(engine)),
             registry.as_deref(),
         )
-        .map_err(error)?;
+        .map_err(error)?
+        .with_transport(Arc::new(HostTransport::new(transport)));
         Ok(OikomeNode {
             node: Rc::new(node),
             store: Rc::new(store),
@@ -151,7 +160,13 @@ impl OikomeNode {
 #[wasm_bindgen(start)]
 pub fn start() {
     std::panic::set_hook(Box::new(|info| {
-        web_sys_console_error(&info.to_string());
+        // The JavaScript stack names the wasm functions when the module
+        // keeps its name section (any profile but `wasm`).
+        let stack = Reflect::get(&js_sys::Error::new(""), &"stack".into())
+            .ok()
+            .and_then(|s| s.as_string())
+            .unwrap_or_default();
+        web_sys_console_error(&format!("{info}\n{stack}"));
     }));
 }
 

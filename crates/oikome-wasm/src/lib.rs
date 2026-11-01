@@ -19,15 +19,21 @@
 //! (duckdb-wasm, data in OPFS). See `web/` for the host and the build.
 //!
 //! * [`node`]: statement handling, tested natively against DuckDB.
+//! * [`remote`]: Spaces of Full Nodes, reached over a [`Transport`].
 //! * `host` (wasm32 only): the host's engine as a `QueryEngine`.
+//! * `transport` (wasm32 only): the host's WebRTC transport.
 //! * `bindings` (wasm32 only): the `OikomeNode` JavaScript API.
 
 pub mod ipc;
 pub mod node;
+pub mod remote;
 
 #[cfg(target_arch = "wasm32")]
 mod bindings;
 #[cfg(target_arch = "wasm32")]
 pub mod host;
+#[cfg(target_arch = "wasm32")]
+pub mod transport;
 
 pub use node::{BrowserNode, NodeError, Output};
+pub use remote::{RemoteEngine, RemoteSpace, Transport};

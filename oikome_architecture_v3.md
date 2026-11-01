@@ -490,13 +490,17 @@ The peer protocol over Arrow Flight (`oikome-network::protocol`). Every call car
 ## 10. Browser Node
 
 ```
- JS host (web/)                       WASM (crates/oikome-wasm)
+ JS host (web/)                       WASM (crates/oikome-wasm)                Full Node
  ┌──────────────────────────┐  Arrow  ┌───────────────────────────────┐
  │ duckdb-wasm (worker,     │◄───IPC──│ HostEngine                    │
  │   database in OPFS)      │         │ BrowserNode: identity · Space │
  │ IndexedDB (seed,registry)│◄─bytes──│   registry · semantic layer   │
- │ WebRTC data channel (3.2b)│        │ federation coordinator (3.2b) │
- └──────────────────────────┘         └───────────────────────────────┘
+ │ transport.js             │◄─envel.─│ RemoteEngine                  │   ┌──────────────────┐
+ │   RTCPeerConnection ─────┼─────────┼── WebRTC data channel ────────┼──►│ oikome-webrtc    │
+ └──────────────────────────┘         │ federation coordinator        │   │ (str0m, UDP) →   │
+                                      │   (single task)               │   │ OikomeFlight-    │
+                                      └───────────────────────────────┘   │ Service          │
+                                                                          └──────────────────┘
 ```
 
 **3.2a (done): local queries.**
@@ -509,17 +513,42 @@ The peer protocol over Arrow Flight (`oikome-network::protocol`). Every call car
   - its result returns over a oneshot channel;
   - results cross as Arrow IPC streams.
 - **Persistence.** The host keeps the node's seed and its Space registry as bytes in IndexedDB. A same-origin script can read the seed; a non-extractable WebCrypto Ed25519 key is the planned replacement.
-- **JavaScript API.** `OikomeNode.open(engine, store)`, `node.did()`, `node.sql(text)` resolving to `{ ipc }` or `{ rowsAffected }`.
+- **JavaScript API.** `OikomeNode.open(engine, store, transport)` (the transport arrived in 3.2b), `node.did()`, `node.sql(text)` resolving to `{ ipc }` or `{ rowsAffected }`.
 - **Build** (`web/scripts/build.sh`). It runs cargo for `wasm32-unknown-unknown`, then `wasm-bindgen` (pinned to the crate's version), then esbuild for the page.
   - DataFusion 54 turns on Arrow's zstd unconditionally, so a clang with a wasm32 backend is needed: Homebrew LLVM on macOS, the distribution clang on Linux.
   - `datafusion-federation` 0.5.5 is patched (`third_party/`) so DataFusion's C-backed `compression` and `parquet` features stay off.
-- **Size.** The release `.wasm` is about 9.5 MB before the federation coordinator is added. The earlier < 5 MB target is not met and is now a measurement, not a requirement.
 - **Tests.** `web/tests` (Playwright, headless Chromium) runs local queries and checks that data, identity and registry survive a reload. `browser-e2e` runs them in CI.
 
-**3.2b (next): federated queries via a Full Node over a WebRTC data channel.**
-- **Pinning.** The browser pins the Full Node's DTLS certificate by its SHA-256 fingerprint. The node publishes a DID-signed access record (`{did, ip:port, fingerprint, expiry}`), which the browser verifies before dialing.
-- **Connection.** It uses "WebRTC-direct": the browser builds the SDP from the record, with no signaling server. The server is str0m, with a P-256 DTLS key kept in `.oikome/identity/`.
-- **Requests.** They travel as envelopes carrying the same method, payload, UCAN and signed header as a Flight call, so the Full Node reuses its authentication, authorization and semantic layer.
+**3.2b (done): federated queries via a Full Node over a WebRTC data channel.**
+- **Full Node side** (`oikome-webrtc`; `oikome serve --webrtc-listen <udp> [--webrtc-advertise <ip>]`).
+  - The server is str0m 0.24 with its pure-Rust crypto (DTLS by dimpl, SCTP by sctp-proto), as an ICE-lite endpoint.
+  - The browser dials "WebRTC-direct": no signaling server. The server names each session by the ICE username fragment in the browser's first STUN request; the fragment doubles as the ICE password.
+  - The DTLS certificate (ECDSA P-256) is created once and kept in `.oikome/identity/webrtc_dtls.json` (owner-only), so its fingerprint does not change between runs.
+  - The server does not check the browser's DTLS certificate. Each request is authenticated by the browser's DID signature instead, as a native peer's is.
+- **Access record.** `SHOW WEBRTC` prints `webrtc:<base64url JSON>.<signature>`.
+  - The JSON is `{did, addr, fingerprint, expires_at}`, signed with the node's DID key under its own domain string, valid for 30 days.
+  - `serve` writes it at startup and removes it at shutdown; it can be copied or shown as a QR code.
+- **Mounting.** `CREATE SPACE pub WITH PEER = 'webrtc:<record>', REMOTE = 'blog', TOKEN = '<ucan>'`. The browser checks that:
+  - the record's signature matches the DID it names, and it has not expired;
+  - the token's root issuer is that DID;
+  - the token was issued (or delegated) to the browser's DID and grants `space/query` on `blog`.
+  
+  The registry in IndexedDB keeps the record and the token, as it keeps the seed. Remote Spaces are read-only and queried in place; `MODE = 'subscribe'` is not available in the browser.
+- **Connection** (`web/src/transport.js`). The browser builds the node's SDP answer from the record: ICE-lite, passive DTLS, the record's fingerprint, one negotiated data channel. A certificate with another fingerprint fails the DTLS handshake. One channel per node is opened on first use and reused.
+- **Requests.** Each call is an envelope `{method, payload, ucan, auth}`, the same fields as an Arrow Flight call.
+  - The Full Node serves it with the same authentication (signature, replay window), authorization (UCAN, revocation) and semantic layer (`OikomeFlightService::serve_envelope`).
+  - The reply is a status and a body: an Arrow IPC stream for `do_get` and `get_schema`, JSON for `list_tables`.
+  - Messages are cut into frames of at most 16 KiB (`[u32 request id][flags][payload]`), so concurrent calls share the channel.
+  - Limits: 64 sessions, 60 s idle timeout, 256 MiB per message.
+- **Federation in the browser.** A query that names a remote Space runs on the coordinator built with `Coordinator::single_task`:
+  - DataFusion runs partitions in spawned Tokio tasks, and the browser has no Tokio runtime. The coordinator plans with one target partition, and `MergePartitionsExec` replaces `CoalescePartitionsExec`: it polls every partition from one task (a `UNION` still has one partition per input). A native test runs such plans without a runtime.
+  - DataFusion stamps every plan with `chrono::Utc::now()`, so chrono's `wasmbind` feature is on to read the JavaScript clock.
+  - Queries over local Spaces only still go straight to duckdb-wasm.
+- **Size.** 32.7 MB with the `wasm` profile `web/scripts/build.sh` uses (`opt-level = "s"`, LTO, stripped); 132 MB with the plain release profile. Before the coordinator it was about 9.5 MB. Size is a measurement, not a requirement.
+- **Tests.**
+  - Native: `oikome-webrtc` dials its server with a native str0m client (a wrong fingerprint never connects); `oikome-server` serves envelopes; `oikome-wasm/tests/remote_spaces.rs` runs the browser node on DuckDB against a Full Node's service.
+  - Browser: `web/tests/remote.spec.mjs` starts `oikome serve --webrtc-listen` and, over a real WebRTC channel, joins a duckdb-wasm table with the node's table. It also checks that a mount survives a reload, that revocation cuts access, and that a tampered record and a wrong fingerprint are refused.
+- **Not covered yet.** The browser must reach the published UDP address directly (same network, or a public address): no STUN or TURN. Browsers do not serve each other.
 - **Lance.** Lance Spaces are also reached through a Full Node, since DuckDB's `lance` extension is not published for WebAssembly (§7.6).
 
 ---
@@ -625,8 +654,9 @@ crates/
 ├── oikome-network         Peer protocol, PeerClient, FlightEngine, DID-pinned TLS; tasks in 3.6    [3.1]
 ├── oikome-discovery       libp2p discovery (mDNS, endpoint exchange) → Peers table                 [3.1]
 ├── oikome-server          Arrow Flight service (queries, snapshots, files), oikome binary         [3.1]
-├── oikome-protocol        Peer protocol types and request digest (native and browser)              [3.2]
-├── oikome-wasm            Browser node: BrowserNode, HostEngine (duckdb-wasm), JS API              [3.2]
+├── oikome-protocol        Peer protocol types, request digest, WebRTC record and frames            [3.2]
+├── oikome-webrtc          WebRTC endpoint for browsers (str0m): sessions, DTLS certificate         [3.2]
+├── oikome-wasm            Browser node: BrowserNode, HostEngine (duckdb-wasm), RemoteEngine, JS API [3.2]
 ├── oikome-connect         Connector trait, cursor store, built-in connectors (file import, flomo)  [3.5]
 └── oikome-cli                                                                                      [later]
 ```
@@ -669,7 +699,7 @@ Roughly 1,100 of the current ~4,300 lines are engine-bridge code that goes away;
 | **3.0-C Semantic** ✅ | Views, column grants and row policies as SQL rewrites; principals read-only and deny-by-default; enumeration resistance | Policy test suite: a restricted DID sees rewritten `*` and injected predicates inside the engine SQL |
 | **3.0-D Publish** ✅ | `PUBLISH SPACE` → `orders_published` analytical read-only Space; scheduled publisher | Publish → query via DuckDB matches SQLite source |
 | **3.1 Network** ✅ | DID/UCAN, Arrow Flight remote Spaces (3.1a ✅), snapshot subscription (3.1b ✅), libp2p discovery and TLS (3.1c ✅), two Docker nodes plus an mDNS-only node, run in CI (3.1d ✅) | Two Docker nodes: UCAN-gated federated query; revocation cuts access |
-| **3.2 Browser** | WASM core + `HostEngine` on duckdb-wasm (3.2a ✅); federated queries via a Full Node over WebRTC (3.2b); browser SQLite later | Browser node runs a local query and a federated query via a Full Node |
+| **3.2 Browser** ✅ | WASM core + `HostEngine` on duckdb-wasm (3.2a ✅); federated queries via a Full Node over WebRTC (3.2b ✅); browser SQLite later | Browser node runs a local query and a federated query via a Full Node |
 | **3.3 Multimodal** | Lance Locations through DuckDB's `lance` extension (vector, full-text, large objects; version pinning and sync); DuckPGQ; FTS5/`sqlite-vec`; `Mode` capability checks | Vector + FTS query on a Lance Space and on a transactional Space; a subscribed Lance Space is searchable without rebuilding its index |
 | **3.4 Cloud drives** | opendal drive services behind feature flags; one writing node per drive Location; newest-complete-snapshot reads; bounded local cache; client-side encryption; transactional Spaces rejected on drive Locations | An analytical Space on a WebDAV Location is written by one node and read by another; a transactional Space on a drive Location is rejected at DDL; files on the drive cannot be read without the key |
 | **3.5 Connectors** | `Connector` contract; upsert and cursor in one SQLite transaction; scheduled and on-demand pulls; credentials from the OS keychain; file import and flomo connectors | flomo memos land in `flomo.memos`; a second pull touches only changed memos; an edited memo is updated, not duplicated; a failed pull leaves data and cursor unchanged |
@@ -696,6 +726,8 @@ No phase skipping (AGENT.md §4.1).
 | A connector breaks when an app changes its API or export format | Connectors are isolated from each other; a failed pull changes nothing because data and cursor commit together; only official APIs and exports are used |
 | Data sent for remote compute cannot be proven deleted | Only to explicitly trusted peers; the input is a chosen query result, not a Space; documented as trust-based |
 | Peers overuse a node's compute | Deny-by-default, per-peer quotas, UCAN limits and expiry |
+| DataFusion 54 spawns Tokio tasks in operators the browser coordinator has not met yet | `MergePartitionsExec` covers partition merges; the native single-task test runs joins, unions, aggregates and limits without a runtime; a new plan shape gets a test before it is relied on, and the upstream fix lands with DataFusion 55 / 56 |
+| A browser can reach a Full Node only at a directly routable UDP address | Same network or a public address for now; ICE is already in the connection, so STUN / TURN can be added without changing records or requests |
 | DuckDB's `lance` extension must load on the pinned DuckDB, and is not published for WebAssembly | Checked at the start of 3.3; the format is chosen per Space, so a node without the extension keeps its Iceberg Spaces; browser nodes go through a Full Node; fallback is the `lance` crate (Apache-2.0, on Arrow 58 / DataFusion 54) |
 | Fewer external tools read Lance than Parquet / Iceberg | Lance only for data that is searched; tables that are aggregated stay Iceberg + Parquet |
 
@@ -728,6 +760,9 @@ No phase skipping (AGENT.md §4.1).
 | 2026-10-31 | Browser node: duckdb-wasm only in 3.2 (SQLite later); `HostEngine` keeps an id, JS objects stay in a thread-local table, results cross as Arrow IPC | `QueryEngine` and DataFusion need `Send`; the id-plus-channel bridge keeps the trait unchanged instead of forking DataFusion |
 | 2026-10-31 | DataFusion without `compression` / `parquet`, `datafusion-federation` 0.5.5 patched to stop forcing them; Homebrew / distribution clang for the zstd that remains | The coordinator never reads files; 0.5.7 fixes this upstream but needs DataFusion 55 / Arrow 59, which DuckDB and Iceberg do not support yet |
 | 2026-10-31 | Browser ↔ Full Node over a WebRTC data channel, the DTLS fingerprint vouched for by a DID-signed record | Browsers cannot pin a certificate to a DID and Chrome rejects Ed25519 certificates; WebRTC lets the browser pin a fingerprint, works in every major browser, needs no 14-day rotation and brings ICE for later NAT traversal |
+| 2026-11-01 | WebRTC endpoint on str0m with its pure-Rust crypto; WebRTC-direct (sessions named by the browser's ICE fragment, SDP answer built by the browser); the server does not verify the browser's DTLS certificate | No C crypto in the server; no signaling service; the browser is authenticated by its signed requests, exactly as a native peer, and the spike showed browsers reject a wrong pinned fingerprint at the handshake |
+| 2026-11-01 | Browser requests are envelopes with the Flight call's fields, served by `OikomeFlightService::serve_envelope` | One authentication, authorization and semantic layer for both transports; replies carry the whole result as one Arrow IPC message |
+| 2026-11-01 | The browser coordinator runs in one task: one target partition, `MergePartitionsExec` instead of `CoalescePartitionsExec`; chrono `wasmbind` | DataFusion 54 spawns Tokio tasks to merge partitions and reads the clock through `std`, both of which panic in the browser; merging by polling keeps remote partitions concurrent |
 | 2026-10-30 | The 3.1 exit run is three Docker nodes on GitHub Actions (`docker-e2e`), one of them found only by mDNS | Development machines may have no container runtime; CI runs it on every push, and the Docker bridge network gives mDNS the multicast a firewalled laptop may block |
 | 2026-10-30 | VFS `materialize()` moves from 3.1 to 3.4 | Subscription copies live on local disk; the VFS is first needed for cloud drives |
 | 2026-10-30 | Lance as a third Location format for vector, full-text and large-object data; it replaces DuckDB `vss` / `fts` for analytical Spaces | Lance indexes live in the dataset and sync with its versions, while extension indexes must be rebuilt on every subscriber; Lance versions are immutable files plus a manifest, which fits principle 4; Iceberg + Parquet stays for tables that are scanned and aggregated |

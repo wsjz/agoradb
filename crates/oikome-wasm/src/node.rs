@@ -16,8 +16,11 @@
 //! JavaScript so it is tested natively against DuckDB.
 //!
 //! A browser node has one owner and one local engine (duckdb-wasm). Each
-//! Space is a schema of that engine; the registry of Spaces is kept by the
-//! host (IndexedDB) as bytes, see [`BrowserNode::registry_bytes`].
+//! local Space is a schema of that engine; a remote Space is a Space of a
+//! Full Node reached over WebRTC ([`RemoteEngine`]). A query that names a
+//! remote Space runs on the federation coordinator. The registry of Spaces
+//! is kept by the host (IndexedDB) as bytes, see
+//! [`BrowserNode::registry_bytes`].
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -25,12 +28,17 @@ use std::sync::{Arc, Mutex};
 use arrow_array::{RecordBatch, StringArray};
 use arrow_schema::{ArrowError, DataType, Field, Schema, SchemaRef};
 use futures::TryStreamExt;
-use oikome_core::{CatalogError, CreateSpaceRequest, OikomeError, SpaceKind};
-use oikome_engine::{EngineError, QueryEngine};
+use oikome_core::{CatalogError, CreateSpaceRequest, OikomeError, RemoteMode, SpaceKind};
+use oikome_engine::{EngineError, QualifiedName, QueryEngine};
+use oikome_federation::{BoundSpace, BoundTable, Coordinator, FederationError};
 use oikome_identity::NodeIdentity;
+use oikome_protocol::is_identifier;
+use oikome_protocol::webrtc::RECORD_PREFIX;
 use oikome_semantic::rewrite::quote_ident;
 use oikome_semantic::{classify, parse_single, OikomeStatement, SemanticError, StatementClass};
 use serde::{Deserialize, Serialize};
+
+use crate::remote::{MountError, RemoteEngine, RemoteSpace, Transport};
 
 /// What went wrong running a statement.
 #[derive(Debug, thiserror::Error)]
@@ -41,6 +49,10 @@ pub enum NodeError {
     Catalog(#[from] CatalogError),
     #[error(transparent)]
     Engine(#[from] EngineError),
+    #[error(transparent)]
+    Federation(#[from] FederationError),
+    #[error(transparent)]
+    Mount(#[from] MountError),
     #[error("arrow error: {0}")]
     Arrow(#[from] ArrowError),
     #[error("registry: {0}")]
@@ -71,6 +83,9 @@ pub enum Output {
 struct BrowserSpace {
     name: String,
     kind: SpaceKind,
+    /// Where a remote Space lives, and the token to query it with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    remote: Option<RemoteSpace>,
 }
 
 /// The node's registry, persisted by the host.
@@ -80,10 +95,12 @@ struct Registry {
     default_space: Option<String>,
 }
 
-/// The browser node: an identity, a registry and the local engine.
+/// The browser node: an identity, a registry, the local engine and the
+/// transport to Full Nodes.
 pub struct BrowserNode {
-    identity: NodeIdentity,
+    identity: Arc<NodeIdentity>,
     engine: Arc<dyn QueryEngine>,
+    transport: Option<Arc<dyn Transport>>,
     registry: Mutex<Registry>,
 }
 
@@ -110,10 +127,17 @@ impl BrowserNode {
             None => Registry::default(),
         };
         Ok(Self {
-            identity,
+            identity: Arc::new(identity),
             engine,
+            transport: None,
             registry: Mutex::new(registry),
         })
+    }
+
+    /// Reach the Full Nodes of remote Spaces over `transport`.
+    pub fn with_transport(mut self, transport: Arc<dyn Transport>) -> Self {
+        self.transport = Some(transport);
+        self
     }
 
     pub fn identity(&self) -> &NodeIdentity {
@@ -129,12 +153,12 @@ impl BrowserNode {
         self.registry.lock().unwrap_or_else(|p| p.into_inner())
     }
 
-    fn require_space(&self, name: &str) -> Result<(), NodeError> {
-        if self.registry().spaces.contains_key(name) {
-            Ok(())
-        } else {
-            Err(CatalogError::SpaceNotFound(name.to_string()).into())
-        }
+    fn space(&self, name: &str) -> Result<BrowserSpace, NodeError> {
+        self.registry()
+            .spaces
+            .get(name)
+            .cloned()
+            .ok_or_else(|| CatalogError::SpaceNotFound(name.to_string()).into())
     }
 
     /// Run one statement as the node's owner.
@@ -142,10 +166,11 @@ impl BrowserNode {
         match parse_single(text)? {
             OikomeStatement::CreateSpace(request) => self.create_space(request).await,
             OikomeStatement::DropSpace(name) => {
-                self.require_space(&name)?;
-                self.engine
-                    .execute(&format!("DROP SCHEMA {} CASCADE", quote_ident(&name)), &[])
-                    .await?;
+                if self.space(&name)?.remote.is_none() {
+                    self.engine
+                        .execute(&format!("DROP SCHEMA {} CASCADE", quote_ident(&name)), &[])
+                        .await?;
+                }
                 let mut reg = self.registry();
                 reg.spaces.remove(&name);
                 if reg.default_space.as_deref() == Some(name.as_str()) {
@@ -154,7 +179,7 @@ impl BrowserNode {
                 Ok(Output::Done)
             }
             OikomeStatement::SetSpace(name) => {
-                self.require_space(&name)?;
+                self.space(&name)?;
                 self.registry().default_space = Some(name);
                 Ok(Output::Done)
             }
@@ -180,11 +205,7 @@ impl BrowserNode {
                     "transactional spaces (only analytical spaces on duckdb-wasm)".to_string(),
                 ))
             }
-            Some(SpaceKind::Remote) => {
-                return Err(NodeError::Unsupported(
-                    "remote spaces (they arrive with the WebRTC transport)".to_string(),
-                ))
-            }
+            Some(SpaceKind::Remote) => return self.create_remote_space(request),
         }
         if request.engine.is_some()
             || request.location.is_some()
@@ -213,6 +234,53 @@ impl BrowserNode {
             BrowserSpace {
                 name,
                 kind: SpaceKind::Analytical,
+                remote: None,
+            },
+        );
+        Ok(Output::Done)
+    }
+
+    /// `CREATE SPACE <name> WITH PEER = 'webrtc:<record>', TOKEN = ...`:
+    /// mount a Space of the Full Node that signed the record.
+    fn create_remote_space(&self, request: CreateSpaceRequest) -> Result<Output, NodeError> {
+        if request.mode == Some(RemoteMode::Subscribe) {
+            return Err(NodeError::Unsupported(
+                "MODE = 'subscribe' (the browser node queries remote spaces in place)".to_string(),
+            ));
+        }
+        let record = request
+            .peer
+            .filter(|peer| peer.starts_with(RECORD_PREFIX))
+            .ok_or_else(|| {
+                NodeError::Unsupported(
+                    "remote spaces without PEER = 'webrtc:<record>' (the browser node reaches \
+                     Full Nodes over WebRTC; SHOW WEBRTC on the node prints the record)"
+                        .to_string(),
+                )
+            })?;
+        let token = request
+            .token
+            .ok_or_else(|| MountError::Token("a remote space needs TOKEN = '<ucan>'".into()))?;
+        let remote = request.remote.unwrap_or_else(|| request.name.clone());
+        if !is_identifier(&remote) {
+            return Err(MountError::Record(format!("invalid remote space name '{remote}'")).into());
+        }
+        RemoteSpace::check(&record, &remote, &token, self.identity.did())?;
+        let name = request.name;
+        let mut reg = self.registry();
+        if reg.spaces.contains_key(&name) {
+            return Err(CatalogError::SpaceExists(name).into());
+        }
+        reg.spaces.insert(
+            name.clone(),
+            BrowserSpace {
+                name,
+                kind: SpaceKind::Remote,
+                remote: Some(RemoteSpace {
+                    record,
+                    remote,
+                    token,
+                }),
             },
         );
         Ok(Output::Done)
@@ -237,19 +305,68 @@ impl BrowserNode {
                 ))
             }
         };
-        for space in &named {
-            self.require_space(space)?;
+        let mut spaces = Vec::with_capacity(named.len());
+        for name in &named {
+            spaces.push(self.space(name)?);
         }
+        let remote = spaces.iter().find(|s| s.remote.is_some());
         // Table names are qualified in place by `classify`.
         let sql = stmt.to_string();
-        match class {
-            StatementClass::Query { .. } => {
-                let (schema, stream) = self.engine.query(&sql, &[]).await?;
-                let batches = stream.try_collect().await?;
-                Ok(Output::Rows { schema, batches })
+        let (schema, stream) = match (class, remote) {
+            (StatementClass::Query { .. }, None) => self.engine.query(&sql, &[]).await?,
+            // Always federate, so the SQL each owner receives names its
+            // tables by their names on the owner.
+            (StatementClass::Query { .. }, Some(_)) => {
+                self.federate(&spaces).await?.run(&sql).await?
             }
-            _ => Ok(Output::RowsAffected(self.engine.execute(&sql, &[]).await?)),
+            (_, Some(space)) => {
+                return Err(NodeError::Unsupported(format!(
+                    "writing with remote space '{}' (remote spaces are read-only)",
+                    space.name
+                )))
+            }
+            (_, None) => return Ok(Output::RowsAffected(self.engine.execute(&sql, &[]).await?)),
+        };
+        let batches = stream.try_collect().await?;
+        Ok(Output::Rows { schema, batches })
+    }
+
+    /// A coordinator over `spaces`, each bound to its engine with the
+    /// tables this node may read.
+    async fn federate(&self, spaces: &[BrowserSpace]) -> Result<Coordinator, NodeError> {
+        let mut bound = Vec::with_capacity(spaces.len());
+        for space in spaces {
+            let (engine, engine_space): (Arc<dyn QueryEngine>, String) = match &space.remote {
+                None => (self.engine.clone(), space.name.clone()),
+                Some(remote) => {
+                    let transport = self.transport.clone().ok_or_else(|| {
+                        NodeError::Unsupported("remote spaces without a transport".to_string())
+                    })?;
+                    let engine = RemoteEngine::new(remote, self.identity.clone(), transport)?;
+                    (Arc::new(engine), remote.remote.clone())
+                }
+            };
+            let mut tables = Vec::new();
+            for table in engine.table_names(&space.name).await? {
+                let schema = engine
+                    .table_schema(&QualifiedName::new(&space.name, &table))
+                    .await?;
+                tables.push(BoundTable {
+                    name: table,
+                    schema,
+                    snapshot_id: None,
+                });
+            }
+            bound.push(BoundSpace {
+                space: space.name.clone(),
+                engine_space,
+                engine,
+                tables,
+            });
         }
+        // DataFusion spawns tasks to run partitions in parallel, and the
+        // browser has no runtime to spawn them on.
+        Ok(Coordinator::single_task(&bound)?)
     }
 }
 
@@ -261,6 +378,7 @@ fn statement_name(stmt: &OikomeStatement) -> &'static str {
         OikomeStatement::RevokeUcan(_) => "REVOKE UCAN",
         OikomeStatement::ShowUcans => "SHOW UCANS",
         OikomeStatement::ShowPeers => "SHOW PEERS",
+        OikomeStatement::ShowWebrtc => "SHOW WEBRTC (the browser node serves no peers)",
         _ => "this statement",
     }
 }

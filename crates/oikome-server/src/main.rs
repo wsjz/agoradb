@@ -24,9 +24,10 @@
 //! otherwise from `<root>/.oikome/identity/node_ed25519`, created on first use.
 
 use std::io::Read;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use arrow_cast::display::{ArrayFormatter, FormatOptions};
 use arrow_cast::pretty::pretty_format_batches;
@@ -35,8 +36,13 @@ use iceberg::io::FileIO;
 use oikome_catalog::OikomeCatalog;
 use oikome_discovery::{Discovery, DiscoveryConfig, EndpointResponse};
 use oikome_node::{EngineRegistry, NodeConfig, OikomeSession, QueryResult, SessionConfig};
-use oikome_server::{serve, OikomeFlightService};
-use tokio::net::TcpListener;
+use oikome_server::{serve, serve_webrtc, DtlsIdentity, OikomeFlightService};
+use tokio::net::{TcpListener, UdpSocket};
+
+/// The node's DTLS certificate for WebRTC, next to its key.
+const WEBRTC_DTLS_FILE: &str = "webrtc_dtls.json";
+/// How long an access record printed by `SHOW WEBRTC` stays valid.
+const WEBRTC_RECORD_TTL: Duration = Duration::from_secs(30 * 24 * 3600);
 
 #[derive(Parser)]
 #[command(
@@ -95,6 +101,14 @@ enum Command {
         /// libp2p address of a known peer to connect to (repeatable).
         #[arg(long)]
         dial: Vec<String>,
+        /// UDP address for browsers over WebRTC (e.g. 0.0.0.0:4433); off
+        /// when unset. `SHOW WEBRTC` prints the record browsers connect with.
+        #[arg(long, env = "OIKOME_WEBRTC_LISTEN")]
+        webrtc_listen: Option<SocketAddr>,
+        /// IP browsers reach the WebRTC endpoint at (published in the access
+        /// record); defaults to the listen IP.
+        #[arg(long, env = "OIKOME_WEBRTC_ADVERTISE")]
+        webrtc_advertise: Option<IpAddr>,
     },
 }
 
@@ -178,11 +192,15 @@ async fn run(cli: Cli) -> Result<(), BoxError> {
             p2p_listen,
             no_mdns,
             dial,
+            webrtc_listen,
+            webrtc_advertise,
         } => {
             if plaintext && !cli.allow_http {
                 return Err("--plaintext needs --allow-http".into());
             }
             let (catalog, engines) = open_node(&cli.root, cli.allow_http)?;
+            let catalog_dir = catalog.oikome_dir();
+            let record_path = catalog.webrtc_record_path();
             let tls = if plaintext {
                 None
             } else {
@@ -210,11 +228,60 @@ async fn run(cli: Cli) -> Result<(), BoxError> {
             for addr in dial {
                 discovery.dial(addr.parse()?).await?;
             }
-            serve(listener, service, tls.as_ref(), async {
+            let webrtc = match webrtc_listen {
+                Some(addr) => {
+                    let socket = UdpSocket::bind(addr).await?;
+                    let local = socket.local_addr()?;
+                    let ip = webrtc_advertise.unwrap_or(local.ip());
+                    if ip.is_unspecified() {
+                        return Err(
+                            "--webrtc-listen on an unspecified address needs --webrtc-advertise <ip>"
+                                .into(),
+                        );
+                    }
+                    let dtls = DtlsIdentity::load_or_create(
+                        &catalog_dir.join("identity").join(WEBRTC_DTLS_FILE),
+                    )?;
+                    let record = dtls.access_record(
+                        &identity,
+                        SocketAddr::new(ip, local.port()),
+                        WEBRTC_RECORD_TTL,
+                    )?;
+                    std::fs::write(&record_path, &record)?;
+                    tracing::info!(addr = %local, fingerprint = dtls.fingerprint(), "serving WebRTC (SHOW WEBRTC prints the access record)");
+                    Some((socket, dtls))
+                }
+                None => {
+                    // A record from an earlier run no longer points anywhere.
+                    let _ = std::fs::remove_file(&record_path);
+                    None
+                }
+            };
+            let service = Arc::new(service);
+            let (stop, stopped) = tokio::sync::watch::channel(false);
+            tokio::spawn(async move {
                 let _ = tokio::signal::ctrl_c().await;
                 tracing::info!("shutting down");
-            })
-            .await?;
+                let _ = stop.send(true);
+            });
+            let until_stopped = || {
+                let mut stopped = stopped.clone();
+                async move {
+                    let _ = stopped.wait_for(|s| *s).await;
+                }
+            };
+            let flight = serve(listener, service.clone(), tls.as_ref(), until_stopped());
+            match webrtc {
+                Some((socket, dtls)) => {
+                    let browsers = serve_webrtc(socket, &dtls, service, until_stopped());
+                    let (flight, browsers) = tokio::join!(flight, browsers);
+                    // Browsers can no longer connect with it.
+                    let _ = std::fs::remove_file(&record_path);
+                    flight?;
+                    browsers?;
+                }
+                None => flight.await?,
+            }
         }
     }
     Ok(())

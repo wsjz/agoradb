@@ -20,10 +20,12 @@ pub mod replay;
 pub mod service;
 
 use std::future::Future;
+use std::sync::Arc;
 
 use arrow_flight::flight_service_server::FlightServiceServer;
 use oikome_identity::TlsIdentity;
 use oikome_network::install_crypto_provider;
+pub use oikome_webrtc::DtlsIdentity;
 use tokio::net::TcpListener;
 use tonic::transport::server::TcpIncoming;
 use tonic::transport::{Identity, Server, ServerTlsConfig};
@@ -39,7 +41,7 @@ pub const MAX_HEADER_LIST_BYTES: u32 = 256 * 1024;
 /// plaintext with `None`.
 pub async fn serve(
     listener: TcpListener,
-    service: OikomeFlightService,
+    service: impl Into<Arc<OikomeFlightService>>,
     tls: Option<&TlsIdentity>,
     shutdown: impl Future<Output = ()> + Send,
 ) -> Result<(), tonic::transport::Error> {
@@ -53,7 +55,19 @@ pub async fn serve(
     }
     builder
         .http2_max_header_list_size(MAX_HEADER_LIST_BYTES)
-        .add_service(FlightServiceServer::new(service))
+        .add_service(FlightServiceServer::from_arc(service.into()))
         .serve_with_incoming_shutdown(TcpIncoming::from(listener), shutdown)
         .await
+}
+
+/// Serve browsers over WebRTC data channels on `socket` (architecture v3
+/// §10) until `shutdown` resolves, answering with the same `service` as
+/// Arrow Flight. `dtls` is the certificate the node's access record pins.
+pub async fn serve_webrtc(
+    socket: tokio::net::UdpSocket,
+    dtls: &DtlsIdentity,
+    service: Arc<OikomeFlightService>,
+    shutdown: impl Future<Output = ()>,
+) -> Result<(), oikome_webrtc::ServerError> {
+    oikome_webrtc::serve(socket, dtls, service, shutdown).await
 }

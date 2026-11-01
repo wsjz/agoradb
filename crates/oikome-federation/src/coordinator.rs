@@ -24,7 +24,7 @@ use datafusion::error::DataFusionError;
 use datafusion::execution::session_state::{SessionState, SessionStateBuilder};
 use datafusion::optimizer::Optimizer;
 use datafusion::physical_plan::displayable;
-use datafusion::prelude::SessionContext;
+use datafusion::prelude::{SessionConfig, SessionContext};
 use datafusion_federation::sql::{SQLFederationProvider, SQLTableSource};
 use datafusion_federation::{
     FederatedQueryPlanner, FederatedTableProviderAdaptor, FederationOptimizerRule,
@@ -34,6 +34,7 @@ use oikome_engine::{QueryEngine, RecordBatchStream};
 
 use crate::error::FederationError;
 use crate::executor::EngineSqlExecutor;
+use crate::single_task::MergeInOneTask;
 use crate::table::OikomeRemoteTable;
 
 /// One table an engine has attached, with the schema DataFusion plans against.
@@ -93,7 +94,10 @@ impl std::fmt::Debug for BoundSpace {
 /// already pushed to the leaf they belong to when subtrees are federated,
 /// so they become a `WHERE` in the engine SQL instead of a residual filter
 /// evaluated in the coordinator.
-fn session_state() -> SessionState {
+///
+/// With `single_task`, the plan has one partition where it can and merges
+/// partitions without spawning tasks ([`crate::single_task`]).
+fn session_state(single_task: bool) -> SessionState {
     let mut rules = Optimizer::new().rules;
     let pos = rules
         .iter()
@@ -101,11 +105,16 @@ fn session_state() -> SessionState {
         .map(|p| p + 1)
         .unwrap_or(rules.len());
     rules.insert(pos, Arc::new(FederationOptimizerRule::new()));
-    SessionStateBuilder::new()
+    let mut builder = SessionStateBuilder::new()
         .with_optimizer_rules(rules)
         .with_query_planner(Arc::new(FederatedQueryPlanner::new()))
-        .with_default_features()
-        .build()
+        .with_default_features();
+    if single_task {
+        builder = builder
+            .with_config(SessionConfig::new().with_target_partitions(1))
+            .with_physical_optimizer_rule(Arc::new(MergeInOneTask));
+    }
+    builder.build()
 }
 
 /// A DataFusion session over a fixed set of bound Spaces.
@@ -118,7 +127,17 @@ impl Coordinator {
     /// Build a session in which `<space>.<table>` resolves to a federated
     /// table backed by that Space's engine.
     pub fn new(spaces: &[BoundSpace]) -> Result<Self, FederationError> {
-        let ctx = SessionContext::new_with_state(session_state());
+        Self::build(spaces, false)
+    }
+
+    /// Like [`new`](Self::new), but executing in the task that polls the
+    /// result, for runtimes without Tokio (the browser node).
+    pub fn single_task(spaces: &[BoundSpace]) -> Result<Self, FederationError> {
+        Self::build(spaces, true)
+    }
+
+    fn build(spaces: &[BoundSpace], single_task: bool) -> Result<Self, FederationError> {
+        let ctx = SessionContext::new_with_state(session_state(single_task));
         let default_catalog = ctx.state().config_options().catalog.default_catalog.clone();
         let catalog: Arc<dyn CatalogProvider> = ctx.catalog(&default_catalog).ok_or_else(|| {
             DataFusionError::Internal(format!("default catalog '{default_catalog}' missing"))

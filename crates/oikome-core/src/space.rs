@@ -113,6 +113,9 @@ pub enum EngineKind {
     /// An engine provided by the host the node is embedded in: duckdb-wasm
     /// in the browser node (architecture v3 §10). Native nodes have none.
     Host,
+    /// A Full Node reached by the browser node over a WebRTC data channel
+    /// (remote Spaces of the browser node).
+    WebRtc,
 }
 
 impl fmt::Display for EngineKind {
@@ -122,6 +125,7 @@ impl fmt::Display for EngineKind {
             EngineKind::Sqlite => f.write_str("sqlite"),
             EngineKind::Flight => f.write_str("flight"),
             EngineKind::Host => f.write_str("host"),
+            EngineKind::WebRtc => f.write_str("webrtc"),
         }
     }
 }

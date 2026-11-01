@@ -119,8 +119,9 @@ pub fn engine_reads(engine: EngineKind, format: &LocationFormat) -> bool {
     match (engine, format) {
         (EngineKind::Flight, LocationFormat::Remote { .. }) => true,
         (_, LocationFormat::Remote { .. }) | (EngineKind::Flight, _) => false,
-        // Host engines live in the browser node, which has its own registry.
-        (EngineKind::Host, _) => false,
+        // Host and WebRTC engines live in the browser node, which has its
+        // own registry.
+        (EngineKind::Host | EngineKind::WebRtc, _) => false,
         (EngineKind::DuckDb, _) => true,
         (EngineKind::Sqlite, LocationFormat::SqliteFile { .. }) => true,
         (

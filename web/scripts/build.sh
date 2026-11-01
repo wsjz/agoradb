@@ -8,6 +8,9 @@
 # DataFusion pulls in zstd (C), so a clang with a wasm32 backend is needed:
 # Homebrew LLVM on macOS (Apple's clang has none), the distribution clang on
 # Linux. Override with CC_wasm32_unknown_unknown / AR_wasm32_unknown_unknown.
+#
+# PROFILE defaults to `wasm` (Cargo.toml: size-optimized, LTO, stripped);
+# PROFILE=release keeps symbol names for readable panic stacks.
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -24,7 +27,7 @@ if [[ -z ${CC_wasm32_unknown_unknown:-} ]]; then
     done
 fi
 
-PROFILE=${PROFILE:-release}
+PROFILE=${PROFILE:-wasm}
 (cd "$ROOT" && cargo build -p oikome-wasm --target wasm32-unknown-unknown --profile "$PROFILE")
 wasm-bindgen --target web --out-dir "$WEB/pkg" \
     "$ROOT/target/wasm32-unknown-unknown/$PROFILE/oikome_wasm.wasm"

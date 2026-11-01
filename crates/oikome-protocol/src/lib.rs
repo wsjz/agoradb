@@ -40,6 +40,8 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 
+pub mod webrtc;
+
 /// Header carrying the signed request (base64url JSON `AuthRequest`).
 pub const HEADER_AUTH: &str = "x-oikome-auth";
 /// Header carrying the UCAN.
@@ -161,6 +163,41 @@ pub fn schema_payload(space: &str, table: &str) -> Vec<u8> {
     format!("{}\n{space}\n{table}", space.len()).into_bytes()
 }
 
+/// The Space and table of a [`schema_payload`].
+pub fn parse_schema_payload(payload: &[u8]) -> Option<(String, String)> {
+    let text = std::str::from_utf8(payload).ok()?;
+    let (len, rest) = text.split_once('\n')?;
+    let len: usize = len.parse().ok()?;
+    let space = rest.get(..len)?;
+    let table = rest.get(len..)?.strip_prefix('\n')?;
+    Some((space.to_string(), table.to_string()))
+}
+
+/// A result set as an Arrow IPC stream.
+pub fn encode_stream(
+    schema: &SchemaRef,
+    batches: &[arrow_array::RecordBatch],
+) -> Result<Vec<u8>, ArrowError> {
+    let mut buf = Vec::new();
+    let mut writer = arrow_ipc::writer::StreamWriter::try_new(&mut buf, schema)?;
+    for batch in batches {
+        writer.write(batch)?;
+    }
+    writer.finish()?;
+    drop(writer);
+    Ok(buf)
+}
+
+/// Decode an Arrow IPC stream into its schema and batches.
+pub fn decode_stream(
+    bytes: Vec<u8>,
+) -> Result<(SchemaRef, Vec<arrow_array::RecordBatch>), ArrowError> {
+    let reader = arrow_ipc::reader::StreamReader::try_new(Cursor::new(bytes), None)?;
+    let schema = reader.schema();
+    let batches = reader.collect::<Result<Vec<_>, _>>()?;
+    Ok((schema, batches))
+}
+
 /// Digest of a call, as signed by the caller: `method`, its payload and the
 /// UCAN presented with it.
 pub fn digest(method: &str, payload: &[u8], ucan: &str) -> [u8; 32] {
@@ -190,6 +227,19 @@ mod tests {
             assert!(!is_identifier(bad), "{bad}");
         }
         assert!(!is_identifier(&"a".repeat(MAX_IDENTIFIER_BYTES + 1)));
+    }
+
+    #[test]
+    fn schema_payloads_parse_back() {
+        for (space, table) in [("blog", "posts"), ("a", "b\nc"), ("a\nb", "c")] {
+            assert_eq!(
+                parse_schema_payload(&schema_payload(space, table)),
+                Some((space.to_string(), table.to_string()))
+            );
+        }
+        for bad in [&b""[..], b"x\nab", b"9\nab\ncd", b"\xff"] {
+            assert_eq!(parse_schema_payload(bad), None);
+        }
     }
 
     #[test]

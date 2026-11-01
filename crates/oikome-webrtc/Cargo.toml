@@ -1,0 +1,23 @@
+[package]
+name = "oikome-webrtc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Oikome WebRTC endpoint: browsers reach a Full Node over a data channel pinned by a DID-signed record"
+
+[dependencies]
+oikome-identity = { path = "../oikome-identity" }
+oikome-protocol = { path = "../oikome-protocol" }
+async-trait = { workspace = true }
+base64 = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+str0m = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

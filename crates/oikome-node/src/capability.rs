@@ -199,6 +199,25 @@ impl OikomeSession {
     }
 
     /// `SHOW PEERS`: nodes found by discovery and the endpoint each announced.
+    /// `SHOW WEBRTC`: the access record a serving node signed for browsers
+    /// (architecture v3 §10), to hand to a browser as `PEER = '<record>'`.
+    pub(crate) fn show_webrtc(&self) -> Result<QueryResult, SessionError> {
+        let record = match std::fs::read_to_string(self.catalog.webrtc_record_path()) {
+            Ok(record) => record,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(SessionError::Unsupported(
+                    "this node is not serving WebRTC; start it with `serve --webrtc-listen`"
+                        .to_string(),
+                ))
+            }
+            Err(e) => return Err(CatalogError::Io(e).into()),
+        };
+        batch(
+            vec![Field::new("record", DataType::Utf8, false)],
+            vec![Arc::new(StringArray::from(vec![record.trim().to_string()]))],
+        )
+    }
+
     pub(crate) fn show_peers(&self) -> Result<QueryResult, SessionError> {
         // Discovery records peers from the serving process.
         self.catalog.refresh()?;

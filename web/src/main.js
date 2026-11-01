@@ -19,6 +19,7 @@ import { tableFromIPC } from "apache-arrow";
 import init, { OikomeNode } from "../pkg/oikome_wasm.js";
 import { createEngine } from "./host.js";
 import { openStore } from "./store.js";
+import { createTransport } from "./transport.js";
 
 /** Rows of an Arrow IPC stream as plain objects (BigInt as Number). */
 function rows(ipc) {
@@ -33,9 +34,11 @@ function rows(ipc) {
 
 async function boot() {
   await init({ module_or_path: new URL("../pkg/oikome_wasm_bg.wasm", import.meta.url) });
-  const node = await OikomeNode.open(await createEngine(), await openStore());
+  const transport = createTransport();
+  const node = await OikomeNode.open(await createEngine(), await openStore(), transport);
   window.oikome = {
     did: () => node.did(),
+    transport,
     async sql(text) {
       const result = await node.sql(text);
       return result.ipc ? rows(result.ipc) : { rowsAffected: result.rowsAffected ?? null };

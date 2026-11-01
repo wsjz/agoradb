@@ -38,6 +38,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
+use arrow_array::RecordBatch;
 use arrow_flight::encode::FlightDataEncoderBuilder;
 use arrow_flight::error::FlightError;
 use arrow_flight::flight_service_server::FlightService;
@@ -46,21 +47,23 @@ use arrow_flight::{
     HandshakeRequest, HandshakeResponse, PollInfo, PutResult, SchemaAsIpc, SchemaResult, Ticket,
 };
 use arrow_ipc::writer::IpcWriteOptions;
+use arrow_schema::SchemaRef;
 use futures::stream;
 use futures::{StreamExt, TryStreamExt};
 use oikome_catalog::{LocationFormat, OikomeCatalog, Space};
 use oikome_core::{CatalogError, SpaceKind};
-use oikome_engine::EngineError;
+use oikome_engine::{EngineError, RecordBatchStream};
 use oikome_identity::ucan::{
     self, Capability, VerifyOptions, ABILITY_QUERY, ABILITY_READ, MAX_TOKEN_BYTES,
 };
 use oikome_identity::{unix_now, unix_now_ms, AuthRequest, Did, NodeIdentity};
+use oikome_network::protocol::webrtc::{encode_reply, Envelope, ReplyHeader};
 use oikome_network::protocol::{
-    digest, encode_schema, is_file_hash, is_identifier, schema_payload, FetchFileRequest,
-    FileEntry, ListTablesRequest, ListTablesResponse, QueryTicket, SnapshotRequest,
-    SnapshotResponse, TableSnapshot, ACTION_FETCH_FILE, ACTION_LIST_TABLES, ACTION_SNAPSHOT,
-    FILE_CHUNK_BYTES, HEADER_AUTH, HEADER_UCAN, MAX_SQL_BYTES, METHOD_DO_GET, METHOD_FETCH_FILE,
-    METHOD_GET_SCHEMA, METHOD_LIST_TABLES, METHOD_SNAPSHOT,
+    digest, encode_schema, encode_stream, is_file_hash, is_identifier, parse_schema_payload,
+    schema_payload, FetchFileRequest, FileEntry, ListTablesRequest, ListTablesResponse,
+    QueryTicket, SnapshotRequest, SnapshotResponse, TableSnapshot, ACTION_FETCH_FILE,
+    ACTION_LIST_TABLES, ACTION_SNAPSHOT, FILE_CHUNK_BYTES, HEADER_AUTH, HEADER_UCAN, MAX_SQL_BYTES,
+    METHOD_DO_GET, METHOD_FETCH_FILE, METHOD_GET_SCHEMA, METHOD_LIST_TABLES, METHOD_SNAPSHOT,
 };
 use oikome_node::{query_spaces, EngineRegistry, OikomeSession, SessionConfig, SessionError};
 use oikome_semantic::rewrite::quote_ident;
@@ -195,15 +198,31 @@ impl OikomeFlightService {
         method: &str,
         payload: &[u8],
     ) -> Result<Caller, Status> {
+        self.authenticate_parts(
+            Self::header(request, HEADER_AUTH),
+            Self::header(request, HEADER_UCAN),
+            method,
+            payload,
+        )
+    }
+
+    /// Step 1 on the values of the two headers, whatever carried them.
+    fn authenticate_parts(
+        &self,
+        auth: Option<&str>,
+        ucan: Option<&str>,
+        method: &str,
+        payload: &[u8],
+    ) -> Result<Caller, Status> {
         let fail = |reason: &str| {
             tracing::info!(%reason, method, "peer authentication failed");
             Status::unauthenticated("authentication failed")
         };
-        let ucan = Self::header(request, HEADER_UCAN).ok_or_else(|| fail("missing UCAN"))?;
+        let ucan = ucan.ok_or_else(|| fail("missing UCAN"))?;
         if ucan.len() > MAX_TOKEN_BYTES {
             return Err(fail("UCAN too large"));
         }
-        let auth = Self::header(request, HEADER_AUTH)
+        let auth = auth
             .ok_or_else(|| fail("missing auth header"))
             .and_then(|h| AuthRequest::from_header(h).map_err(|e| fail(&e.to_string())))?;
         let now = unix_now_ms();
@@ -296,13 +315,17 @@ impl OikomeFlightService {
             return Err(Status::invalid_argument("request too large"));
         }
         let caller = self.authenticate(&request, METHOD_LIST_TABLES, &body)?;
-        let req: ListTablesRequest = serde_json::from_slice(&body)
+        self.list_tables_for(&caller, &body).await
+    }
+
+    async fn list_tables_for(&self, caller: &Caller, body: &[u8]) -> Result<Vec<u8>, Status> {
+        let req: ListTablesRequest = serde_json::from_slice(body)
             .map_err(|e| Status::invalid_argument(format!("list_tables request: {e}")))?;
         if !is_identifier(&req.space) {
             return Err(Status::invalid_argument("invalid space name"));
         }
         let principal =
-            self.authorize(&caller, &BTreeSet::from([req.space.clone()]), ABILITY_QUERY)?;
+            self.authorize(caller, &BTreeSet::from([req.space.clone()]), ABILITY_QUERY)?;
         let tables = self
             .session(principal)
             .readable_relations(&req.space)
@@ -453,6 +476,129 @@ impl OikomeFlightService {
     }
 }
 
+impl OikomeFlightService {
+    /// Schema of `space.table` as `caller`'s principal sees it.
+    async fn schema_for(
+        &self,
+        caller: &Caller,
+        space: &str,
+        table: &str,
+    ) -> Result<SchemaRef, Status> {
+        let principal =
+            self.authorize(caller, &BTreeSet::from([space.to_string()]), ABILITY_QUERY)?;
+        // Both names are validated identifiers, and quoted on top.
+        let sql = format!(
+            "SELECT * FROM {}.{} LIMIT 0",
+            quote_ident(space),
+            quote_ident(table)
+        );
+        let (schema, _) = self
+            .session(principal)
+            .sql_stream(&sql)
+            .await
+            .map_err(session_status)?;
+        Ok(schema)
+    }
+
+    /// Run the query of a ticket for `caller`'s principal.
+    async fn query_for(
+        &self,
+        caller: &Caller,
+        ticket: &[u8],
+    ) -> Result<(SchemaRef, RecordBatchStream), Status> {
+        let QueryTicket { sql } = serde_json::from_slice(ticket)
+            .map_err(|e| Status::invalid_argument(format!("ticket: {e}")))?;
+        let spaces = query_spaces(&sql).map_err(session_status)?;
+        let principal = self.authorize(caller, &spaces, ABILITY_QUERY)?;
+        tracing::debug!(caller = %caller.did, %principal, ?spaces, "serving peer query");
+        self.session(principal)
+            .sql_stream(&sql)
+            .await
+            .map_err(session_status)
+    }
+
+    /// Serve one call that did not come over Arrow Flight (a browser's
+    /// WebRTC channel, §10): the same authentication, authorization and
+    /// semantic layer, with the result as one message — an Arrow IPC stream
+    /// for `do_get` and `get_schema`, JSON for `list_tables`.
+    pub async fn serve_envelope(&self, envelope: &Envelope) -> Result<Vec<u8>, Status> {
+        let payload = envelope
+            .payload()
+            .map_err(|e| Status::invalid_argument(e.to_string()))?;
+        let caller = self.authenticate_parts(
+            Some(&envelope.auth),
+            Some(&envelope.ucan),
+            &envelope.method,
+            &payload,
+        )?;
+        let ipc = |schema: &SchemaRef, batches: &[RecordBatch]| {
+            encode_stream(schema, batches).map_err(|e| Status::internal(e.to_string()))
+        };
+        match envelope.method.as_str() {
+            METHOD_LIST_TABLES if payload.len() <= MAX_ACTION_BODY_BYTES => {
+                self.list_tables_for(&caller, &payload).await
+            }
+            METHOD_GET_SCHEMA => {
+                let (space, table) = parse_schema_payload(&payload)
+                    .filter(|(s, t)| is_identifier(s) && is_identifier(t))
+                    .ok_or_else(|| Status::invalid_argument("invalid space or table name"))?;
+                ipc(&self.schema_for(&caller, &space, &table).await?, &[])
+            }
+            METHOD_DO_GET if payload.len() <= MAX_SQL_BYTES + 64 => {
+                let (schema, stream) = self.query_for(&caller, &payload).await?;
+                let batches: Vec<RecordBatch> = stream
+                    .try_collect()
+                    .await
+                    .map_err(|e| session_status(e.into()))?;
+                ipc(&schema, &batches)
+            }
+            METHOD_LIST_TABLES | METHOD_DO_GET => {
+                Err(Status::invalid_argument("request too large"))
+            }
+            _ => Err(Status::unimplemented("unknown method")),
+        }
+    }
+}
+
+/// The reply status for a gRPC code, as sent over WebRTC.
+fn status_name(code: tonic::Code) -> &'static str {
+    use tonic::Code;
+    match code {
+        Code::Ok => "ok",
+        Code::Unauthenticated => "unauthenticated",
+        Code::PermissionDenied => "permission_denied",
+        Code::NotFound => "not_found",
+        Code::InvalidArgument => "invalid_argument",
+        Code::FailedPrecondition => "failed_precondition",
+        Code::ResourceExhausted => "resource_exhausted",
+        Code::Unimplemented => "unimplemented",
+        _ => "internal",
+    }
+}
+
+#[async_trait::async_trait]
+impl oikome_webrtc::Handler for OikomeFlightService {
+    async fn call(&self, envelope: Envelope) -> Vec<u8> {
+        let (header, body) = match self.serve_envelope(&envelope).await {
+            Ok(body) => (
+                ReplyHeader {
+                    status: "ok".to_string(),
+                    message: String::new(),
+                },
+                body,
+            ),
+            Err(status) => (
+                ReplyHeader {
+                    status: status_name(status.code()).to_string(),
+                    message: status.message().to_string(),
+                },
+                Vec::new(),
+            ),
+        };
+        encode_reply(&header, &body)
+    }
+}
+
 fn single_result(body: Vec<u8>) -> FlightStream<arrow_flight::Result> {
     stream::once(async move { Ok(arrow_flight::Result { body: body.into() }) }).boxed()
 }
@@ -511,18 +657,7 @@ impl FlightService for OikomeFlightService {
         }
         let caller =
             self.authenticate(&request, METHOD_GET_SCHEMA, &schema_payload(space, table))?;
-        let principal = self.authorize(&caller, &BTreeSet::from([space.clone()]), ABILITY_QUERY)?;
-        // Both names are validated identifiers, and quoted on top.
-        let sql = format!(
-            "SELECT * FROM {}.{} LIMIT 0",
-            quote_ident(space),
-            quote_ident(table)
-        );
-        let (schema, _) = self
-            .session(principal)
-            .sql_stream(&sql)
-            .await
-            .map_err(session_status)?;
+        let schema = self.schema_for(&caller, space, table).await?;
         let result: SchemaResult = SchemaAsIpc::new(&schema, &IpcWriteOptions::default())
             .try_into()
             .map_err(|e: arrow_schema::ArrowError| Status::internal(e.to_string()))?;
@@ -539,16 +674,7 @@ impl FlightService for OikomeFlightService {
             return Err(Status::invalid_argument("query too large"));
         }
         let caller = self.authenticate(&request, METHOD_DO_GET, &ticket)?;
-        let QueryTicket { sql } = serde_json::from_slice(&ticket)
-            .map_err(|e| Status::invalid_argument(format!("ticket: {e}")))?;
-        let spaces = query_spaces(&sql).map_err(session_status)?;
-        let principal = self.authorize(&caller, &spaces, ABILITY_QUERY)?;
-        tracing::debug!(caller = %caller.did, %principal, ?spaces, "serving peer query");
-        let (schema, batches) = self
-            .session(principal)
-            .sql_stream(&sql)
-            .await
-            .map_err(session_status)?;
+        let (schema, batches) = self.query_for(&caller, &ticket).await?;
         let flight = FlightDataEncoderBuilder::new()
             .with_schema(schema)
             .build(batches.map_err(|e| FlightError::ExternalError(Box::new(e))))

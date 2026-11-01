@@ -22,12 +22,14 @@
 //!                           LOCATION = '<location id>',
 //!                           ACCESS = 'writable' | 'readonly',
 //!                           STORAGE = 'disk']
-//! CREATE SPACE <name> WITH TOKEN = '<ucan>' [, PEER = 'https://host:port']
+//! CREATE SPACE <name> WITH TOKEN = '<ucan>' [, PEER = 'https://host:port'
+//!                                             | 'webrtc:<record>' (browser node)]
 //!                          [, REMOTE = '<space on the peer>'] [, KIND = 'remote']
 //!                          [, MODE = 'query' | 'subscribe']
 //! DROP SPACE <name>
 //! REFRESH SPACE <name>
 //! SHOW PEERS
+//! SHOW WEBRTC
 //! SET SPACE [=] <name>
 //! PUBLISH SPACE <name> [TABLES (<table>, ...)] [TO <target space>]
 //! ```
@@ -69,6 +71,8 @@ pub enum OikomeStatement {
     ShowUcans,
     /// `SHOW PEERS`: nodes found by discovery.
     ShowPeers,
+    /// `SHOW WEBRTC`: the signed access record browsers connect with.
+    ShowWebrtc,
     /// Any standard SQL statement.
     Sql(Box<Statement>),
 }
@@ -125,7 +129,7 @@ fn parse_one(stmt: &str) -> Result<OikomeStatement, SemanticError> {
         (Some("PUBLISH"), Some("SPACE")) => parse_publish(stmt),
         (Some("ISSUE"), Some("UCAN")) => Ok(OikomeStatement::IssueUcan(parse_issue_ucan(stmt)?)),
         (Some("REVOKE"), Some("UCAN")) => Ok(OikomeStatement::RevokeUcan(parse_revoke_ucan(stmt)?)),
-        (Some("SHOW"), Some(second @ ("IDENTITY" | "UCANS" | "PEERS"))) => {
+        (Some("SHOW"), Some(second @ ("IDENTITY" | "UCANS" | "PEERS" | "WEBRTC"))) => {
             if words.len() > 2 {
                 return Err(SemanticError::Parse(format!(
                     "SHOW {second}: unexpected input after {second}"
@@ -134,7 +138,8 @@ fn parse_one(stmt: &str) -> Result<OikomeStatement, SemanticError> {
             Ok(match second {
                 "IDENTITY" => OikomeStatement::ShowIdentity,
                 "UCANS" => OikomeStatement::ShowUcans,
-                _ => OikomeStatement::ShowPeers,
+                "PEERS" => OikomeStatement::ShowPeers,
+                _ => OikomeStatement::ShowWebrtc,
             })
         }
         (Some("SET"), Some("SPACE")) => {
@@ -475,6 +480,10 @@ mod tests {
             OikomeStatement::ShowPeers
         );
         assert!(parse_single("SHOW PEERS now").is_err());
+        assert_eq!(
+            parse_single("show webrtc").unwrap(),
+            OikomeStatement::ShowWebrtc
+        );
     }
 
     #[test]

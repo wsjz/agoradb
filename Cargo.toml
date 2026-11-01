@@ -71,6 +71,10 @@ web-time = "1.1.0"
 wasm-bindgen = "=0.2.108"
 wasm-bindgen-futures = "0.4.58"
 js-sys = "0.3.85"
+# WebRTC endpoint of a Full Node for browsers (crates/oikome-webrtc): pure
+# Rust crypto (dimpl DTLS, sctp-proto), no C library.
+str0m = { version = "=0.24.1", default-features = false, features = ["rust-crypto"] }
+sha2 = "0.10"
 zeroize = "1"
 arrow-flight = "58.4"
 tonic = { version = "0.14.6", features = ["tls-ring"] }
@@ -89,3 +93,12 @@ tokio-test = "0.4"
 # this copy only declares `default-features = false` (third_party/README.md).
 [patch.crates-io]
 datafusion-federation = { path = "third_party/datafusion-federation" }
+
+# The browser node's WebAssembly (web/scripts/build.sh): smallest code,
+# no symbol names. Native release builds are unaffected.
+[profile.wasm]
+inherits = "release"
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
